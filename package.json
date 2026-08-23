@@ -1,0 +1,55 @@
+{
+  "name": "@aiwayds/dsh-feishu",
+  "version": "0.1.0",
+  "description": "dsh plugin: drive an existing dsh session from Feishu/Lark — outbound-only WebSocket bot, /resume session picker, run status card, assistant replies (never creates sessions)",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "feishu",
+    "lark",
+    "bot",
+    "remote"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fan56/dsh-feishu.git"
+  },
+  "homepage": "https://github.com/fan56/dsh-feishu",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "link-closure": "node scripts/link-dsh-closure.mjs",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "precheck": "node scripts/link-dsh-closure.mjs",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "author": "fan56",
+  "private": true
+}

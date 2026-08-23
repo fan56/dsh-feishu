@@ -1,0 +1,127 @@
+/**
+ * Persisted bot state (bound session, think-display preference, last chat).
+ * Preferred backend: the dsh settings service, under this plugin's own
+ * `dsh-feishu` namespace (schema-validated, survives restarts, visible in
+ * dsh's settings surfaces). Degrades to an in-memory copy when no settings
+ * provider is mounted — the bot still works, it just re-binds after a
+ * restart.
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
+
+/** What the bot persists. */
+export interface BotState {
+  /** Bound root session id, when the bot is attached to one. */
+  boundSessionId: string | undefined
+  /** Whether the think/tool tail line is rendered on the status card. */
+  displayThink: boolean
+  /** Last chat the operator wrote from — where status cards go. */
+  lastChatId: string | undefined
+}
+
+const DEFAULT_STATE: BotState = {
+  boundSessionId: undefined,
+  displayThink: false,
+  lastChatId: undefined,
+}
+
+const STATE_NAMESPACE = settingsNamespace('dsh-feishu')
+
+const STATE_SCHEMA = z.object({
+  boundSessionId: z.string().default(''),
+  displayThink: z.boolean().default(false),
+  lastChatId: z.string().default(''),
+}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string }>
+
+function fromSection(section: unknown): BotState {
+  const value = (section ?? {}) as Partial<Record<keyof BotState, unknown>>
+  return {
+    boundSessionId: typeof value.boundSessionId === 'string' && value.boundSessionId !== ''
+      ? value.boundSessionId
+      : undefined,
+    displayThink: value.displayThink === true,
+    lastChatId: typeof value.lastChatId === 'string' && value.lastChatId !== ''
+      ? value.lastChatId
+      : undefined,
+  }
+}
+
+/**
+ * Settings-backed state store. Construction registers the namespace through
+ * `ctx.inject(['settings'])` (no-op without the service); `ready()` resolves
+ * once registration settled so early reads see the persisted values.
+ */
+export class StateStore {
+  private readonly memory: BotState = { ...DEFAULT_STATE }
+  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string }> | undefined
+  private readonly registration: Promise<void>
+
+  constructor(ctx: Context) {
+    this.registration = new Promise<void>(resolve => {
+      let settled = false
+      const finish = () => {
+        if (!settled) {
+          settled = true
+          resolve()
+        }
+      }
+      ctx.inject(['settings'], sctx => {
+        try {
+          if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
+            this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
+              base: { boundSessionId: '', displayThink: false, lastChatId: '' },
+              applies: 'live',
+            })
+          }
+          // Already-registered (plugin reload / second mount): the provider
+          // hands a scope only to the registrant, so this instance degrades
+          // to the in-memory copy — binding survives, persistence does not.
+        } catch {
+          // Registration failed — degrade to memory.
+        }
+        finish()
+        return () => {
+          this.scope = undefined
+        }
+      })
+      // The injection rides the settings fiber; do not block state reads
+      // forever when it never fires (no settings service in this profile).
+      setTimeout(finish, 2000).unref?.()
+    })
+  }
+
+  /** Wait (bounded) for the settings registration so first reads see disk. */
+  async ready(): Promise<void> {
+    await this.registration
+  }
+
+  /** Current snapshot. */
+  get(): BotState {
+    if (this.scope !== undefined) {
+      try {
+        return fromSection(this.scope.get())
+      } catch {
+        return { ...this.memory }
+      }
+    }
+    return { ...this.memory }
+  }
+
+  /** Merge a patch and persist it. Never throws. */
+  async update(patch: Partial<BotState>): Promise<void> {
+    const next = { ...this.get(), ...patch }
+    Object.assign(this.memory, next)
+    if (this.scope === undefined) return
+    try {
+      await this.scope.update({
+        boundSessionId: next.boundSessionId ?? '',
+        displayThink: next.displayThink,
+        lastChatId: next.lastChatId ?? '',
+      })
+    } catch {
+      // Persistence failed — the in-memory copy still serves this run.
+    }
+  }
+}

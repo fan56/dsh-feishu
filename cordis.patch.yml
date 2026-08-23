@@ -1,0 +1,21 @@
+# dsh-feishu bundle patch: mounts the Feishu/Lark bridge plugin into the
+# profile's assembly tree under the stable plugin id `dsh-feishu`. The plugin
+# holds an outbound-only Lark WebSocket connection, attaches to EXISTING dsh
+# sessions (/resume picker, never creates one), and renders run status cards.
+#
+# Mount with a local path (private plugin, not on npm):
+#   dsh plugin add /path/to/dsh-feishu
+# or list it under dsh.profile.bundles — this patch is then applied
+# automatically and no manual cordis.patch.yml editing is needed.
+#
+# Configuration lives here (config:) or in the `dsh-feishu` settings
+# namespace; see README.md for every key.
+
+- insert:
+    - id: dsh-feishu
+      name: '@aiwayds/dsh-feishu'
+      config:
+        mode: on
+        # operators:            # Feishu open_id allowlist — REQUIRED to arm the bot
+        #   - ou_xxxxxxxxxxxxxx
+        # domain: feishu        # feishu | lark

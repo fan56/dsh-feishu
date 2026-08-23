@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { resolveConfig } from '../lib/config.js'
+
+test('defaults apply for an empty config', () => {
+  const resolved = resolveConfig({}, {})
+  assert.equal(resolved.mode, 'on')
+  assert.equal(resolved.domain, 'feishu')
+  assert.deepEqual(resolved.operators, [])
+  assert.equal(resolved.statusIntervalMs, 30000)
+  assert.equal(resolved.bodySegmentChars, 3500)
+  assert.equal(resolved.appIdRef, 'dsh-feishu-app-id')
+  assert.equal(resolved.appSecretRef, 'dsh-feishu-app-secret')
+  assert.equal(resolved.appId, undefined)
+  assert.equal(resolved.appSecret, undefined)
+})
+
+test('unknown config keys throw (a typo must not silently disarm)', () => {
+  assert.throws(() => resolveConfig({ operator: ['ou_a'] }, {}), /unknown config key "operator"/)
+})
+
+test('env supplies credentials when config omits them', () => {
+  const resolved = resolveConfig({}, {
+    DSH_FEISHU_APP_ID: 'cli_a',
+    DSH_FEISHU_APP_SECRET: 'sec',
+  })
+  assert.equal(resolved.appId, 'cli_a')
+  assert.equal(resolved.appSecret, 'sec')
+})
+
+test('config credentials win over env', () => {
+  const resolved = resolveConfig(
+    { appId: 'cli_config', appSecret: 'sec_config' },
+    { DSH_FEISHU_APP_ID: 'cli_env', DSH_FEISHU_APP_SECRET: 'sec_env' },
+  )
+  assert.equal(resolved.appId, 'cli_config')
+  assert.equal(resolved.appSecret, 'sec_config')
+})
+
+test('mode off and domain lark are honored', () => {
+  const resolved = resolveConfig({ mode: 'off', domain: 'lark' }, {})
+  assert.equal(resolved.mode, 'off')
+  assert.equal(resolved.domain, 'lark')
+})
+
+test('out-of-range numeric options throw', () => {
+  assert.throws(() => resolveConfig({ statusIntervalMs: 1000 }, {}), /statusIntervalMs/)
+  assert.throws(() => resolveConfig({ bodySegmentChars: 100 }, {}), /bodySegmentChars/)
+})
