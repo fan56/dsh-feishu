@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildResumeRows,
-  formatResumeTable,
   isResumableSessionHeader,
   pickResumeRow,
   previewOfEvents,
@@ -79,19 +78,6 @@ test('inspect enriches preview and lastTime; failures degrade to a fallback', as
   const broken = rows.find(r => r.sessionId === 'broken')
   assert.match(broken.preview, /^tmp · broken$/) // cwd basename + short id fallback
   assert.equal(broken.lastTime, undefined)
-})
-
-test('formatResumeTable renders index rows and the reply hint', () => {
-  const rows = [
-    { index: 1, sessionId: 'abcdefgh1234', dir: 'repo', createdAt: 100, lastTime: 200, preview: 'first prompt' },
-    { index: 2, sessionId: 'zz', dir: 'tmp', createdAt: 50, lastTime: undefined, preview: 'tmp · zz' },
-  ]
-  const text = formatResumeTable(rows, 1000)
-  assert.match(text, /📋 可恢复会话（最近）：/)
-  assert.match(text, /1\. repo · .* · first prompt/)
-  assert.match(text, /2\. tmp · .* · tmp · zz/)
-  assert.match(text, /回复 \/resume N 进入对应会话/)
-  assert.equal(formatResumeTable([], 0), '没有可恢复的会话。')
 })
 
 test('pickResumeRow bounds-checks the index', () => {

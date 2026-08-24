@@ -13,7 +13,8 @@
 
 import type { RunState } from './run-state.ts'
 import { contextTokensEstimate, reasoningTail, subagentDisplayLabel, subagentRows } from './run-state.ts'
-import { clipLine, formatDuration } from './text.ts'
+import { clipLine, formatDuration, formatWhen } from './text.ts'
+import type { ResumeRow } from './resume-table.ts'
 
 /**
  * Feishu legacy interactive card (structural — sent as JSON string). Still the
@@ -343,4 +344,64 @@ export function buildProgressCard(body: string, footer: string): Schema2Card {
     config: { width_mode: 'fill' },
     body: { elements },
   }
+}
+
+// ---------------------------------------------------------- /resume picker --
+
+/**
+ * Session-cell text of a picker row: `preview · dir`, skipping the dir when
+ * the inspect-failed fallback preview already embeds it. The fallback is
+ * always exactly `${dir} · ${short-id}` (see {@link buildResumeRows}), so an
+ * exact prefix match avoids the false positives a substring test would hit
+ * (e.g. preview "fix repo bugs" with dir "repo").
+ */
+function sessionCell(row: ResumeRow): string {
+  return row.preview.startsWith(`${row.dir} ·`) ? row.preview : `${row.preview} · ${row.dir}`
+}
+
+/**
+ * Build the `/resume` session-picker card (schema 2.0): a native table element
+ * (`tag: 'table'`, card JSON 2.0; Feishu client ≥7.20) with three narrow columns
+ — `#` for the `/resume N` index, `会话` (`preview · dir`), `时间` — so the list
+ * stays readable on a phone. Rows arrive already truncated by
+ * {@link buildResumeRows}; an empty list degrades to a plain markdown notice
+ * instead of rendering an empty table.
+ */
+export function buildSessionListCard(rowsInput: readonly ResumeRow[], now = Date.now()): Schema2Card {
+  // The rendered `#` column must agree with `pickResumeRow`'s positional
+  // `/resume N` lookup (`rows[n - 1]`). Normalize the order defensively (a
+  // caller may hand over unsorted rows), then assert the 1-based contiguity
+  // contract — a violation is a caller bug that would render a misleading
+  // picker, so fail loudly rather than display numbers that pick another row.
+  const rows = [...rowsInput].sort((a, b) => a.index - b.index)
+  const elements: Array<Record<string, unknown>> = []
+  if (rows.length === 0) {
+    elements.push({ tag: 'markdown', content: '没有可恢复的会话。' })
+  } else {
+    rows.forEach((row, i) => {
+      if (row.index !== i + 1) {
+        throw new Error(`session list index contract broken: rows[${i}].index = ${row.index}, expected ${i + 1}`)
+      }
+    })
+    // `page_size` is clamped to the official [1, 10] range; buildResumeRows
+    // already caps the list at RESUME_ROW_LIMIT (=10), so this never hides a
+    // row the operator could still pick.
+    elements.push({
+      tag: 'table',
+      page_size: Math.min(rows.length, 10),
+      row_height: 'low',
+      columns: [
+        { name: 'index', display_name: '#', data_type: 'number' },
+        { name: 'session', display_name: '会话', data_type: 'text' },
+        { name: 'time', display_name: '时间', data_type: 'text' },
+      ],
+      rows: rows.map(row => ({
+        index: row.index,
+        session: sessionCell(row),
+        time: formatWhen(row.lastTime ?? row.createdAt, now),
+      })),
+    })
+    elements.push({ tag: 'markdown', content: '回复 /resume N 进入对应会话' })
+  }
+  return { schema: '2.0', config: { width_mode: 'fill' }, body: { elements } }
 }

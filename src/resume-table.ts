@@ -1,6 +1,7 @@
 /**
- * The `/resume` picker: slack-style text table + index reply, per the design
- * doc's settled interaction. Candidate filtering mirrors dsh-tui-pi's picker
+ * The `/resume` picker: candidate rows + index reply, per the design doc's
+ * settled interaction (rendering lives in `buildSessionListCard`, a native
+ * schema 2.0 table card). Candidate filtering mirrors dsh-tui-pi's picker
  * exactly (root sessions only — value test on delegationDepth, never a
  * presence test), sorting is CLIENT-side (persistence.list() order is
  * unspecified — spike S2a), and the "last time" column comes from a bounded
@@ -12,7 +13,7 @@
 
 import { basename } from 'node:path'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
-import { clipLine, formatWhen, textOfContent } from './text.ts'
+import { clipLine, textOfContent } from './text.ts'
 
 /** The `sessionPersistence` surface this module needs (structural). */
 export interface SessionPersistenceLike {
@@ -126,18 +127,6 @@ export async function buildResumeRows(
     }
   }
   return rows
-}
-
-/** Format the table as the text message the operator sees. */
-export function formatResumeTable(rows: readonly ResumeRow[], now = Date.now()): string {
-  if (rows.length === 0) return '没有可恢复的会话。'
-  const lines = ['📋 可恢复会话（最近）：']
-  for (const row of rows) {
-    const when = row.lastTime ?? row.createdAt
-    lines.push(`${row.index}. ${row.dir} · ${formatWhen(when, now)} · ${row.preview}`)
-  }
-  lines.push('', '回复 /resume N 进入对应会话')
-  return lines.join('\n')
 }
 
 /** Resolve `/resume N` against a pending table. */

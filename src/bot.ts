@@ -21,12 +21,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { isOperator } from './allowlist.ts'
-import { buildBodyCard, buildFooter, buildProgressCard, buildStatusCard, footerFieldsOf, type InteractiveCard } from './card.ts'
+import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListCard, buildStatusCard, footerFieldsOf, type InteractiveCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
-import { buildResumeRows, formatResumeTable, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
+import { buildResumeRows, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
   foldBoundEvent,
   foldChildEvent,
@@ -203,6 +203,13 @@ export class FeishuBot {
     }
   }
 
+  /** Reply with a pre-built card (e.g. the /resume table picker). */
+  private async replyCard(card: Schema2Card): Promise<void> {
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) return
+    await this.lark.sendCard(chatId, card)
+  }
+
   private async process(message: InboundMessage): Promise<void> {
     if (!isOperator(message.openId, this.allowlist)) return // silent — non-operator
     if (message.chatType !== 'p2p') return // v1: private chat only
@@ -251,7 +258,7 @@ export class FeishuBot {
       return
     }
     this.pendingPicker = { rows, expiresAt: this.now() + PICKER_TTL_MS }
-    await this.reply(formatResumeTable(rows, this.now()))
+    await this.replyCard(buildSessionListCard(rows, this.now()))
   }
 
   private async handleResumePick(n: number): Promise<void> {

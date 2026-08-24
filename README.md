@@ -35,7 +35,7 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 接入已有会话 | `/resume` 列出最近 10 个可恢复的根会话（目录 · 最后时间 · 首条消息预览），`/resume N` 进入 |
+| 接入已有会话 | `/resume` 以飞书原生表格列出最近 10 个可恢复的根会话（`#` · 会话（预览·目录）· 时间），`/resume N` 进入 |
 | 手机派活 | 直接发文本即注入会话；turn 进行中到达的消息自动排队下一轮；消息同步出现在 TUI 转录里 |
 | 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo `☑ x/z` 进度 / 子代理行；note 页脚统计 `⏱ 耗时 · Turn N · 🤖 模型 · 📊 ctx · 🔧 calls · 🧠 档位（high/medium/low/off）` |
 | 增量进展卡 | 长任务进行中，每个有实质产出的节点推一张新卡（正文摘录 ≤300 字 + 页脚统计），最小间隔 `progressIntervalMs`（默认 3 分钟），间隔内产出合并进下一次推送 |
@@ -83,7 +83,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 106 个单测确认环境正常
+npm test               # 可选：跑 111 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -186,7 +186,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 即全部配对成功。然后在飞书里**私聊这个 bot**：
 
 1. 发 `/help` → 回命令清单（证明收发双向通、白名单生效）
-2. 发 `/resume` → 列出可恢复会话表格
+2. 发 `/resume` → 回一张卡片，会话列表以飞书原生表格呈现（3 列：`#` / 会话 / 时间）
 3. 回复 `/resume N` → 「已进入会话：…」（若该会话正在 TUI 里跑，是附着同一实例，
    TUI 转录会出现你的手机消息气泡）
 4. 发一段任务文本 → 收到 👀 reaction；TUI 开始干活，飞书收到状态卡
@@ -308,8 +308,8 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 | `commands.ts` | 入站文本 → 意图路由（自有 / 透传 / 拒绝 / prompt） |
 | `binder.ts` | attach/resume 绑定核心与 handle 所有权 |
 | `run-state.ts` | firehose 事件折叠：rounds/tools/todo/retry/subagent |
-| `card.ts` | RunState → 卡片 JSON + 内容 hash（变化检测） |
-| `resume-table.ts` | /resume 列表的过滤、排序、并发 inspect、格式化 |
+| `card.ts` | RunState → 卡片 JSON + 内容 hash（变化检测）；含 /resume 原生表格卡片（`buildSessionListCard`） |
+| `resume-table.ts` | /resume 列表的过滤、排序、并发 inspect |
 | `state-store.ts` | settings namespace 持久化 + 内存退化 |
 | `index.ts` | 插件入口：配置校验、单实例锁、凭证解析、装配 |
 
@@ -341,7 +341,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（106 个纯逻辑单测）
+npm test         # 构建 + node --test（111 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 

@@ -4,6 +4,7 @@ import {
   buildBodyCard,
   buildFooter,
   buildProgressCard,
+  buildSessionListCard,
   buildStatusCard,
   footerFieldsOf,
   shortModelName,
@@ -240,4 +241,93 @@ test('buildProgressCard ships a schema 2.0 markdown body with note footer', () =
 test('buildProgressCard omits the note when the footer is empty', () => {
   const card = buildProgressCard('body only', '')
   assert.equal(card.body.elements.length, 1)
+})
+
+// ------------------------------------------------------- /resume table card --
+
+function resumeRow(overrides = {}) {
+  return { index: 1, sessionId: 'abcdefgh1234', dir: 'repo', createdAt: 1000, lastTime: undefined, preview: '', ...overrides }
+}
+
+test('session list card renders a native schema 2.0 table with three columns', () => {
+  const rows = [
+    resumeRow({ index: 1, preview: 'first prompt', lastTime: 86_400_000 }),
+    resumeRow({ index: 2, dir: 'tmp', createdAt: 3_600_000, preview: 'tmp · zz' }),
+  ]
+  const card = buildSessionListCard(rows, 100_000_000)
+  assert.equal(card.schema, '2.0')
+  assert.deepEqual(card.config, { width_mode: 'fill' })
+  assert.equal(card.body.elements.length, 2)
+  const table = card.body.elements[0]
+  assert.equal(table.tag, 'table')
+  // One page per delivered batch — buildResumeRows already capped the list.
+  assert.equal(table.page_size, 2)
+  assert.deepEqual(
+    table.columns.map(c => c.display_name),
+    ['#', '会话', '时间'],
+  )
+  assert.deepEqual(table.columns.map(c => [c.name, c.data_type]), [
+    ['index', 'number'],
+    ['session', 'text'],
+    ['time', 'text'],
+  ])
+  // Rows render verbatim — no growth beyond the truncated input.
+  assert.equal(table.rows.length, rows.length)
+  assert.deepEqual(table.rows.map(r => r.index), [1, 2])
+  // lastTime wins over createdAt; missing lastTime degrades to createdAt.
+  assert.match(table.rows[0].time, /^\d{2}-\d{2} \d{2}:\d{2}$/)
+  assert.equal(typeof table.rows[1].time, 'string')
+  assert.equal(card.body.elements[1].tag, 'markdown')
+  assert.equal(card.body.elements[1].content, '回复 /resume N 进入对应会话')
+})
+
+test('session list cell appends the project dir unless the fallback already has it', () => {
+  const rows = [
+    resumeRow({ preview: 'fix the login bug', dir: 'dsh-feishu' }),
+    resumeRow({ index: 2, preview: 'repo · ab12cd34', dir: 'repo' }),
+    // False-positive guard: the preview merely *contains* the dir but is not
+    // the fallback form, so the dir must still be appended.
+    resumeRow({ index: 3, preview: 'fix repo bugs', dir: 'repo' }),
+  ]
+  const { body } = buildSessionListCard(rows, 0)
+  assert.equal(body.elements[0].rows[0].session, 'fix the login bug · dsh-feishu')
+  // Fallback preview (`dir · short-id`) is not duplicated with a second dir.
+  assert.equal(body.elements[0].rows[1].session, 'repo · ab12cd34')
+  assert.equal(body.elements[0].rows[2].session, 'fix repo bugs · repo')
+})
+
+test('session list page_size clamps to the official [1, 10] range', () => {
+  const many = Array.from({ length: 12 }, (_, i) => resumeRow({ index: i + 1 }))
+  const table = buildSessionListCard(many, 0).body.elements[0]
+  assert.equal(table.rows.length, 12)
+  assert.equal(table.page_size, 10) // official upper bound
+  const one = buildSessionListCard([resumeRow()], 0).body.elements[0]
+  assert.equal(one.page_size, 1)
+})
+
+test('session list normalizes unsorted rows so # matches the /resume N position', () => {
+  const rows = [
+    resumeRow({ index: 2, preview: 'second' }),
+    resumeRow({ index: 1, preview: 'first' }),
+    resumeRow({ index: 3, preview: 'third' }),
+  ]
+  const { body } = buildSessionListCard(rows, 0)
+  assert.deepEqual(body.elements[0].rows.map(r => r.session), ['first · repo', 'second · repo', 'third · repo'])
+  assert.deepEqual(body.elements[0].rows.map(r => r.index), [1, 2, 3])
+})
+
+test('session list throws when indexes are not contiguous from 1 (caller bug)', () => {
+  const rows = [
+    resumeRow({ index: 1 }),
+    resumeRow({ index: 3 }),
+  ]
+  assert.throws(() => buildSessionListCard(rows, 0), /index contract broken/)
+})
+
+test('empty session list degrades to a markdown notice without a table', () => {
+  const card = buildSessionListCard([], 0)
+  assert.equal(card.schema, '2.0')
+  assert.equal(card.body.elements.length, 1)
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  assert.equal(card.body.elements[0].content, '没有可恢复的会话。')
 })
