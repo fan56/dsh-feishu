@@ -19,3 +19,4 @@
         # operators:            # Feishu open_id allowlist — REQUIRED to arm the bot
         #   - ou_xxxxxxxxxxxxxx
         # domain: feishu        # feishu | lark
+        # resumeListStyle: auto # auto (table, falls back to markdown list) | table | list

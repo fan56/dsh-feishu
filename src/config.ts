@@ -43,6 +43,12 @@ export interface Config {
   progressIntervalMs?: number
   /** Long assistant bodies are segmented for Feishu at this size (default 3500). */
   bodySegmentChars?: number
+  /**
+   * `/resume` list rendering style (default `auto`): `auto` sends the native
+   * table card first and falls back to a markdown ordered list when the send
+   * fails; `table` / `list` force one renderer.
+   */
+  resumeListStyle?: 'auto' | 'table' | 'list'
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -57,6 +63,7 @@ export const Config = z.object({
   statusIntervalMs: z.number().min(5000).max(600000).step(1).default(30000),
   progressIntervalMs: z.number().min(30000).max(3600000).step(1).default(180000),
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
+  resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -71,11 +78,12 @@ export interface ResolvedConfig {
   readonly statusIntervalMs: number
   readonly progressIntervalMs: number
   readonly bodySegmentChars: number
+  readonly resumeListStyle: 'auto' | 'table' | 'list'
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
-  'statusIntervalMs', 'progressIntervalMs', 'bodySegmentChars',
+  'statusIntervalMs', 'progressIntervalMs', 'bodySegmentChars', 'resumeListStyle',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -107,6 +115,10 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   if (!Number.isSafeInteger(bodySegmentChars) || bodySegmentChars < 500 || bodySegmentChars > 30000) {
     throw new Error('dsh-feishu: bodySegmentChars must be an integer in [500, 30000]')
   }
+  const resumeListStyle = config?.resumeListStyle ?? 'auto'
+  if (resumeListStyle !== 'auto' && resumeListStyle !== 'table' && resumeListStyle !== 'list') {
+    throw new Error('dsh-feishu: resumeListStyle must be one of "auto", "table", "list"')
+  }
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   return Object.freeze({
@@ -122,5 +134,6 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     statusIntervalMs,
     progressIntervalMs,
     bodySegmentChars,
+    resumeListStyle,
   })
 }

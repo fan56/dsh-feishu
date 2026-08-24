@@ -54,3 +54,17 @@ test('progressIntervalMs honors a custom in-range value', () => {
   const resolved = resolveConfig({ progressIntervalMs: 60000 }, {})
   assert.equal(resolved.progressIntervalMs, 60000)
 })
+
+test('resumeListStyle defaults to auto', () => {
+  assert.equal(resolveConfig({}, {}).resumeListStyle, 'auto')
+})
+
+test('resumeListStyle accepts table/list overrides', () => {
+  assert.equal(resolveConfig({ resumeListStyle: 'table' }, {}).resumeListStyle, 'table')
+  assert.equal(resolveConfig({ resumeListStyle: 'list' }, {}).resumeListStyle, 'list')
+})
+
+test('unknown resumeListStyle value throws', () => {
+  // The static schema rejects it at runtime via the unknown-value union.
+  assert.throws(() => resolveConfig({ resumeListStyle: 'plain' }, {}), /resumeListStyle/)
+})

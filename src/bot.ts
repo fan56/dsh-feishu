@@ -21,7 +21,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { isOperator } from './allowlist.ts'
-import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListCard, buildStatusCard, footerFieldsOf, type InteractiveCard, type Schema2Card } from './card.ts'
+import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, footerFieldsOf, type InteractiveCard } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
@@ -203,13 +203,6 @@ export class FeishuBot {
     }
   }
 
-  /** Reply with a pre-built card (e.g. the /resume table picker). */
-  private async replyCard(card: Schema2Card): Promise<void> {
-    const chatId = this.store.get().lastChatId
-    if (chatId === undefined) return
-    await this.lark.sendCard(chatId, card)
-  }
-
   private async process(message: InboundMessage): Promise<void> {
     if (!isOperator(message.openId, this.allowlist)) return // silent — non-operator
     if (message.chatType !== 'p2p') return // v1: private chat only
@@ -258,7 +251,26 @@ export class FeishuBot {
       return
     }
     this.pendingPicker = { rows, expiresAt: this.now() + PICKER_TTL_MS }
-    await this.replyCard(buildSessionListCard(rows, this.now()))
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) return
+    const style = this.config.resumeListStyle ?? 'auto'
+    if (style === 'list') {
+      await this.lark.sendCard(chatId, buildSessionListAsMarkdown(rows, this.now()))
+      return
+    }
+    // sendCard swallows API errors and resolves undefined — that is the only
+    // failure signal we get at send time: server rejection, rate-limit retries
+    // exhausted, or a transport error. An old client that receives the card but
+    // silently renders the table element blank fails AFTER delivery, which is
+    // undetectable here — that scenario needs `resumeListStyle: 'list'` to
+    // force the markdown list outright. In `auto` mode degrade exactly once on
+    // a send-time failure; a second failure falls through to the existing
+    // onError sink.
+    const messageId = await this.lark.sendCard(chatId, buildSessionListCard(rows, this.now()))
+    if (messageId === undefined && style === 'auto') {
+      this.ctx.logger.warn('dsh-feishu: /resume table card failed to send — falling back to markdown list')
+      await this.lark.sendCard(chatId, buildSessionListAsMarkdown(rows, this.now()))
+    }
   }
 
   private async handleResumePick(n: number): Promise<void> {

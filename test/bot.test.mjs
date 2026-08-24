@@ -79,3 +79,93 @@ test('progress push: sendCard failure leaves cursor untouched so content retries
   assert.equal(bot.progressCursor.lastPushAt, 260_000)
   assert.ok(JSON.stringify(sent[1]).includes('unsent excerpt'))
 })
+
+// ------------------------------------------------- /resume list auto degrade --
+
+function resumeHeader(id, createdAt = 1000) {
+  return { version: 1, id, createdAt, delegationDepth: 0, cwd: '/tmp/github' }
+}
+
+function resumeBot(lark, resumeListStyle) {
+  const warnings = []
+  const store = { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} }
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn(msg, ...args) { warnings.push(msg) }, error() {} },
+      get(key) {
+        if (key !== 'sessionPersistence') return undefined
+        return {
+          async list() { return [resumeHeader('aaaaaaaa1111'), resumeHeader('bbbbbbbb2222', 2000)] },
+          // Inspect failure degrades the row to its fallback preview — fine here.
+          async inspect() { return { meta: {}, events: [] } },
+        }
+      },
+    },
+    config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500, ...(resumeListStyle ? { resumeListStyle } : {}) },
+    lark,
+    binder: {},
+    store,
+    allowlist: new Set(),
+    now: () => 100_000,
+  })
+  return { bot, warnings }
+}
+
+test('auto mode: failed table send degrades exactly once to the markdown list', async () => {
+  const sent = []
+  let attempts = 0
+  const { bot, warnings } = resumeBot({
+    async sendCard(_chatId, card) {
+      attempts += 1
+      sent.push(card)
+      // Real client contract: swallowed API error resolves undefined.
+      return attempts === 1 ? undefined : 'm2'
+    },
+  })
+
+  await bot.handleResumeList()
+
+  assert.equal(attempts, 2)
+  // First attempt is the native table card…
+  assert.equal(sent[0].body.elements[0].tag, 'table')
+  // …the retry ships through the markdown-list channel instead of plain text.
+  assert.equal(sent[1].body.elements[0].tag, 'markdown')
+  // Rows sort by createdAt desc: bbbb (2000) lands at index 1.
+  assert.match(sent[1].body.elements[0].content, /^1\. \*\*github · \d{2}-\d{2} \d{2}:\d{2}\*\* · bbbbbbbb/)
+  assert.match(sent[1].body.elements[0].content, /回复 \/resume N 进入对应会话/)
+  // The degrade is observable: one warn names the fallback.
+  assert.equal(warnings.filter(w => w.includes('falling back')).length, 1)
+})
+
+test('forced table mode never falls back when the send fails', async () => {
+  const sent = []
+  const { bot } = resumeBot({
+    async sendCard(_chatId, card) {
+      sent.push(card)
+      return undefined
+    },
+  }, 'table')
+
+  await bot.handleResumeList()
+
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].body.elements[0].tag, 'table')
+})
+
+test('forced list mode ships only the markdown list card', async () => {
+  const sent = []
+  const { bot } = resumeBot({
+    async sendCard(_chatId, card) {
+      sent.push(card)
+      return 'm1'
+    },
+  }, 'list')
+
+  await bot.handleResumeList()
+
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].body.elements[0].tag, 'markdown')
+  const lines = sent[0].body.elements[0].content.split('\n')
+  assert.match(lines[0], /^1\. /)
+  assert.equal(lines.at(-1), '回复 /resume N 进入对应会话')
+})

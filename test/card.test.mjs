@@ -4,6 +4,7 @@ import {
   buildBodyCard,
   buildFooter,
   buildProgressCard,
+  buildSessionListAsMarkdown,
   buildSessionListCard,
   buildStatusCard,
   footerFieldsOf,
@@ -306,9 +307,11 @@ test('session list page_size clamps to the official [1, 10] range', () => {
 })
 
 test('session list normalizes unsorted rows so # matches the /resume N position', () => {
+  // Input arrives already in positional order (buildResumeRows assigns
+  // indexes by position); the sort below is defensive normalization only.
   const rows = [
-    resumeRow({ index: 2, preview: 'second' }),
     resumeRow({ index: 1, preview: 'first' }),
+    resumeRow({ index: 2, preview: 'second' }),
     resumeRow({ index: 3, preview: 'third' }),
   ]
   const { body } = buildSessionListCard(rows, 0)
@@ -324,10 +327,76 @@ test('session list throws when indexes are not contiguous from 1 (caller bug)', 
   assert.throws(() => buildSessionListCard(rows, 0), /index contract broken/)
 })
 
+// Out-of-order but contiguous input would render numbers that pick the wrong
+// row via pickResumeRow's positional lookup — it must throw, not normalize.
+// This closes the blind spot of asserting only after sorting.
+test('session list throws on out-of-order input even when indexes are contiguous', () => {
+  const rows = [
+    resumeRow({ index: 2, preview: 'second' }),
+    resumeRow({ index: 1, preview: 'first' }),
+    resumeRow({ index: 3, preview: 'third' }),
+  ]
+  assert.throws(() => buildSessionListCard(rows, 0), /index contract broken/)
+})
+
 test('empty session list degrades to a markdown notice without a table', () => {
   const card = buildSessionListCard([], 0)
   assert.equal(card.schema, '2.0')
   assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].tag, 'markdown')
+  assert.equal(card.body.elements[0].content, '没有可恢复的会话。')
+})
+
+// --------------------------------------------- /resume markdown list fallback --
+
+test('markdown session list renders a GFM ordered list with preview and the hint tail line', () => {
+  const rows = [
+    resumeRow({ index: 1, dir: 'github', lastTime: 86_400_000, preview: 'fix the login bug' }),
+    // Inspect-failed fallback preview (`dir · short-id`) duplicates the head —
+    // it must be dropped, leaving no dangling separator.
+    resumeRow({ index: 2, dir: 'tmp', createdAt: 3_600_000, sessionId: 'zz9876543210', preview: 'tmp · zz987654' }),
+    resumeRow({ index: 3, dir: 'tmp', createdAt: 1_800_000, sessionId: 'yy7777777777', preview: '' }),
+  ]
+  const card = buildSessionListAsMarkdown(rows, 100_000_000)
+  assert.equal(card.schema, '2.0')
+  assert.deepEqual(card.config, { width_mode: 'fill' })
+  // Ships through the buildBodyCard channel: one markdown element.
+  assert.equal(card.body.elements.length, 1)
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  const lines = card.body.elements[0].content.split('\n')
+  // Ordered-list numbering matches rows[].index — /resume N picks by position.
+  // The line carries the same info as the table's session cell (preview · dir):
+  // dir sits in the bold head, the clipped preview follows the short id.
+  assert.match(lines[0], /^1\. \*\*github · \d{2}-\d{2} \d{2}:\d{2}\*\* · abcdefgh · fix the login bug$/)
+  assert.match(lines[1], /^2\. \*\*tmp · \d{2}-\d{2} \d{2}:\d{2}\*\* · zz987654$/)
+  assert.match(lines[2], /^3\. \*\*tmp · \d{2}-\d{2} \d{2}:\d{2}\*\* · yy777777$/)
+  assert.equal(lines.at(-1), '回复 /resume N 进入对应会话')
+})
+
+test('markdown session list clips long previews to keep phone lines readable', () => {
+  const rows = [resumeRow({ index: 1, preview: 'x'.repeat(100) })]
+  const lines = buildSessionListAsMarkdown(rows, 0).body.elements[0].content.split('\n')
+  assert.ok(lines[0].length < 100)
+  assert.match(lines[0], /· x+…$/)
+})
+
+test('markdown session list throws on non-contiguous indexes (caller bug)', () => {
+  const rows = [resumeRow({ index: 1 }), resumeRow({ index: 3 })]
+  assert.throws(() => buildSessionListAsMarkdown(rows, 0), /index contract broken/)
+})
+
+// Same blind-spot fix as the table card: contiguous but out-of-order input
+// must throw instead of silently renumbering against pickResumeRow's lookup.
+test('markdown session list throws on out-of-order input even when indexes are contiguous', () => {
+  const rows = [
+    resumeRow({ index: 2, sessionId: 'bbbb00000001' }),
+    resumeRow({ index: 1, sessionId: 'aaaa00000001' }),
+  ]
+  assert.throws(() => buildSessionListAsMarkdown(rows, 0), /index contract broken/)
+})
+
+test('empty markdown session list reuses the shared empty notice', () => {
+  const card = buildSessionListAsMarkdown([], 0)
+  assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].content, '没有可恢复的会话。')
 })

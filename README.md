@@ -35,7 +35,7 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 接入已有会话 | `/resume` 以飞书原生表格列出最近 10 个可恢复的根会话（`#` · 会话（预览·目录）· 时间），`/resume N` 进入 |
+| 接入已有会话 | `/resume` 以飞书原生表格列出最近 10 个可恢复的根会话（`#` · 会话（预览·目录）· 时间），`/resume N` 进入；默认 `auto` 渲染——表格卡**发送失败**（服务端拒收/限流重试耗尽/传输错误）自动降级重发一次 markdown 有序列表，`table`/`list` 可强制指定。注意：老客户端「收到了但静默渲染不出表格」发生在投递之后、发送侧检测不到，那种场景请配 `resumeListStyle: "list"` |
 | 手机派活 | 直接发文本即注入会话；turn 进行中到达的消息自动排队下一轮；消息同步出现在 TUI 转录里 |
 | 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo `☑ x/z` 进度 / 子代理行；note 页脚统计 `⏱ 耗时 · Turn N · 🤖 模型 · 📊 ctx · 🔧 calls · 🧠 档位（high/medium/low/off）` |
 | 增量进展卡 | 长任务进行中，每个有实质产出的节点推一张新卡（正文摘录 ≤300 字 + 页脚统计），最小间隔 `progressIntervalMs`（默认 3 分钟），间隔内产出合并进下一次推送 |
@@ -83,7 +83,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 111 个单测确认环境正常
+npm test               # 可选：跑 123 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -186,7 +186,9 @@ dsh-feishu: armed (1 operator(s), feishu)
 即全部配对成功。然后在飞书里**私聊这个 bot**：
 
 1. 发 `/help` → 回命令清单（证明收发双向通、白名单生效）
-2. 发 `/resume` → 回一张卡片，会话列表以飞书原生表格呈现（3 列：`#` / 会话 / 时间）
+2. 发 `/resume` → 回一张卡片，会话列表以飞书原生表格呈现（3 列：`#` / 会话 / 时间）。
+   默认 `auto`：表格卡发送失败会自动降级为 markdown 有序列表重发一次；
+   若你的客户端版本老到「收到了但表格渲染空白」（投递后行为，发送侧检测不到），配 `resumeListStyle: "list"` 强制列表
 3. 回复 `/resume N` → 「已进入会话：…」（若该会话正在 TUI 里跑，是附着同一实例，
    TUI 转录会出现你的手机消息气泡）
 4. 发一段任务文本 → 收到 👀 reaction；TUI 开始干活，飞书收到状态卡
@@ -249,6 +251,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | `statusIntervalMs` | `30000` | 状态卡更新节拍，范围 [5000, 600000] |
 | `progressIntervalMs` | `180000` | 进展卡最小推送间隔，范围 [30000, 3600000] |
 | `bodySegmentChars` | `3500` | 长正文分段阈值，范围 [500, 30000] |
+| `resumeListStyle` | `"auto"` | `/resume` 会话列表渲染方式：`auto` 先发表格卡、发送失败自动降级为 markdown 有序列表重发一次；`table` / `list` 强制指定 |
 
 未知 key 会直接报错拒绝启动（typo 不允许静默失效）。
 
@@ -341,7 +344,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（111 个纯逻辑单测）
+npm test         # 构建 + node --test（123 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 

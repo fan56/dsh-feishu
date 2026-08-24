@@ -346,6 +346,51 @@ export function buildProgressCard(body: string, footer: string): Schema2Card {
   }
 }
 
+/**
+ * Shared `/resume` index contract: rows must arrive contiguous from 1 **in
+ * input order** — `pickResumeRow` resolves `/resume N` positionally against
+ * the caller's array (`rows[n - 1]`), so a merely-sortable input would render
+ * numbers that pick the wrong session without any error. Assert before any
+ * normalization; a violation is a caller bug, so fail loudly. Sorting (kept
+ * in the builders as defensive normalization) no longer carries this duty.
+ */
+function assertIndexContract(rows: readonly ResumeRow[]): void {
+  rows.forEach((row, i) => {
+    if (row.index !== i + 1) {
+      throw new Error(`session list index contract broken: rows[${i}].index = ${row.index}, expected ${i + 1}`)
+    }
+  })
+}
+
+/**
+ * Build the `/resume` picker as a plain GFM ordered list shipped through the
+ * same {@link buildBodyCard} channel as assistant bodies. This is the
+ * send-time degradation path: it fires only when the table-card send fails on
+ * our side — server rejection, rate-limit retries exhausted, or a transport
+ * error. An old client that receives the table but renders it silently blank
+ * fails AFTER delivery and is undetectable at send time; that scenario needs
+ * `resumeListStyle: 'list'` to force this renderer outright. Numbering MUST
+ * agree with `pickResumeRow`'s positional lookup (`rows[n - 1]`), so the same
+ * 1-based contiguity contract as {@link buildSessionListCard} is enforced.
+ */
+export function buildSessionListAsMarkdown(rowsInput: readonly ResumeRow[], now = Date.now()): Schema2Card {
+  assertIndexContract(rowsInput)
+  const rows = [...rowsInput].sort((a, b) => a.index - b.index)
+  if (rows.length === 0) return buildBodyCard('没有可恢复的会话。')
+  const lines = rows.map(row => {
+    // Same information as the table's `session` cell (preview · dir), with
+    // the preview clipped so a phone line survives. The dir sits in the bold
+    // head; when the preview is the inspect-failed fallback (`dir · short-id`,
+    // same exact-prefix rule as {@link sessionCell}) it would only duplicate
+    // what the head already shows, so it stays out.
+    const parts = [`${row.index}. **${row.dir} · ${formatWhen(row.lastTime ?? row.createdAt, now)}** · ${row.sessionId.slice(0, 8)}`]
+    if (row.preview !== '' && !row.preview.startsWith(`${row.dir} ·`)) parts.push(clipLine(row.preview, 32))
+    return parts.join(' · ')
+  })
+  lines.push('回复 /resume N 进入对应会话')
+  return buildBodyCard(lines.join('\n'))
+}
+
 // ---------------------------------------------------------- /resume picker --
 
 /**
@@ -369,20 +414,17 @@ function sessionCell(row: ResumeRow): string {
  */
 export function buildSessionListCard(rowsInput: readonly ResumeRow[], now = Date.now()): Schema2Card {
   // The rendered `#` column must agree with `pickResumeRow`'s positional
-  // `/resume N` lookup (`rows[n - 1]`). Normalize the order defensively (a
-  // caller may hand over unsorted rows), then assert the 1-based contiguity
-  // contract — a violation is a caller bug that would render a misleading
-  // picker, so fail loudly rather than display numbers that pick another row.
+  // `/resume N` lookup (`rows[n - 1]`). Assert the 1-based contiguity contract
+  // on the INPUT order (see {@link assertIndexContract}) — a violation is a
+  // caller bug that would render a misleading picker, so fail loudly rather
+  // than display numbers that pick another row. The defensive sort below only
+  // normalizes; it no longer carries the contract.
+  assertIndexContract(rowsInput)
   const rows = [...rowsInput].sort((a, b) => a.index - b.index)
   const elements: Array<Record<string, unknown>> = []
   if (rows.length === 0) {
     elements.push({ tag: 'markdown', content: '没有可恢复的会话。' })
   } else {
-    rows.forEach((row, i) => {
-      if (row.index !== i + 1) {
-        throw new Error(`session list index contract broken: rows[${i}].index = ${row.index}, expected ${i + 1}`)
-      }
-    })
     // `page_size` is clamped to the official [1, 10] range; buildResumeRows
     // already caps the list at RESUME_ROW_LIMIT (=10), so this never hides a
     // row the operator could still pick.
