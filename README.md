@@ -1,128 +1,371 @@
 # dsh-feishu — 用飞书驾驶 dsh
 
-> dsh（DeepSeek Harness）伴生插件：一个只出站的飞书机器人，把**已存在的** dsh 会话
-> 接到手机上——派活、看进度、收回复。独立包独立 `cordis.patch.yml`，与 dsh-tui-pi
-> 同 profile 共存互不干扰，也可以在没有 TUI 的 profile 里单独安装。
+> [dsh](https://github.com/deepseek-ai/deepseek-harness)（DeepSeek Harness）伴生插件：
+> 一个**只出站**的飞书机器人，把**已存在的** dsh 会话接到手机上——派活、看进度、收回复。
 >
-> 设计定案见 `~/github/docs/dsh-feishu-bot-design-research.md`（2026-08-23）。
-> 本仓库为 **private**，不发布 npm。
+> - 独立包、独立 `cordis.patch.yml`，与 dsh-tui-pi 同 profile 共存互不干扰，也可单独安装
+> - **从不创建新会话**：代码里没有 `agents.create` 调用，机制上杜绝「双 main」
+> - 全程只出站 WebSocket，不开公网端口、不需要隧道/内网穿透
+>
+> 本仓库为 private，不发布 npm。设计定案见
+> `~/github/docs/dsh-feishu-bot-design-research.md`。
 
-## 能力（v0.1）
+---
 
-- **接入已有会话**：`/resume` 列出最近 10 个可恢复的根会话（目录 · 最后时间 · 首条
-  消息预览），回复 `/resume N` 进入。**从不创建新会话**——插件代码里没有
-  `agents.create` 调用，机制上杜绝「双 main」。
-- **手机派活**：直接发文本即 `agent.followup` 注入；turn 进行中到达的消息排队到
-  下一轮（inbox 语义）。远端消息会正常出现在 TUI 转录里。
-- **运行状态卡**：每轮 turn 一张卡，原位更新（30s 节拍 + 内容变化检测，不做流式
-  卡片），`turn/end` 定稿（✅/❌/⛔ + 总耗时 + todo 进度）后把 assistant 正文按
-  段发成普通消息。think/tool 尾行默认关闭，`/display think on` 开启。
-- **子代理行**：主卡内紧凑行 `├ workhorse ↻ · round 2 · tail…`；`/sub N` 看近况。
-- **命令**：`/status /help /stop /new /resume /sub /display` 为 bot 自有；
-  `/goal /dcp /export /agents /subagents` 透传 host；`/settings /preset /theme` 等
-  配置类回复「请在电脑端操作」。`/model /think /skills`（选择器语义）暂同样引导
-  到电脑端，后续可加文本列表流。
-- **附着语义**：目标会话已 live（TUI 正在跑）→ `agents.get()` 附着同一引用，注入
-  直达；未 live → `agents.resume` 恢复（bot 持有并管理该 handle）。绝不 resume 一个
-  已 live 的会话。
+## 目录
 
-## 安装（本机 link 方式）
+- [它能做什么](#它能做什么)
+- [快速开始（5 步）](#快速开始5-步)
+- [第一步：创建飞书应用（网页操作）](#第一步创建飞书应用网页操作)
+- [第二步：安装插件到 profile](#第二步安装插件到-profile)
+- [第三步：配置凭证](#第三步配置凭证)
+- [第四步：配置操作者白名单](#第四步配置操作者白名单)
+- [第五步：启动并验证](#第五步启动并验证)
+- [日常使用](#日常使用)
+- [配置参考](#配置参考)
+- [安全模型](#安全模型)
+- [工作原理](#工作原理)
+- [故障排查](#故障排查)
+- [开发与测试](#开发与测试)
+- [已知边界与路线图](#已知边界与路线图)
 
-```bash
-cd ~/github/dsh-feishu
-npm install          # 装 @larksuiteoapi/node-sdk
-npm run link-closure # 把 @deepseek-ai/* 软链到全局 dsh 闭包（类型+运行时解析）
-dsh plugin add ~/github/dsh-feishu
+---
+
+## 它能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 接入已有会话 | `/resume` 列出最近 10 个可恢复的根会话（目录 · 最后时间 · 首条消息预览），`/resume N` 进入 |
+| 手机派活 | 直接发文本即注入会话；turn 进行中到达的消息自动排队下一轮；消息同步出现在 TUI 转录里 |
+| 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo 进度 / 子代理行 |
+| 收完整回复 | turn 结束后状态卡定稿（✅/❌/⛔ + 总耗时 + todo），assistant 正文分段发成普通消息 |
+| 子代理可见 | 主卡内紧凑行 `├ workhorse ↻ · round 2 · tail…`；`/sub N` 看单个子代理近况 |
+| 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 解绑当前会话 |
+
+## 快速开始（5 步）
+
+```
+① 飞书开放平台建自建应用（开机器人 + 长连接事件订阅）   ≈10 分钟
+② 插件装进 dsh profile                                 ≈2 分钟
+③ 凭证写入 ~/.dsh/.credentials.yaml                    ≈1 分钟
+④ 你的 open_id 写进 operators 白名单                   ≈1 分钟
+⑤ 重启 dsh，私聊 bot 发 /help                          即刻验证
 ```
 
-`dsh plugin add` 会读取包内 `cordis.patch.yml` 自动挂载（含 `dsh.bundle.patch`
-声明）。卸载：`dsh plugin remove dsh-feishu`。
+没配完白名单/凭证时插件是**装死态**（连接不上飞书、不回复任何人）——这是故意的安全默认，
+不是故障。启动日志会有对应的 dormant 警告行，见[故障排查](#故障排查)。
 
-> `@deepseek-ai/*` 一律**不声明**在 package.json 里——由 link-closure 软链到全局
-> dsh 闭包解析，保证进程内只有一个 cordis 实例（workspace 铁律 8）。
+## 第一步：创建飞书应用（网页操作）
 
-## 配置
+登录 [open.feishu.cn](https://open.feishu.cn)（飞书管理员的开发者账号），创建「**企业自建应用**」：
 
-### 1. 飞书应用（自建应用 + 机器人能力）
+1. **记下凭证**：应用详情页的 `App ID`（`cli_` 开头）和 `App Secret`。
+2. **开启机器人**：「添加应用能力」→ 选择**机器人**。不开的话这个应用不会出现在会话里。
+3. **订阅事件**：「事件与回调」→ 事件订阅 → 添加 `im.message.receive_v1`（接收消息）。
+   ⚠️ 订阅方式必须选「**使用长连接接收事件**」。本插件只做出站 WebSocket 连接；
+   webhook 模式需要公网 URL 和加解密策略，不要选。
+4. **开通权限**：「权限管理」中按需开通（首次发版时按提示确认即可）：
+   - `im:message:send_as_bot` —— 以机器人身份发消息
+   - `im:message.p2p_msg:readonly` —— 读取私聊消息（事件所需）
+   - `im:message.reactions:write` —— 表情回应（👀 已收到 / 👍 完成）
+5. **可用范围**：「可用范围」里把你自己（及允许使用的同事）加进去。不在范围内的人
+   无法和 bot 私聊。
+6. **发布版本**：「版本管理与发布」→ 创建版本 → 发布。企业自建应用一般管理员直接通过。
+   ⚠️ **不发布事件不通**——这是最常见的配对卡点。
 
-- 开启**机器人**能力，添加**接收消息** `im.message.receive_v1` 事件订阅，
-  订阅方式选**长连接**（免公网）。
-- 拿到 `App ID` / `App Secret`。
-- 私聊可用：把机器人拉进你的可用范围，和它单聊。
+## 第二步：安装插件到 profile
 
-### 2. 凭证（二选一）
+### 全新机器从零装
 
-- **dsh credentials 服务**（推荐）：
-  ```bash
-  dsh credentials set dsh-feishu-app-id    cli_xxxx
-  dsh credentials set dsh-feishu-app-secret xxxx
-  ```
-  （refs 可通过 `appIdRef` / `appSecretRef` 配置项改名；不进 repo、不进 settings.yaml。）
-- **环境变量**（本地测试方便）：`DSH_FEISHU_APP_ID` / `DSH_FEISHU_APP_SECRET`。
+```bash
+git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private repo
+cd ~/github/dsh-feishu
+npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
+npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
+npm test               # 可选：跑 61 个单测确认环境正常
+```
 
-### 3. 操作者白名单（必填）
+然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
 
-编辑挂载处的 config（profile 的 bundle 配置或 `~/.dsh/cordis.patch.yml`）：
+```jsonc
+{
+  "dsh": {
+    "profile": {
+      "bundles": [
+        // …现有 bundles…
+        "@aiwayds/dsh-feishu"          // ← 新增这行
+      ]
+    }
+  },
+  "dependencies": {
+    // …现有依赖…
+    "@aiwayds/dsh-feishu": "link:/Users/<你>/github/dsh-feishu"   // ← 新增这行
+  }
+}
+```
+
+```bash
+cd ~/.dsh/profiles/tui && pnpm install
+```
+
+> 用 `link:` 指向仓库目录 = 实时生效：在仓库里改代码重新 `npm run build`，
+> profile 端无需重装。（改前建议按惯例备份 package.json / pnpm-lock.yaml。）
+
+### 验证挂载
+
+```bash
+dsh --profile tui --dump-config | grep -A 3 feishu
+```
+
+看到 `- id: dsh-feishu` 即 bundle patch 生效（本插件自带 `cordis.patch.yml`，
+`dsh.bundle.patch` 声明齐全，无需手写 patch 条目）。
+
+> **为什么 `@deepseek-ai/*` 不在 dependencies 里**：dsh 的契约是全部 `@deepseek-ai/*`
+> 解析到同一个全局闭包。声明成普通依赖会被包管理器装出第二份 cordis 实例，导致跨
+> realm 的诡异崩溃。本仓库由 `link-closure` 软链解析，与 dsh-tui-pi 同一姿势
+> （详见工作区 AGENTS.md 铁律 8）。
+
+## 第三步：配置凭证
+
+插件的解析优先级（启动时解析一次，**改动后需重启 dsh**）：
+
+1. patch 配置里的明文 `appId` + `appSecret`（仅本地测试逃生门）
+2. 环境变量 `DSH_FEISHU_APP_ID` + `DSH_FEISHU_APP_SECRET`
+3. dsh credentials 服务，refs 默认 `dsh-feishu-app-id` / `dsh-feishu-app-secret`
+
+**推荐走 credentials 文件**——secret 不落 settings.yaml、不进 repo：
+
+```yaml
+# ~/.dsh/.credentials.yaml （权限应为 600，文件被 dsh 监听热更新）
+dsh-feishu-app-id: cli_xxxxxxxxxx
+dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
+```
+
+refs 名可通过 `appIdRef` / `appSecretRef` 配置项改名。
+
+三源都读不到时插件保持 dormant，日志输出
+`no Lark credentials (tried config/env, then refs …) — plugin dormant`。
+
+## 第四步：配置操作者白名单
+
+bot 只响应白名单内的飞书用户（按 sender `open_id` 校验）；**白名单为空 = 插件完全不激活**。
+
+拿到你自己的 open_id：
+
+- 飞书管理后台 → 成员与部门 → 成员详情页查看；或
+- 开发者后台调试台查当前用户；或命令行
+  `lark-cli contact +search-user --query "你的名字"`（返回中的 open_id 字段）。
+
+写入 home 层 patch（`~/.dsh/cordis.patch.yml`，对 profile 内所有挂载生效）：
 
 ```yaml
 - id: dsh-feishu
-  name: '@aiwayds/dsh-feishu'
   config:
     operators:
-      - ou_xxxxxxxxxxxxxx   # 你的 open_id（飞书管理后台/调试台可见）
+      - ou_xxxxxxxxxxxxxx     # 你自己的 open_id
+      # - ou_yyyy…           # 可以放多个操作者
 ```
 
-也可用环境变量 `DSH_FEISHU_OPERATORS=ou_a,ou_b` 追加。**白名单为空时插件装死**
-（不连飞书、不回复任何人）。非白名单消息**静默忽略**。
+也可以用环境变量追加：`DSH_FEISHU_OPERATORS=ou_a,ou_b`。
 
-### 全部配置项
+非白名单用户的私聊消息会被**静默忽略**——不回复、不回应、不留痕，bot 的存在感为零。
+
+## 第五步：启动并验证
+
+```bash
+dsh --profile tui
+```
+
+启动日志出现：
+
+```
+dsh-feishu: armed (1 operator(s), feishu)
+```
+
+即全部配对成功。然后在飞书里**私聊这个 bot**：
+
+1. 发 `/help` → 回命令清单（证明收发双向通、白名单生效）
+2. 发 `/resume` → 列出可恢复会话表格
+3. 回复 `/resume N` → 「已进入会话：…」（若该会话正在 TUI 里跑，是附着同一实例，
+   TUI 转录会出现你的手机消息气泡）
+4. 发一段任务文本 → 收到 👀 reaction；TUI 开始干活，飞书收到状态卡
+5. turn 结束 → 状态卡定稿 ✅ + assistant 正文分段送达
+
+## 日常使用
+
+### 命令总表
+
+| 命令 | 说明 |
+| --- | --- |
+| `/resume` | 列出最近 10 个可恢复根会话（选择列表 5 分钟有效，新列表覆盖旧表） |
+| `/resume N` | 进入列表第 N 个会话；live 会话直接附着，冷会话从持久化恢复 |
+| `/new` | 解绑当前会话，回到未绑定态（**不会**创建新会话；再进要 `/resume`） |
+| `/stop` | 停止当前正在运行的 turn（排队中的消息保留，下一轮继续处理） |
+| `/status` | 绑定与运行快照：绑定态 / rounds / tools ✔✘ / 子代理数 / think 显示开关 |
+| `/sub N` | 查看第 N 个子代理近况（round 数、最近工具、最新输出 tail） |
+| `/display think on\|off` | 开关状态卡上的思考/工具尾行显示（默认 off，持久化保存） |
+| `/help` | 命令清单（随绑定态变化提示语） |
+| `/goal` `/dcp` `/export` `/agents` `/subagents` | 透传给 dsh host 命令注册表执行 |
+| 其他任何文本 | 作为 prompt 注入当前绑定的会话 |
+| `/settings` `/preset` `/theme` `/reload` `/hotkeys` `/model-sync` `/session` | 配置类命令回复「请在电脑端操作」（`/session` 例外：镜像为 `/status`） |
+| `/model` `/think` `/skills` | 暂同上（选择器语义，待做手机端文本列表流） |
+
+### 典型流程
+
+```
+出门前电脑上有会话跑到一半
+  → 地铁上打开飞书私聊 bot：/resume
+  → 回 /resume 3 进入那个会话
+  → 「继续把 e2e 修完，重点看 timeout 那两个 case」
+  → 收到 👀；状态卡实时刷新（🔧 bash · tools ✔3 ✘0 · 🧵 ×1 workhorse…）
+  → turn/end：状态卡 ✅ 定稿 + 完整回复正文
+  → 中途想叫停：/stop
+```
+
+### 与 TUI 的协同语义
+
+- bot 附着的是**同一个 agent 实例**：手机派的消息会出现在 TUI 转录里，TUI 侧照常
+  可以继续对话、`/model`、看面板——两边是同一会话的两个遥控器。
+- turn 进行中从手机再发消息会排队（inbox 语义），当前 turn 结束后自动处理。
+- resume 一个冷会话后它就在本进程 live 了；此后 TUI 再 `/resume` 同一个会话属未定义
+  行为（单操作者纪律下不会发生）。
+- 绑定关系、think 显示开关、最近聊天位置都持久化在 dsh settings 的 `dsh-feishu`
+  namespace，重启 dsh 后：live 的会话自动重新附着；冷的等你在手机上第一次说话时
+  才 lazy 恢复（启动阶段绝不主动发消息、绝不抢着 resume 占坑）。
+
+## 配置参考
+
+### patch 配置（`config:` 块）
 
 | key | 默认 | 说明 |
 | --- | --- | --- |
-| `mode` | `on` | `off` 完全停用 |
-| `domain` | `feishu` | `feishu` 或 `lark`（国际版） |
-| `operators` | `[]` | 操作者 open_id 白名单（必填才激活） |
-| `appId` / `appSecret` | — | 明文凭证逃生门（仅本地测试；优先走 credentials/env） |
-| `appIdRef` / `appSecretRef` | `dsh-feishu-app-id` / `dsh-feishu-app-secret` | credentials refs |
-| `statusIntervalMs` | `30000` | 状态卡节拍（5000–600000） |
-| `bodySegmentChars` | `3500` | 长正文分段阈值（500–30000） |
+| `mode` | `"on"` | `"off"` 完全停用插件 |
+| `domain` | `"feishu"` | `"feishu"`（国内）或 `"lark"`（国际版） |
+| `operators` | `[]` | 操作者 open_id 白名单，**必填才激活** |
+| `appId` / `appSecret` | — | 明文凭证逃生门，仅本地测试用；优先 credentials/env |
+| `appIdRef` | `"dsh-feishu-app-id"` | credentials 服务 ref 名 |
+| `appSecretRef` | `"dsh-feishu-app-secret"` | 同上 |
+| `statusIntervalMs` | `30000` | 状态卡更新节拍，范围 [5000, 600000] |
+| `bodySegmentChars` | `3500` | 长正文分段阈值，范围 [500, 30000] |
 
-运行时可变状态（当前绑定、think 显示开关、最近聊天）持久化在 dsh settings 的
-`dsh-feishu` namespace；无 settings 服务时退化为内存（重启后需重新 `/resume`）。
+未知 key 会直接报错拒绝启动（typo 不允许静默失效）。
+
+### 凭证来源优先级
+
+```
+patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials refs
+```
+
+### 运行时可变状态（settings namespace `dsh-feishu`）
+
+| 字段 | 说明 |
+| --- | --- |
+| `boundSessionId` | 当前绑定（经 `/resume` 或首次交互写入） |
+| `displayThink` | 状态卡尾行显示开关 |
+| `lastChatId` | 最近一次操作的私聊——状态卡发到这里 |
+
+无 settings 服务的 profile 里退化为内存态（重启后需重新 `/resume`，其余功能不受影响）。
 
 ## 安全模型
 
-- **全程只出站**：WSClient 出站长连接，不开任何入站端口，符合 dsh trust-fence 姿势。
-- **身份即认证**：每条消息校验 sender `open_id` 白名单；群聊消息忽略（v1 仅私聊）。
-- **单实例锁**：`$TMPDIR/dsh-feishu-bot.lock`（pid 存活探测，僵尸锁自动抢占）。
-  飞书长连接集群模式不广播，多实例会随机分摊事件——锁保证本机一个 bot。
-- **凭证纪律**：secret 走 credentials 服务或环境变量；repo 里只有 ref 名。
-- **不代建**：绝不 `agents.create`；对已 live 会话只 attach 不重复 resume。
+- **全程只出站**：一条到飞书长连接网关的 outbound WSS，零入站端口。符合 dsh
+  trust-fence「远程访问必须有认证层」的哲学——不需要 Tailscale/反代/隧道那一整层。
+- **身份即认证**：飞书租户账号体系自带身份；每条消息校验 sender `open_id` ∈ 白名单，
+  白名单外静默忽略。v1 仅私聊，群聊消息一律忽略。
+- **单实例锁**：`$TMPDIR/dsh-feishu-bot.lock`（记录 pid，死锁自动抢占）。飞书长连接
+  在多客户端下随机分摊事件，锁保证一台机器只有一个 bot 实例。
+- **凭证纪律**：App Secret 走 credentials 服务或环境变量；repo 与 settings.yaml 中
+  只有 ref 名。
+- **不代建会话**：永不调用 `agents.create`，从机制上消灭「双 main」；对已 live 的
+  会话只附着、绝不二次 resume。
 
-## 已知边界（v0.1）
+## 工作原理
 
-- 卡片按钮回调（`card.action.trigger`）未订阅——v1 全部交互走文本命令，无按钮。
-- `/model /think /skills` 手机端暂不可用（选择器语义，待做文本列表流）。
-- resume 附着后**不回放历史**：只发切换确认；状态从附着时刻起算。
-- turn 进行中附着（mid-turn attach）时，本轮计数从附着时刻起，不含已发生的步骤。
-- bot 与 TUI 各自 resume 同一个会话属未定义行为（registry 碰撞边界），单操作者
-  纪律下不会出现；`/resume N` 对 live 会话总是走 attach 规避。
-- 飞书消息卡片 `PATCH` 更新有频控；30s 节拍（2 次/分）距限频上限三个数量级。
-
-## 开发
-
-```bash
-npm run check   # tsc --noEmit（precheck 自动补链 dsh 闭包）
-npm test        # 构建 + node --test（纯逻辑单测）
+```
+┌─ dsh 进程 ─────────────────────────────────────────────────┐
+│  cordis root fiber                                         │
+│   ├─ dsh-base …                                            │
+│   ├─ tui-pi fiber（可选共存，互不干扰）                      │
+│   └─ feishu-bot fiber（本插件）                              │
+│        ├─ LarkClient   WSClient 出站 WSS（唯一外联）         │
+│        ├─ SessionBinder  attach(live) / resume(cold)，永不 create │
+│        ├─ RunState     firehose event → 纯函数状态机         │
+│        └─ Publisher    一 turn 一卡，30s 节拍原位 PATCH       │
+└────────────────────────────────────────────────────────────┘
+             ▲ session/event firehose（无 scope 过滤，含子会话）
+             ▼ agents.get/resume/followup/cancel
 ```
 
-结构：`src/lark-client.ts`（WS+REST 封装，唯一外联）· `src/bot.ts`（编排：入站
-队列/命令/卡片生命周期）· `src/binder.ts`（attach/resume，永不 create）·
-`src/run-state.ts` + `src/card.ts`（纯函数状态机与卡片投影）· `src/resume-table.ts`
-（/resume 表格流）· `src/commands.ts`（命令路由）· `src/state-store.ts`（settings
-namespace 持久化）· `src/index.ts`（入口/单实例锁/凭证）。
+模块地图（`src/`，全部纯逻辑有单测）：
 
-## 路线图（按设计文档渐进档位）
+| 模块 | 职责 |
+| --- | --- |
+| `lark-client.ts` | WS 接收 + REST 发送封装；所有发送 best-effort，飞书故障不影响 dsh |
+| `inbound.ts` | receive_v1 payload → 结构化消息（纯函数） |
+| `allowlist.ts` | open_id 白名单判定 |
+| `commands.ts` | 入站文本 → 意图路由（自有 / 透传 / 拒绝 / prompt） |
+| `binder.ts` | attach/resume 绑定核心与 handle 所有权 |
+| `run-state.ts` | firehose 事件折叠：rounds/tools/todo/retry/subagent |
+| `card.ts` | RunState → 卡片 JSON + 内容 hash（变化检测） |
+| `resume-table.ts` | /resume 列表的过滤、排序、并发 inspect、格式化 |
+| `state-store.ts` | settings namespace 持久化 + 内存退化 |
+| `index.ts` | 插件入口：配置校验、单实例锁、凭证解析、装配 |
 
-F1 完成/失败通知 ✅（状态卡定稿 + reaction）→ F4 派活 ✅ → F2 进度直播 ✅（状态卡）。
-未做：F3 审批到手机（`ctx.approval` 文本版）、F5 流式对话（CardKit，明确不做）。
+## 故障排查
+
+启动日志对照表（按出现顺序）：
+
+| 日志行 | 含义 | 处理 |
+| --- | --- | --- |
+| `invalid config — plugin disabled` | config 有未知 key / 数值越界 | 按报错改 patch 配置 |
+| `no operators configured — plugin dormant` | `operators` 为空 | 完成[第四步](#第四步配置操作者白名单) |
+| `another instance holds the bot lock — this fiber stays dormant` | 别的 dsh 进程占锁 | 杀掉旧进程，或删 `$TMPDIR/dsh-feishu-bot.lock`（确认无存活 pid） |
+| `no Lark credentials (tried config/env, then refs …)` | 三源都没读到凭证 | 完成[第三步](#第三步配置凭证)并重启 |
+| `startup failed — plugin dormant` | WS 连接失败（凭证错/网络不通） | 核对 App ID/Secret；国内网络确认能访问飞书 |
+| `armed (N operator(s), feishu)` | ✅ 正常运行 | — |
+
+运行期问题：
+
+| 现象 | 可能原因 |
+| --- | --- |
+| armed 但私聊不回 | 你的 open_id 与白名单不符（非白名单静默忽略，无任何回显）；或事件订阅没选长连接；或应用版本没发布 |
+| 能聊但 `/resume` 报无持久化服务 | 当前 profile 未配 session persistence 后端 |
+| `/resume N` 报选择过期 | 列表 5 分钟 TTL 已过，重发 `/resume` |
+| 状态卡一直不更新 | 该轮 turn 是在绑定之前开始的（mid-turn 附着的计数从附着时刻起算，卡片仍会在 turn/end 定稿） |
+| 发消息无 👀 | reaction API 权限未开通（`im:message.reactions:write`），失败静默不影响主流程 |
+| 改了凭证没生效 | 凭证在启动时解析一次，需重启 dsh |
+
+## 开发与测试
+
+```bash
+npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
+npm test         # 构建 + node --test（61 个纯逻辑单测）
+npm run build    # 仅构建 lib/
+```
+
+测试覆盖：text 工具、allowlist、config 校验、入站解析、run-state 状态机（含畸形事件
+不崩溃）、卡片投影与 hash、resume 表格流、命令路由、binder 所有权三分支、单实例锁。
+
+接手/深挖请读 `~/github/docs/handoff/HANDOFF-dsh-feishu.md`（自包含交接文档：
+架构不变量、实装现场、联调清单、延后项）。
+
+## 已知边界与路线图
+
+按设计文档的渐进档位：F1 完成通知 ✅ → F4 手机派活 ✅ → F2 进度直播 ✅（状态卡）。
+
+未做（有意延后，非缺陷）：
+
+- **F3 审批到手机**：`ctx.approval` 决议 API 形状待 spike（上游 `packages/user-approval`）
+- **`/model` `/think` `/skills` 手机端**：选择器语义，待做文本列表+序号流
+- **群聊支持**：@ 触发，安全模型留口
+- **卡片按钮回调**（`card.action.trigger`）：v1 全交互走文本命令
+- **CardKit 流式卡片**：明确不做（限频 1000/min，QwenPaw #5167 实测教训）；
+  30s 节拍原位更新距限频上限三个数量级
+
+其他边界：resume 附着后不回放历史；turn 进行中附着时计数从附着时刻起算；飞书消息
+PATCH 有频控但 30s 节拍远低于上限。
+
+---
+
+*License: MIT。作者 fan56。设计调研：`docs/dsh-feishu-bot-design-research.md`、
+`docs/dsh-feishu-bridge-research.md`（workspace docs/ 下）。*
