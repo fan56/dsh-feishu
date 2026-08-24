@@ -37,7 +37,8 @@
 | --- | --- |
 | 接入已有会话 | `/resume` 列出最近 10 个可恢复的根会话（目录 · 最后时间 · 首条消息预览），`/resume N` 进入 |
 | 手机派活 | 直接发文本即注入会话；turn 进行中到达的消息自动排队下一轮；消息同步出现在 TUI 转录里 |
-| 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo 进度 / 子代理行 |
+| 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo `☑ x/z` 进度 / 子代理行；note 页脚统计 `⏱ 耗时 · Turn N · 🤖 模型 · 📊 ctx · 🔧 calls · 🧠 档位（high/medium/low/off）` |
+| 增量进展卡 | 长任务进行中，每个有实质产出的节点推一张新卡（正文摘录 ≤300 字 + 页脚统计），最小间隔 `progressIntervalMs`（默认 3 分钟），间隔内产出合并进下一次推送 |
 | 收完整回复 | turn 结束后状态卡定稿（✅/❌/⛔ + 总耗时 + todo），assistant 正文分段发成普通消息 |
 | 子代理可见 | 主卡内紧凑行 `├ workhorse ↻ · round 2 · tail…`；`/sub N` 看单个子代理近况 |
 | 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 解绑当前会话 |
@@ -82,7 +83,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 61 个单测确认环境正常
+npm test               # 可选：跑 106 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -246,6 +247,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | `appIdRef` | `"dsh-feishu-app-id"` | credentials 服务 ref 名 |
 | `appSecretRef` | `"dsh-feishu-app-secret"` | 同上 |
 | `statusIntervalMs` | `30000` | 状态卡更新节拍，范围 [5000, 600000] |
+| `progressIntervalMs` | `180000` | 进展卡最小推送间隔，范围 [30000, 3600000] |
 | `bodySegmentChars` | `3500` | 长正文分段阈值，范围 [500, 30000] |
 
 未知 key 会直接报错拒绝启动（typo 不允许静默失效）。
@@ -339,7 +341,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（61 个纯逻辑单测）
+npm test         # 构建 + node --test（106 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 

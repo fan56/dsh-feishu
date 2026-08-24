@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildStatusCard, statusLine, todoLine, turnEndIcon } from '../lib/card.js'
+import {
+  buildBodyCard,
+  buildFooter,
+  buildProgressCard,
+  buildStatusCard,
+  footerFieldsOf,
+  shortModelName,
+  statusLine,
+  todoLine,
+  turnEndIcon,
+} from '../lib/card.js'
 import { foldBoundEvent, foldChildEvent, initialRunState } from '../lib/run-state.js'
 
 function event(type, data, time, seq) {
@@ -63,16 +73,28 @@ test('todo line hides once all items are done', () => {
   assert.equal(todoLine(state), undefined)
 })
 
+test('todo line with an empty in-progress title drops the icon segment', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('todo/write', { todos: [
+    { content: '', status: 'in_progress' },
+    { content: 'two', status: 'pending' },
+  ] }, 1100, 2))
+  // No dangling `◐  · ` separator in front of the counter.
+  assert.equal(todoLine(state), '☑ 0/2')
+})
+
 test('subagent rows render compactly with running-first order', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'oldfox', childId: 'c2' }, 1100, 2))
-  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 2, label: 'workhorse', childId: 'c1' }, 1200, 3))
-  foldChildEvent(state, 'c1', event('assistant/message', { message: { content: [{ type: 'text', text: 'digging' }] } }, 1300, 4))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'oldfox', childId: 'c2aa' }, 1100, 2))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 2, label: 'workhorse', childId: 'c1bb' }, 1200, 3))
+  foldChildEvent(state, 'c1bb', event('assistant/message', { message: { content: [{ type: 'text', text: 'digging' }] } }, 1300, 4))
   const md = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1400 }).card.elements[0].text.content
   assert.match(md, /🧵 ×2/)
-  assert.match(md, /├ workhorse ↻ · round 1 · digging/)
-  assert.match(md, /├ oldfox ↻ · round 0/)
+  // Display label = real name + short-hash suffix.
+  assert.match(md, /├ workhorse·c1bb ↻ · round 1 · digging/)
+  assert.match(md, /├ oldfox·c2aa ↻ · round 0/)
 })
 
 test('think tail renders only when displayThink is on', () => {
@@ -99,4 +121,123 @@ test('statusLine and turnEndIcon cover the remaining reasons', () => {
   assert.equal(turnEndIcon('aborted'), '⛔')
   assert.equal(turnEndIcon('max-tokens'), '⚠️')
   assert.match(statusLine(initialRunState(), 0), /❕/)
+})
+
+test('buildBodyCard ships the body verbatim in a schema 2.0 markdown element', () => {
+  const body = [
+    '**done** · rounds 3',
+    '- item one',
+    '- item two',
+    '```bash',
+    'echo hi',
+    '```',
+    '| a | b |',
+    '| --- | --- |',
+    '| 1 | 2 |',
+  ].join('\n')
+  const card = buildBodyCard(body)
+  assert.equal(card.schema, '2.0')
+  assert.deepEqual(card.config, { width_mode: 'fill' })
+  assert.equal(card.header, undefined)
+  assert.equal(card.body.elements.length, 1)
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  // Verbatim — no legacy downgrade conversion touches the body.
+  assert.equal(card.body.elements[0].content, body)
+})
+
+// ------------------------------------------------------------------ footer --
+
+test('buildFooter renders every field in order with · separators', () => {
+  const line = buildFooter({
+    elapsedMs: 754_000,
+    rounds: 8,
+    model: 'org/deepseek-v4',
+    contextPercent: 43.2,
+    toolCalls: 23,
+    thinking: 'high',
+  })
+  assert.equal(line, '⏱ 12m34s · Turn 8 · 🤖 deepseek-v4 · 📊 ctx 43% · 🔧 23 calls · 🧠 high')
+})
+
+test('buildFooter omits missing fields without leaving separators', () => {
+  assert.equal(buildFooter({}), '')
+  assert.equal(buildFooter({ model: 'deepseek-v4' }), '🤖 deepseek-v4')
+  // Zero counters are noise, not data — skipped like unknown fields.
+  assert.equal(buildFooter({ rounds: 0, toolCalls: 0, elapsedMs: 5000 }), '⏱ 5s')
+})
+
+test('buildFooter falls back from percent to raw tokens', () => {
+  const withPercent = buildFooter({ contextPercent: -5, contextTokens: 12_300 })
+  assert.match(withPercent, /📊 ctx 0%/) // clamped, percent wins when present
+  const tokensOnly = buildFooter({ contextTokens: 950 })
+  assert.equal(tokensOnly, '📊 ctx 950')
+  assert.equal(buildFooter({ contextTokens: 1_234_000 }), '📊 ctx 1.2M')
+})
+
+test('buildFooter shows the thinking level only when known', () => {
+  assert.equal(buildFooter({ thinking: 'medium' }), '🧠 medium')
+  assert.equal(buildFooter({ thinking: 'off' }), '🧠 off')
+  assert.equal(buildFooter({}), '')
+})
+
+test('footerFieldsOf derives fields from the run state and clock', () => {
+  // No request/header seen yet → the thinking level is unknown, field omitted.
+  assert.equal(footerFieldsOf(initialRunState(), 0).thinking, undefined)
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'org/deepseek-v4' } } }, 1100, 2))
+  foldBoundEvent(state, event('request/context', { contextWindow: 1000 }, 1200, 3))
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 400, outputTokens: 100 },
+    message: { content: [{ type: 'text', text: 'x' }] },
+  }, 1300, 4))
+  foldBoundEvent(state, event('tool/call', { callId: 'c', name: 'bash', arguments: '' }, 1400, 5))
+  foldBoundEvent(state, event('tool/result', { message: { content: [] } }, 1500, 6))
+  const fields = footerFieldsOf(state, 2000)
+  assert.equal(fields.model, 'org/deepseek-v4')
+  assert.equal(fields.rounds, 1)
+  assert.equal(fields.elapsedMs, 1000)
+  assert.equal(fields.toolCalls, 1)
+  // 500 tokens of a 1000-token window → 50%.
+  assert.equal(fields.contextPercent, 50)
+  assert.equal(fields.contextTokens, undefined)
+  // Header seen, effort absent → off (not omitted); a real level renders verbatim.
+  assert.equal(fields.thinking, 'off')
+})
+
+test('shortModelName strips the provider path', () => {
+  assert.equal(shortModelName('deepseek-v4'), 'deepseek-v4')
+  assert.equal(shortModelName('org/nested/deepseek-v4'), 'deepseek-v4')
+})
+
+test('the status-card note carries the footer plus the help hint', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm', reasoningEffort: 'high' } } }, 1100, 2))
+  const { card, hash } = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 })
+  const note = card.elements[1]
+  assert.equal(note.tag, 'note')
+  assert.match(note.elements[0].content, /🤖 m/)
+  assert.match(note.elements[0].content, /🧠 high/)
+  assert.equal(note.elements[1].content, 'dsh-feishu · /help 查看命令')
+  // The hash covers the footer so beat patches follow it.
+  assert.ok(hash.includes('🧠 high'))
+})
+
+// ----------------------------------------------------------- progress card --
+
+test('buildProgressCard ships a schema 2.0 markdown body with note footer', () => {
+  const card = buildProgressCard('step one done', '⏱ 30s · Turn 2')
+  assert.equal(card.schema, '2.0')
+  assert.deepEqual(card.config, { width_mode: 'fill' })
+  assert.equal(card.body.elements.length, 2)
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  assert.equal(card.body.elements[0].content, 'step one done')
+  assert.equal(card.body.elements[1].tag, 'note')
+  assert.equal(card.body.elements[1].elements[0].content, '⏱ 30s · Turn 2')
+})
+
+test('buildProgressCard omits the note when the footer is empty', () => {
+  const card = buildProgressCard('body only', '')
+  assert.equal(card.body.elements.length, 1)
 })

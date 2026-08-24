@@ -35,6 +35,12 @@ export interface Config {
   appSecretRef?: string
   /** Status-card update beat in ms (default 30000; clamped to [5000, 600000]). */
   statusIntervalMs?: number
+  /**
+   * Minimum interval between mid-turn progress-card pushes in ms
+   * (default 180000 = 3 min; clamped to [30000, 3600000]). Output produced
+   * inside the window merges into the next push.
+   */
+  progressIntervalMs?: number
   /** Long assistant bodies are segmented for Feishu at this size (default 3500). */
   bodySegmentChars?: number
 }
@@ -49,6 +55,7 @@ export const Config = z.object({
   appIdRef: z.string().default('dsh-feishu-app-id'),
   appSecretRef: z.string().default('dsh-feishu-app-secret'),
   statusIntervalMs: z.number().min(5000).max(600000).step(1).default(30000),
+  progressIntervalMs: z.number().min(30000).max(3600000).step(1).default(180000),
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
 }) as unknown as z<Config>
 
@@ -62,12 +69,13 @@ export interface ResolvedConfig {
   readonly appIdRef: string
   readonly appSecretRef: string
   readonly statusIntervalMs: number
+  readonly progressIntervalMs: number
   readonly bodySegmentChars: number
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
-  'statusIntervalMs', 'bodySegmentChars',
+  'statusIntervalMs', 'progressIntervalMs', 'bodySegmentChars',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -91,6 +99,10 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   if (!Number.isSafeInteger(statusIntervalMs) || statusIntervalMs < 5000 || statusIntervalMs > 600000) {
     throw new Error('dsh-feishu: statusIntervalMs must be an integer in [5000, 600000]')
   }
+  const progressIntervalMs = config?.progressIntervalMs ?? 180000
+  if (!Number.isSafeInteger(progressIntervalMs) || progressIntervalMs < 30000 || progressIntervalMs > 3600000) {
+    throw new Error('dsh-feishu: progressIntervalMs must be an integer in [30000, 3600000]')
+  }
   const bodySegmentChars = config?.bodySegmentChars ?? 3500
   if (!Number.isSafeInteger(bodySegmentChars) || bodySegmentChars < 500 || bodySegmentChars > 30000) {
     throw new Error('dsh-feishu: bodySegmentChars must be an integer in [500, 30000]')
@@ -108,6 +120,7 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     appIdRef: config?.appIdRef ?? 'dsh-feishu-app-id',
     appSecretRef: config?.appSecretRef ?? 'dsh-feishu-app-secret',
     statusIntervalMs,
+    progressIntervalMs,
     bodySegmentChars,
   })
 }

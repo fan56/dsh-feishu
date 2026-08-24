@@ -8,7 +8,11 @@
  * - prompts inject via `agent.followup` (queued when a turn is running);
  * - one status card per turn, opened on turn/start (or on a mid-turn bind),
  *   patched in place on the status beat ONLY when content changed, finalized
- *   on turn/end, followed by the assistant body as plain messages;
+ *   on turn/end, followed by the assistant body as minimal body cards;
+ * - mid-turn PROGRESS cards: every substantive assistant message may ship a
+ *   new excerpt card, throttled to `progressIntervalMs` (default 3 min) —
+ *   output inside the window merges into the next push; the status card
+ *   lifecycle above is untouched;
  * - no replay of session history on bind (live events from bind time on).
  */
 
@@ -17,16 +21,27 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { isOperator } from './allowlist.ts'
-import { buildStatusCard, type InteractiveCard } from './card.ts'
+import { buildBodyCard, buildFooter, buildProgressCard, buildStatusCard, footerFieldsOf, type InteractiveCard } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
 import { buildResumeRows, formatResumeTable, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
-import { foldBoundEvent, foldChildEvent, initialRunState, lastTurnBody, type RunState, subagentRows } from './run-state.ts'
+import {
+  foldBoundEvent,
+  foldChildEvent,
+  initialProgressCursor,
+  initialRunState,
+  lastTurnBody,
+  progressBodySince,
+  shouldPushProgress,
+  type ProgressCursor,
+  type RunState,
+  subagentRows,
+} from './run-state.ts'
 import type { SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
-import { clipLine, segmentText } from './text.ts'
+import { clipLine, segmentText, truncateBody } from './text.ts'
 
 /** A pending /resume table awaiting its index reply (5-minute lifetime). */
 interface PendingPicker {
@@ -35,6 +50,12 @@ interface PendingPicker {
 }
 
 const PICKER_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Progress-card excerpt cap (~chars): long outputs are truncated for
+ * phone-narrow screens with an omission notice.
+ */
+const PROGRESS_EXCERPT_CHARS = 300
 
 export interface BotDeps {
   readonly ctx: Context
@@ -57,6 +78,10 @@ export class FeishuBot {
   private readonly now: () => number
 
   private readonly runState: RunState = initialRunState()
+  /** Mid-turn progress-card throttle cursor (reset per turn). */
+  private progressCursor: ProgressCursor = initialProgressCursor()
+  /** Guards against concurrent progress pushes racing on fast messages. */
+  private pushingProgress = false
   private pendingPicker: PendingPicker | undefined
   private cardMessageId: string | undefined
   private cardHash: string | undefined
@@ -162,18 +187,19 @@ export class FeishuBot {
     }
   }
 
+  /** Reply with a body card — markdown renders in lark_md, not in msg_type=text. */
   private async reply(text: string): Promise<void> {
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
-    await this.lark.sendText(chatId, text)
+    await this.lark.sendCard(chatId, buildBodyCard(text))
   }
 
-  /** Reply with a long body, segmented at the configured size. */
+  /** Reply with a long body, segmented at the configured size; each segment ships as its own card. */
   private async replyLong(text: string): Promise<void> {
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
     for (const segment of segmentText(text, this.config.bodySegmentChars)) {
-      await this.lark.sendText(chatId, segment)
+      await this.lark.sendCard(chatId, buildBodyCard(segment))
     }
   }
 
@@ -393,7 +419,13 @@ export class FeishuBot {
     if (sessionId === boundId) {
       foldBoundEvent(this.runState, event)
       if (event.type === 'turn/start') {
+        // Seed the progress cursor at turn START: the first progress push
+        // waits one full interval, so short turns never double-push before
+        // the final summary.
+        this.progressCursor = { pushedTexts: 0, lastPushAt: event.time }
         void this.openCard()
+      } else if (event.type === 'assistant/message') {
+        void this.maybePushProgress()
       } else if (event.type === 'turn/end') {
         void this.finalizeTurn()
       }
@@ -444,6 +476,9 @@ export class FeishuBot {
     if (!this.runState.running) {
       this.runState.running = true
       this.runState.turnStartedAt = this.now()
+      // Mid-turn attach counts as "just pushed" so the first progress card
+      // still waits one interval before appearing.
+      this.progressCursor = { pushedTexts: 0, lastPushAt: this.now() }
     }
     void this.openCard()
   }
@@ -459,6 +494,42 @@ export class FeishuBot {
     if (hash === this.cardHash) return
     this.cardHash = hash
     void this.lark.patchCard(this.cardMessageId, card)
+  }
+
+  /**
+   * Mid-turn progress push (feature: throttled incremental progress cards).
+   * Runs on every assistant/message of the bound session; ships a NEW card
+   * when the turn produced substantive unpushed text AND the minimum interval
+   * elapsed. Output inside the window simply stays unpushed — it merges into
+   * the next eligible push. The status-card lifecycle is untouched.
+   */
+  private async maybePushProgress(): Promise<void> {
+    if (this.pushingProgress || !this.runState.running || this.disposed) return
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) return
+    const now = this.now()
+    if (!shouldPushProgress(this.runState, this.progressCursor, now, this.config.progressIntervalMs)) return
+    // Snapshot the shipped boundary BEFORE computing the body: texts landing
+    // inside the send window are NOT in this card, so they must stay unpushed
+    // and merge into the next eligible push.
+    const shippedUpTo = this.runState.assistantTexts.length
+    const body = truncateBody(progressBodySince(this.runState, this.progressCursor), PROGRESS_EXCERPT_CHARS)
+    const footer = buildFooter(footerFieldsOf(this.runState, now))
+    this.pushingProgress = true
+    try {
+      const messageId = await this.lark.sendCard(chatId, buildProgressCard(body, footer))
+      // Advance only when the card actually shipped: sendCard swallows errors
+      // and resolves to undefined on failure (never rejects). On failure the
+      // cursor stays put — the next eligible excerpt still carries anything
+      // unshipped, including this window's content.
+      if (messageId === undefined) return
+      // Advance to the snapshot, never the live length — mid-send arrivals
+      // were not shown yet and must stay unpushed.
+      this.progressCursor.pushedTexts = shippedUpTo
+      this.progressCursor.lastPushAt = now
+    } finally {
+      this.pushingProgress = false
+    }
   }
 
   /** turn/end: finalize the card, then send the assistant body. */
@@ -520,6 +591,7 @@ export class FeishuBot {
     this.runState.runSeqToChild = fresh.runSeqToChild
     this.cardMessageId = undefined
     this.cardHash = undefined
+    this.progressCursor = initialProgressCursor()
     this.turnOriginMessageId = undefined
   }
 
@@ -545,7 +617,7 @@ export class FeishuBot {
       const live = subagentRows(state).filter(row => row.outcome === undefined).length
       if (live > 0) parts.push(`🧵 ×${live}`)
       lines.push(`▶ 本轮：${parts.join(' · ')}`)
-      if (state.lastAssistantLine !== undefined) lines.push(`最后输出：${clipLine(state.lastAssistantLine, 120)}`)
+      if (state.lastAssistantLine !== undefined) lines.push(`最后输出：${clipLine(state.lastAssistantLine, 80)}`)
     }
     lines.push(`🖥 think 尾行：${this.store.get().displayThink ? 'on' : 'off'}（/display think on|off）`)
     return lines.join('\n')

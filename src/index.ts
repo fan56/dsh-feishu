@@ -195,6 +195,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         appSecret: creds.appSecret,
         domain: policy.domain,
         onError: (what, error) => ctx.logger.warn('dsh-feishu: %s failed: %o', what, error),
+        // Bridge SDK log lines into the plugin channel so nothing from the
+        // Lark SDK ever touches the console/stderr behind the TUI's back.
+        onLog: (level, message) => ctx.logger[level]('dsh-feishu[lark-sdk]: %s', message),
       }),
       binder: new SessionBinder(ctx),
       store: new StateStore(ctx),

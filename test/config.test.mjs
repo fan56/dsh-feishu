@@ -8,6 +8,7 @@ test('defaults apply for an empty config', () => {
   assert.equal(resolved.domain, 'feishu')
   assert.deepEqual(resolved.operators, [])
   assert.equal(resolved.statusIntervalMs, 30000)
+  assert.equal(resolved.progressIntervalMs, 180000)
   assert.equal(resolved.bodySegmentChars, 3500)
   assert.equal(resolved.appIdRef, 'dsh-feishu-app-id')
   assert.equal(resolved.appSecretRef, 'dsh-feishu-app-secret')
@@ -45,5 +46,11 @@ test('mode off and domain lark are honored', () => {
 
 test('out-of-range numeric options throw', () => {
   assert.throws(() => resolveConfig({ statusIntervalMs: 1000 }, {}), /statusIntervalMs/)
+  assert.throws(() => resolveConfig({ progressIntervalMs: 1000 }, {}), /progressIntervalMs/)
   assert.throws(() => resolveConfig({ bodySegmentChars: 100 }, {}), /bodySegmentChars/)
+})
+
+test('progressIntervalMs honors a custom in-range value', () => {
+  const resolved = resolveConfig({ progressIntervalMs: 60000 }, {})
+  assert.equal(resolved.progressIntervalMs, 60000)
 })

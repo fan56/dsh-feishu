@@ -76,6 +76,21 @@ export interface RunState {
   assistantTexts: string[]
   /** Last visible line of the latest assistant message (status snapshot). */
   lastAssistantLine: string | undefined
+  /** Provider route of the latest `request/header` (undefined until seen). */
+  provider: string | undefined
+  /** Model id of the latest `request/header` (undefined until seen). */
+  model: string | undefined
+  /** Reasoning effort of the latest `request/header` (undefined = unknown/off). */
+  reasoningEffort: string | undefined
+  /** Context window in tokens from the latest `request/context`, when advertised. */
+  contextWindow: number | undefined
+  /** Billed context tokens (input+cache+output) of the latest usage snapshot. */
+  lastUsageTokens: number | undefined
+  /**
+   * Characters streamed (text/reasoning deltas) since the latest usage
+   * snapshot — a rough growth estimate, not a billed number.
+   */
+  pendingChars: number
 }
 
 /** Fresh state (no turn observed). */
@@ -99,10 +114,20 @@ export function initialRunState(): RunState {
     maxRetries: undefined,
     assistantTexts: [],
     lastAssistantLine: undefined,
+    provider: undefined,
+    model: undefined,
+    reasoningEffort: undefined,
+    contextWindow: undefined,
+    lastUsageTokens: undefined,
+    pendingChars: 0,
   }
 }
 
-/** Per-turn reset — also clears the whole-run counters (card scope is one turn). */
+/**
+ * Per-turn reset. The route/window fields (provider, model, reasoningEffort,
+ * contextWindow) are turn-INDEPENDENT — they describe the session's current
+ * request route and survive across turns; only per-turn counters clear.
+ */
 function beginTurn(state: RunState, time: number): void {
   state.running = true
   state.turnStartedAt = time
@@ -122,6 +147,8 @@ function beginTurn(state: RunState, time: number): void {
   state.maxRetries = undefined
   state.assistantTexts = []
   state.lastAssistantLine = undefined
+  state.lastUsageTokens = undefined
+  state.pendingChars = 0
 }
 
 function endTurn(state: RunState, time: number, reason: string): void {
@@ -157,6 +184,33 @@ function assistantTextOf(data: unknown): string {
 }
 
 /**
+ * Billed context tokens of an assistant/message usage snapshot
+ * (input + cache read + cache write + output), or undefined when the event
+ * carries no usage (adapter reported none).
+ */
+function usageTokensOf(data: unknown): number | undefined {
+  const usage = rec<{ usage?: { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown } }>(data).usage
+  if (usage === undefined) return undefined
+  const input = typeof usage.inputTokens === 'number' ? usage.inputTokens : undefined
+  const output = typeof usage.outputTokens === 'number' ? usage.outputTokens : undefined
+  if (input === undefined || output === undefined) return undefined
+  const cacheRead = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0
+  const cacheWrite = typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0
+  return input + cacheRead + cacheWrite + output
+}
+
+/** Route scalars off a `request/header` event (`data.header.config`). */
+function headerConfigOf(data: unknown): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
+  const config = rec<{ header?: { config?: Record<string, unknown> } }>(data).header?.config
+  if (config === undefined) return undefined
+  const out: { provider?: string; model?: string; reasoningEffort?: string } = {}
+  if (typeof config.provider === 'string') out.provider = config.provider
+  if (typeof config.model === 'string') out.model = config.model
+  if (typeof config.reasoningEffort === 'string') out.reasoningEffort = config.reasoningEffort
+  return out
+}
+
+/**
  * Fold one event of the BOUND session into the state. Mutates `state` in
  * place for O(1) cost; returns it for chaining.
  */
@@ -182,6 +236,11 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       state.retries = 0
       state.maxRetries = undefined
       state.thinkingSince = undefined
+      // Usage snapshot finalizes the billed context; the streamed estimate
+      // restarts from what follows this message.
+      const usageTokens = usageTokensOf(event.data)
+      if (usageTokens !== undefined) state.lastUsageTokens = usageTokens
+      state.pendingChars = 0
       break
     }
     case 'assistant/chunk': {
@@ -191,6 +250,30 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
         let buffer = state.reasoningBuffer + (chunk.text ?? '')
         if (buffer.length > REASONING_CAP) buffer = buffer.slice(-Math.floor(REASONING_CAP / 2))
         state.reasoningBuffer = buffer
+      }
+      // Both text and reasoning deltas grow the next request's context —
+      // price them into the live estimate (~3 chars/token, CJK-lean).
+      if (
+        (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta')
+        && typeof chunk.text === 'string' && chunk.text !== ''
+      ) {
+        state.pendingChars += chunk.text.length
+      }
+      break
+    }
+    case 'request/header': {
+      const config = headerConfigOf(event.data)
+      if (config?.provider !== undefined) state.provider = config.provider
+      if (config?.model !== undefined) state.model = config.model
+      // undefined means the field is ABSENT from the header — keep the last
+      // known value; an explicit off is not representable here.
+      if (config?.reasoningEffort !== undefined) state.reasoningEffort = config.reasoningEffort
+      break
+    }
+    case 'request/context': {
+      const window = rec<{ contextWindow?: unknown }>(event.data).contextWindow
+      if (typeof window === 'number' && Number.isFinite(window) && window > 0) {
+        state.contextWindow = window
       }
       break
     }
@@ -233,11 +316,14 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       break
     }
     case 'tool-workflow/agent-start': {
-      const childId = rec(event.data).childId
+      const data = rec(event.data)
+      const childId = data.childId
       if (childId !== undefined && !state.subagents.has(childId)) {
         state.subagents.set(childId, {
           childId,
-          label: rec(event.data).label ?? `subagent ${childId.slice(0, 8)}`,
+          // Only a real string label is kept; anything else falls back to the
+          // hash-derived placeholder (a numeric label must not leak in).
+          label: typeof data.label === 'string' ? data.label : `subagent ${childId.slice(0, 8)}`,
           rounds: 0,
           tail: undefined,
           lastTool: undefined,
@@ -297,6 +383,13 @@ export function foldChildEvent(
   }
   if (label !== undefined && row.label !== label) row.label = label
   switch (event.type) {
+    case 'subagent/descriptor': {
+      // The child's own log refines the durable identity (the workflow
+      // agent-start label is a fallback): last non-empty label wins.
+      const descriptor = rec<{ label?: unknown }>(event.data)
+      if (typeof descriptor.label === 'string' && descriptor.label !== '') row.label = descriptor.label
+      break
+    }
     case 'assistant/message': {
       row.rounds += 1
       const text = assistantTextOf(event.data)
@@ -343,4 +436,81 @@ export function lastTurnBody(state: RunState): string {
 /** Reasoning tail — last visible line of the capped reasoning buffer. */
 export function reasoningTail(state: RunState): string | undefined {
   return state.reasoningBuffer === '' ? undefined : lastNonBlankLine(state.reasoningBuffer)
+}
+
+/**
+ * Live context-occupancy estimate in tokens: the latest billed usage
+ * (input+cache+output) plus a rough ~3-chars-per-token estimate of what
+ * streamed after it. Undefined before the first usage snapshot with no
+ * streamed estimate either — footer omits the field then.
+ */
+export function contextTokensEstimate(state: RunState): number | undefined {
+  const pending = Math.ceil(state.pendingChars / 3)
+  if (state.lastUsageTokens === undefined) return pending > 0 ? pending : undefined
+  return state.lastUsageTokens + pending
+}
+
+/** Default fallback label pattern (`subagent <id8>`) — not a real name. */
+const FALLBACK_LABEL_RE = /^subagent [0-9a-f]{8}$/
+
+/**
+ * Display label for a subagent row: real name + short-hash suffix when the
+ * workflow/descriptor events carried one (`workhorse·49a6`, disambiguates
+ * same-name instances), otherwise the raw hash prefix.
+ */
+export function subagentDisplayLabel(row: SubagentRow): string {
+  const shortHash = row.childId.slice(0, 4)
+  if (row.label !== '' && !FALLBACK_LABEL_RE.test(row.label)) {
+    return `${row.label}·${shortHash}`
+  }
+  // TODO(subagent-name): use_agent children whose deployment emits neither
+  // tool-workflow/agent-start labels nor subagent/descriptor payloads have no
+  // name in the event stream — fall back to the hash prefix until a naming
+  // source exists.
+  return row.childId.slice(0, 8)
+}
+
+// ------------------------------------------------------- progress throttle --
+
+/**
+ * Cursor of the mid-turn progress-card pusher: how much of the turn body has
+ * already been shipped and when the last push went out. Pure data — the bot
+ * owns the side effects.
+ */
+export interface ProgressCursor {
+  /** assistantTexts length already pushed to progress cards. */
+  pushedTexts: number
+  /** Epoch ms of the last progress push (0 = never this turn). */
+  lastPushAt: number
+}
+
+/** Fresh cursor for a new turn. */
+export function initialProgressCursor(): ProgressCursor {
+  return { pushedTexts: 0, lastPushAt: 0 }
+}
+
+/**
+ * Unpushed body text since the cursor — the excerpt a progress card would
+ * show. Empty when nothing new was produced (pure tool rounds).
+ */
+export function progressBodySince(state: RunState, cursor: ProgressCursor): string {
+  return state.assistantTexts.slice(cursor.pushedTexts).join('\n\n').trim()
+}
+
+/**
+ * Whether a progress card should ship NOW: the turn is running AND there is
+ * substantive unpushed text AND the minimum interval since the previous push
+ * has elapsed. Merging rule: within the interval output simply stays
+ * unpushed — {@link progressBodySince} naturally accumulates it for the next
+ * eligible push.
+ */
+export function shouldPushProgress(
+  state: RunState,
+  cursor: ProgressCursor,
+  now: number,
+  minIntervalMs: number,
+): boolean {
+  if (!state.running) return false
+  if (progressBodySince(state, cursor) === '') return false
+  return now - cursor.lastPushAt >= minIntervalMs
 }
