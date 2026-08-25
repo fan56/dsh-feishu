@@ -9,8 +9,9 @@
  *   turn's next round — the operator's mid-course corrections land
  *   immediately) and `agent.followup` when idle (open the next turn);
  * - one card per ROUND: opened when the round starts (turn/start, or right
- *   after the previous round settled), patched in place on the status beat
- *   ONLY when content changed, settled to "Round N · 💬 回复" when its
+ *   after the previous round settled), patched in place on the 5s status
+ *   beat ONLY when content changed (pseudo-streaming: in-flight text grows
+ *   a ✍️ tail between beats), settled to "Round N · 💬 回复" when its
  *   assistant/message lands — the round's text ships verbatim as a body
  *   card right after — and the turn's last card carries the end state;
  * - card operations serialize on a chain so settle-patch → body → next-open

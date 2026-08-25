@@ -33,7 +33,7 @@ export interface Config {
   appIdRef?: string
   /** Credentials-service ref for the app secret (default `dsh-feishu-app-secret`). */
   appSecretRef?: string
-  /** Status-card update beat in ms (default 30000; clamped to [5000, 600000]). */
+  /** Status-card update beat in ms (default 5000 — pseudo-streaming; clamped to [5000, 600000]). */
   statusIntervalMs?: number
   /**
    * Minimum interval between mid-turn progress-card pushes in ms
@@ -59,7 +59,7 @@ export const Config = z.object({
   appSecret: z.string().default(''),
   appIdRef: z.string().default('dsh-feishu-app-id'),
   appSecretRef: z.string().default('dsh-feishu-app-secret'),
-  statusIntervalMs: z.number().min(5000).max(600000).step(1).default(30000),
+  statusIntervalMs: z.number().min(5000).max(600000).step(1).default(5000),
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
   resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
 }) as unknown as z<Config>
@@ -100,7 +100,7 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     }
   }
   const domain = config?.domain === 'lark' ? 'lark' : 'feishu'
-  const statusIntervalMs = config?.statusIntervalMs ?? 30000
+  const statusIntervalMs = config?.statusIntervalMs ?? 5000
   if (!Number.isSafeInteger(statusIntervalMs) || statusIntervalMs < 5000 || statusIntervalMs > 600000) {
     throw new Error('dsh-feishu: statusIntervalMs must be an integer in [5000, 600000]')
   }

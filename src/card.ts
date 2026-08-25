@@ -21,7 +21,7 @@
  */
 
 import type { RunState } from './run-state.ts'
-import { contextTokensEstimate, reasoningTail, subagentDisplayLabel, subagentRows } from './run-state.ts'
+import { contextTokensEstimate, reasoningTail, streamingTextTail, subagentDisplayLabel, subagentRows } from './run-state.ts'
 import { clipLine, formatDuration, formatWhen } from './text.ts'
 import type { ResumeRow } from './resume-table.ts'
 
@@ -197,6 +197,10 @@ function activityItems(state: RunState, now: number, displayThink: boolean): str
     const duration = formatDuration(Math.max(0, now - state.thinkingSince))
     const suffix = displayThink && tail !== undefined ? ` — _${clipLine(tail, TAIL_CLIP)}_` : ''
     items.push(`- 🤔 thinking · ${duration}${suffix}`)
+  }
+  const streaming = streamingTextTail(state)
+  if (streaming !== undefined) {
+    items.push(`- ✍️ _${clipLine(streaming, TAIL_CLIP)}_`)
   }
   return items
 }

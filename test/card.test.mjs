@@ -518,3 +518,17 @@ test('empty markdown session list reuses the shared empty notice', () => {
   assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].content, '没有可恢复的会话。')
 })
+
+
+test('the in-flight message streams into the activity list as a ✍️ tail', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'text-delta', text: 'the fix is in\nwriting tests now' } }, 1100, 2))
+  const mdText = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card.body.elements[0].content
+  assert.match(mdText, /- ✍️ _writing tests now_/)
+  // Landing the message replaces the streaming tail with the settled 💬 line.
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'the fix is in' }] } }, 1200, 3))
+  const mdDone = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card.body.elements[0].content
+  assert.doesNotMatch(mdDone, /✍️/)
+  assert.match(mdDone, /- 💬 _the fix is in_/)
+})

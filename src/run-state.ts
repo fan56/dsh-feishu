@@ -23,6 +23,9 @@ export const TOOL_HISTORY_CAP = 8
 /** Cap on the raw reasoning buffer (tail extraction only). */
 const REASONING_CAP = 8192
 
+/** Cap on the in-flight text buffer (streaming tail display only). */
+const TEXT_CAP = 8192
+
 /** One settled tool for the status line (`✔ bash 1.2s`). */
 export interface ToolSettledRow {
   readonly name: string
@@ -64,6 +67,8 @@ export interface RunState {
   thinkingSince: number | undefined
   /** Raw reasoning buffer (capped) — tail source when think display is on. */
   reasoningBuffer: string
+  /** In-flight text deltas of the round's growing message (capped) — streaming tail. */
+  textBuffer: string
   /** Pending tool (between tool/call and tool/result). */
   currentTool: { name: string; startedAt: number } | undefined
   toolsDone: number
@@ -123,6 +128,7 @@ export function initialRunState(): RunState {
     lastRoundText: '',
     thinkingSince: undefined,
     reasoningBuffer: '',
+    textBuffer: '',
     currentTool: undefined,
     toolsDone: 0,
     toolsFailed: 0,
@@ -162,6 +168,7 @@ function beginTurn(state: RunState, time: number): void {
   state.lastRoundText = ''
   state.thinkingSince = undefined
   state.reasoningBuffer = ''
+  state.textBuffer = ''
   state.currentTool = undefined
   state.toolsDone = 0
   state.toolsFailed = 0
@@ -197,6 +204,7 @@ export function beginRound(state: RunState): void {
   state.currentTool = undefined
   state.thinkingSince = undefined
   state.reasoningBuffer = ''
+  state.textBuffer = ''
   state.toolHistory = []
   state.lastAssistantLine = undefined
   state.lastRoundText = ''
@@ -286,6 +294,7 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       // One message = one settled round: capture its duration and verbatim
       // text for the settled card + body, then the next round starts now.
       state.lastRoundText = text
+      state.textBuffer = '' // the streamed text just landed in full
       state.lastRoundDurationMs = state.roundStartedAt === undefined
         ? 0
         : Math.max(0, event.time - state.roundStartedAt)
@@ -318,6 +327,13 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
         let buffer = state.reasoningBuffer + (chunk.text ?? '')
         if (buffer.length > REASONING_CAP) buffer = buffer.slice(-Math.floor(REASONING_CAP / 2))
         state.reasoningBuffer = buffer
+      }
+      // Text deltas also grow the in-flight message buffer — the streaming
+      // tail the activity list shows between beats (capped like reasoning).
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
+        let buffer = state.textBuffer + chunk.text
+        if (buffer.length > TEXT_CAP) buffer = buffer.slice(-Math.floor(TEXT_CAP / 2))
+        state.textBuffer = buffer
       }
       // Both text and reasoning deltas grow the next request's context —
       // price them into the live estimate (~3 chars/token, CJK-lean).
@@ -512,6 +528,11 @@ export function subagentRows(state: RunState): SubagentRow[] {
 /** Reasoning tail — last visible line of the capped reasoning buffer. */
 export function reasoningTail(state: RunState): string | undefined {
   return state.reasoningBuffer === '' ? undefined : lastNonBlankLine(state.reasoningBuffer)
+}
+
+/** Streaming text tail — last visible line of the round's in-flight message. */
+export function streamingTextTail(state: RunState): string | undefined {
+  return state.textBuffer === '' ? undefined : lastNonBlankLine(state.textBuffer)
 }
 
 /**

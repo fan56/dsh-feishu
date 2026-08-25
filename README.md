@@ -37,7 +37,7 @@
 | --- | --- |
 | 接入已有会话 | `/resume` 以飞书原生表格列出最近更新的 10 个可恢复根会话（`#` · 会话（预览·目录）· 最后更新时间；排序口径与 TUI 一致——jsonl 日志 mtime，缺失时回退 createdAt），`/resume N` 进入；默认 `auto` 渲染——表格卡**发送失败**（服务端拒收/限流重试耗尽/传输错误）自动降级重发一次 markdown 有序列表，`table`/`list` 可强制指定。注意：老客户端「收到了但静默渲染不出表格」发生在投递之后、发送侧检测不到，那种场景请配 `resumeListStyle: "list"` |
 | 手机派活 | 直接发文本即注入会话：turn **运行中默认 steer**（dsh inbox `next-step`，并入当前 turn 的下一个 round——中途纠偏即时生效）；空闲时 followup 开新 turn。消息同步出现在 TUI 转录里 |
-| Round 卡 | **每个 round（一次 LLM 往返）一张卡**：round 开始即推送（header `Round N` + 当前状态：🤔 thinking / 🔧 工具名 / ⚙️ processing / ⏳ subagent ×k），30s 节拍原位更新；round 落地定稿为 `Round N · 💬 回复 · 时长` 并**紧随原文正文卡**；turn 结束把在飞卡定稿为 `Round N · ✅/❌/⛔ · 总耗时`。正文为 markdown 章节——**活动**（thinking 状态、工具调用、本轮 LLM 消息行）、**子代理**（状态 + 最新输出行）、**Todo**（首行 `☑ x/z`，条目 `- [x]`/`- [ ]`），页脚统计 `⏱ 耗时 · 🤖 模型 · 🧠 档位 · 📊 ctx% · ⚡ CH%（网关上报才显示） · 🔧 calls`（路由/缓存基线绑定时从会话日志回填） |
+| Round 卡 | **每个 round（一次 LLM 往返）一张卡**：round 开始即推送（header `Round N` + 当前状态：🤔 thinking / 🔧 工具名 / ⚙️ processing / ⏳ subagent ×k），**5s 节拍**原位更新（伪流式：生成中的正文以 ✍️ 尾行随节拍生长）；round 落地定稿为 `Round N · 💬 回复 · 时长` 并**紧随原文正文卡**；turn 结束把在飞卡定稿为 `Round N · ✅/❌/⛔ · 总耗时`。正文为 markdown 章节——**活动**（thinking 状态、工具调用、本轮 LLM 消息行）、**子代理**（状态 + 最新输出行）、**Todo**（首行 `☑ x/z`，条目 `- [x]`/`- [ ]`），页脚统计 `⏱ 耗时 · 🤖 模型 · 🧠 档位 · 📊 ctx% · ⚡ CH%（网关上报才显示） · 🔧 calls`（路由/缓存基线绑定时从会话日志回填） |
 | 收完整回复 | 每个 round 落地时其 assistant 正文即原文分段送达（代码块/表格原生渲染）；turn 结束尾卡定稿 |
 | 子代理可见 | 独立**子代理**章节逐个列出：`workhorse·49a6 · ⏳ round 2 · 🔧 bash · 最新输出行`（收尾显示 ✔/✘/⛔）；`/sub N` 看单个子代理近况 |
 | 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 解绑当前会话 |
@@ -82,7 +82,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 150 个单测确认环境正常
+npm test               # 可选：跑 152 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -247,7 +247,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | `appId` / `appSecret` | — | 明文凭证逃生门，仅本地测试用；优先 credentials/env |
 | `appIdRef` | `"dsh-feishu-app-id"` | credentials 服务 ref 名 |
 | `appSecretRef` | `"dsh-feishu-app-secret"` | 同上 |
-| `statusIntervalMs` | `30000` | 状态卡更新节拍，范围 [5000, 600000] |
+| `statusIntervalMs` | `5000` | 状态卡更新节拍（伪流式默认 5s），范围 [5000, 600000] |
 | `bodySegmentChars` | `3500` | 长正文分段阈值，范围 [500, 30000] |
 | `resumeListStyle` | `"auto"` | `/resume` 会话列表渲染方式：`auto` 先发表格卡、发送失败自动降级为 markdown 有序列表重发一次；`table` / `list` 强制指定 |
 
@@ -293,7 +293,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 │        ├─ LarkClient   WSClient 出站 WSS（唯一外联）         │
 │        ├─ SessionBinder  attach(live) / resume(cold)，永不 create │
 │        ├─ RunState     firehose event → 纯函数状态机         │
-│        └─ Publisher    一 round 一卡（💬 定稿+原文），30s PATCH     │
+│        └─ Publisher    一 round 一卡（💬 定稿+原文），5s PATCH        │
 └────────────────────────────────────────────────────────────┘
              ▲ session/event firehose（无 scope 过滤，含子会话）
              ▼ agents.get/resume/followup/cancel
@@ -342,7 +342,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（150 个纯逻辑单测）
+npm test         # 构建 + node --test（152 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 
@@ -366,7 +366,8 @@ npm run build    # 仅构建 lib/
   30s 节拍原位更新距限频上限三个数量级
 
 其他边界：resume 附着后不回放历史；turn 进行中附着时计数从附着时刻起算；飞书消息
-PATCH 有频控但 30s 节拍远低于上限。
+PATCH 有频控但 5s 节拍（≈12 次/分钟）远低于上限；原生流式（CardKit 流式卡片）
+设计阶段已否决（限频 1000/min，另起一套卡片体系），伪流式 = 快节拍 + 尾行。
 
 ---
 

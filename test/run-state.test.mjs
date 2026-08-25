@@ -11,6 +11,7 @@ import {
   foldChildEvent,
   initialRunState,
   reasoningTail,
+  streamingTextTail,
   subagentDisplayLabel,
   subagentRows,
   toolResultFailed,
@@ -401,4 +402,26 @@ test('beginRound clears the per-round story; turn-level state survives', () => {
   assert.equal(state.todo, todoBefore)
   assert.equal(state.cacheHitRate, rateBefore)
   assert.equal(state.model, 'm')
+})
+
+
+// ------------------------------------------------ streaming text buffer --
+
+test('text deltas accumulate a capped streaming buffer that drains on landing', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'hello '), 1100, 2))
+  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'world\nsecond line'), 1200, 3))
+  assert.equal(streamingTextTail(state), 'second line')
+  // The buffer caps instead of growing without bound.
+  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'x'.repeat(20_000)), 1300, 4))
+  assert.ok(state.textBuffer.length <= 8192)
+  // The message lands — the buffer drains into it.
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'hello world' }] } }, 1400, 5))
+  assert.equal(state.textBuffer, '')
+  assert.equal(streamingTextTail(state), undefined)
+  // beginRound also clears (fresh story for the next card).
+  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'next round text'), 1500, 6))
+  beginRound(state)
+  assert.equal(state.textBuffer, '')
 })
