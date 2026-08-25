@@ -23,7 +23,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { randomUUID } from 'node:crypto'
+import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { isOperator } from './allowlist.ts'
+import {
+  buildAskAnsweredCard,
+  buildAskCard,
+  buildAskDismissedCard,
+  parseAskAction,
+  parseAskFormValue,
+} from './ask-card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
@@ -50,6 +59,41 @@ import { clipLine, segmentText } from './text.ts'
 interface PendingPicker {
   rows: readonly ResumeRow[]
   expiresAt: number
+}
+
+/**
+ * Structural view of dsh's ask request (the fields the phone side needs).
+ * The agent reference identifies the asking session for claim routing.
+ */
+interface AskRequestLike {
+  questions: AskUserQuestionItem[]
+  agent?: { session?: { id?: unknown } }
+  signal?: AbortSignal
+}
+
+/** Structural view of the ask-router's surface registry (dsh-ask-router). */
+interface AskSurfacesLike {
+  register(surface: {
+    name: string
+    claim(request: AskRequestLike): boolean
+    ask(request: AskRequestLike): Promise<AskUserQuestionAnswer>
+    settled?(request: AskRequestLike, by: string): void
+  }): () => void
+}
+
+/** One live question whose card is out on the operator's phone. */
+interface PendingAsk {
+  readonly questions: AskUserQuestionItem[]
+  messageId: string | undefined
+  readonly resolve: (answer: AskUserQuestionAnswer) => void
+  readonly reject: (error: Error) => void
+}
+
+/** Whether a userQuestions error says the slot is taken (name+code shape). */
+function isDuplicateProviderError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if (error.name !== 'UserQuestionError') return false
+  return (error as { code?: string }).code === 'DUPLICATE_PROVIDER'
 }
 
 const PICKER_TTL_MS = 5 * 60 * 1000
@@ -83,6 +127,10 @@ export class FeishuBot {
   private cardHash: string | undefined
   /** Session id whose route facts were already backfilled from its log. */
   private routeBackfilledFor: string | undefined
+  /** Live ask-user questions keyed by the card's question id. */
+  private readonly pendingAsks = new Map<string, PendingAsk>()
+  /** ask() request object → question id (router settled() arrives per-request). */
+  private readonly askRequestIds = new WeakMap<object, string>()
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -122,6 +170,7 @@ export class FeishuBot {
     interval.unref?.()
     this.ticker = interval
     this.cleanupFns.push(offFirehose, () => clearInterval(interval))
+    this.registerAskSurface()
     await this.lark.start(data => this.enqueue(data))
     // Restore the binding WITHOUT resuming: if the persisted session happens
     // to be live in this process, attach to it (no side effects). A stored
@@ -739,6 +788,131 @@ export class FeishuBot {
     this.cardHash = undefined
     this.turnOriginMessageId = undefined
     this.routeBackfilledFor = undefined
+  }
+
+  // ---------------------------------------------------------- ask surface --
+
+  /**
+   * Register the phone as an ask-user surface. With dsh-ask-router present
+   * this registers as one surface among several (first answer wins across
+   * surfaces); without it, the provider slot is taken directly and a
+   * DUPLICATE_PROVIDER error yields gracefully to a native UI (TUI/web).
+   */
+  private registerAskSurface(): void {
+    const ask = (request: AskRequestLike): Promise<AskUserQuestionAnswer> => this.askViaCard(request)
+    const router = this.ctx.get('askSurfaces') as AskSurfacesLike | undefined
+    if (router !== undefined && typeof router.register === 'function') {
+      const dispose = router.register({
+        name: 'feishu',
+        claim: request => this.claimsAskSession(request),
+        ask,
+        settled: (request, by) => this.dismissAsk(request, by),
+      })
+      this.cleanupFns.push(dispose)
+      return
+    }
+    const userQuestions = this.ctx.get('userQuestions') as
+      | { registerProvider(provider: { ask(request: AskRequestLike): Promise<AskUserQuestionAnswer> }): () => void }
+      | undefined
+    if (userQuestions === undefined || typeof userQuestions.registerProvider !== 'function') return
+    try {
+      this.cleanupFns.push(userQuestions.registerProvider({ ask }))
+    } catch (error) {
+      if (isDuplicateProviderError(error)) {
+        this.ctx.logger.info('dsh-feishu: ask-user provider slot owned by another UI — yielding')
+        return
+      }
+      this.ctx.logger.warn('dsh-feishu: ask provider registration failed: %o', error)
+    }
+  }
+
+  /** Whether the bound session is the one asking (claim routing). */
+  private claimsAskSession(request: AskRequestLike): boolean {
+    const bound = this.binder.getSessionId()
+    if (bound === undefined) return false
+    const asking = request.agent?.session?.id
+    return asking === undefined ? true : String(asking) === bound
+  }
+
+  /**
+   * Send the interactive ask card and resolve when the operator submits
+   * (or reject when the owning turn aborts). The card stays submittable
+   * until answered or aborted — no TTL: expiring would fail the agent's
+   * tool call just because the phone sat in a pocket.
+   */
+  private askViaCard(request: AskRequestLike): Promise<AskUserQuestionAnswer> {
+    return new Promise<AskUserQuestionAnswer>((resolve, reject) => {
+      const chatId = this.store.get().lastChatId
+      if (chatId === undefined) {
+        reject(new UserQuestionError('ask_user_question has no operator chat on the phone', 'NO_CHAT'))
+        return
+      }
+      const questionId = randomUUID()
+      const entry: PendingAsk = { questions: [...request.questions], messageId: undefined, resolve, reject }
+      this.pendingAsks.set(questionId, entry)
+      this.askRequestIds.set(request, questionId)
+      request.signal?.addEventListener('abort', () => {
+        if (!this.pendingAsks.delete(questionId)) return
+        this.patchAskCard(entry, buildAskDismissedCard(entry.questions, 'cancelled', ''))
+        entry.reject(new UserQuestionError('ask_user_question was aborted before the user answered', 'ASK_ABORTED'))
+      }, { once: true })
+      void this.chain(async () => {
+        const messageId = await this.lark.sendCard(chatId, buildAskCard(entry.questions, questionId))
+        if (!this.pendingAsks.has(questionId)) {
+          // Aborted while the send was in flight — dismiss the stray card.
+          if (messageId !== undefined) await this.lark.patchCard(messageId, buildAskDismissedCard(entry.questions, 'cancelled', ''))
+          return
+        }
+        if (messageId === undefined) {
+          this.pendingAsks.delete(questionId)
+          entry.reject(new UserQuestionError('the ask card could not be delivered', 'CARD_SEND_FAILED'))
+          return
+        }
+        entry.messageId = messageId
+      })
+    })
+  }
+
+  /** Router notification: another surface answered — settle and dismiss. */
+  private dismissAsk(request: AskRequestLike, by: string): void {
+    const questionId = this.askRequestIds.get(request)
+    if (questionId === undefined) return
+    const entry = this.pendingAsks.get(questionId)
+    if (entry === undefined) return
+    this.pendingAsks.delete(questionId)
+    this.patchAskCard(entry, buildAskDismissedCard(entry.questions, 'elsewhere', by))
+    entry.reject(new UserQuestionError(`answered on ${by} before the phone submitted`, 'ANSWERED_ELSEWHERE'))
+  }
+
+  /** Best-effort terminal patch of an ask card. */
+  private patchAskCard(entry: PendingAsk, card: ReturnType<typeof buildAskCard>): void {
+    if (entry.messageId === undefined) return
+    void this.chain(() => this.lark.patchCard(entry.messageId!, card))
+  }
+
+  /**
+   * card.action.trigger entry (ask-card submits). Unknown actions and
+   * foreign cards are ignored; only allowlisted operators may answer.
+   */
+  onCardAction(data: unknown): void {
+    const parsed = parseAskAction(data)
+    if (parsed === undefined) return
+    const entry = this.pendingAsks.get(parsed.questionId)
+    if (entry === undefined) return
+    const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
+    if (typeof operator !== 'string' || !isOperator(operator, this.allowlist)) return
+    const result = parseAskFormValue(entry.questions, parsed.formValue)
+    if (result.kind === 'missing') {
+      void this.reply(`还有未回答的问题：${result.missing.join('、')}`)
+      return
+    }
+    this.pendingAsks.delete(parsed.questionId)
+    void this.chain(async () => {
+      if (entry.messageId !== undefined) {
+        await this.lark.patchCard(entry.messageId, buildAskAnsweredCard(entry.questions, result.answers))
+      }
+      entry.resolve({ answers: result.answers })
+    })
   }
 
   // --------------------------------------------------------------- /status --

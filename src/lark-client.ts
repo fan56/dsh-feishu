@@ -179,6 +179,12 @@ export interface LarkClientOptions {
   readonly onError?: LarkErrorSink
   /** Receives every SDK log line, bridged into the plugin's log channel. */
   readonly onLog?: LarkLogSink
+  /**
+   * Card interaction callbacks (`card.action.trigger` over the long
+   * connection — requires the app to subscribe the event in the developer
+   * console). Undefined disables the handler entirely.
+   */
+  readonly onCardAction?: (data: unknown) => void
   /** Test seam: overrides the WS client factory. */
   readonly wsFactory?: (options: LarkClientOptions, onMessage: (data: unknown) => void, onError: LarkErrorSink) => LarkWsHandle
   /** Test seam: overrides the retry backoff timer (see requestFeishu). */
@@ -189,6 +195,35 @@ export interface LarkClientOptions {
 export interface LarkWsHandle {
   start(): Promise<void>
   close(): void
+}
+
+/**
+ * The SDK's WSClient silently DROPS frames whose header type is "card"
+ * (card.action.trigger callbacks) — only "event" frames reach the
+ * dispatcher (same defect as oapi-sdk-python #126; openclaw-lark patches
+ * around it in production). Rewrite the header before the original
+ * handler runs; the card payload is already the v2 event shape, so the
+ * dispatcher routes it to the registered card.action.trigger handler.
+ * Instance-level patch: absent on a future SDK that handles card frames
+ * natively, it becomes a no-op.
+ */
+function patchCardFrames(ws: unknown, onLog?: LarkLogSink): void {
+  const handle = ws as { handleEventData?: (data: unknown) => Promise<void> }
+  const orig = handle.handleEventData
+  if (typeof orig !== 'function') return
+  handle.handleEventData = (data: unknown) => {
+    const headers = (data as { headers?: Array<{ key?: unknown; value?: unknown }> } | undefined)?.headers
+    if (Array.isArray(headers)) {
+      for (const header of headers) {
+        if (header?.key === 'type' && header?.value === 'card') {
+          header.value = 'event'
+          onLog?.('debug', 'rewrote card frame header to event (card.action.trigger)')
+          break
+        }
+      }
+    }
+    return orig.call(ws, data)
+  }
 }
 
 function defaultWsFactory(
@@ -210,6 +245,17 @@ function defaultWsFactory(
       }
     },
   })
+  if (options.onCardAction !== undefined) {
+    dispatcher.register({
+      'card.action.trigger': (data: unknown) => {
+        try {
+          options.onCardAction!(data)
+        } catch (error) {
+          onError('card-action-handler', error)
+        }
+      },
+    })
+  }
   const ws = new lark.WSClient({
     appId: options.appId,
     appSecret: options.appSecret,
@@ -218,6 +264,7 @@ function defaultWsFactory(
     logger: sdkLogger,
     autoReconnect: true,
   })
+  patchCardFrames(ws, options.onLog)
   return {
     start: () => ws.start({ eventDispatcher: dispatcher }),
     close: () => ws.close({ force: true }),

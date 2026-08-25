@@ -40,7 +40,8 @@
 | Round 卡 | **每个 round（一次 LLM 往返）一张卡**：round 开始即推送（header `Round N` + 当前状态：🤔 thinking / 🔧 工具名 / ⚙️ processing / ⏳ subagent ×k），**5s 节拍**原位更新（伪流式：生成中的正文以 ✍️ 尾行随节拍生长）；round 落地定稿为 `Round N · 💬 回复 · 时长` 并**紧随原文正文卡**；turn 结束把在飞卡定稿为 `Round N · ✅/❌/⛔ · 总耗时`。正文为 markdown 章节——**活动**（thinking 状态、工具调用、本轮 LLM 消息行）、**子代理**（状态 + 最新输出行）、**Todo**（首行 `☑ x/z`，条目 `- [x]`/`- [ ]`），页脚统计 `⏱ 耗时 · 🤖 模型 · 🧠 档位 · 📊 ctx% · ⚡ CH%（网关上报才显示） · 🔧 calls`（路由/缓存基线绑定时从会话日志回填） |
 | 收完整回复 | 每个 round 落地时其 assistant 正文即原文分段送达（代码块/表格原生渲染）；turn 结束尾卡定稿 |
 | 子代理可见 | 独立**子代理**章节逐个列出：`workhorse·49a6 · ⏳ round 2 · 🔧 bash · 最新输出行`（收尾显示 ✔/✘/⛔）；`/sub N` 看单个子代理近况 |
-| 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 解绑当前会话 |
+| 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 开新会话 |
+| 手机问询 | dsh 的 ask_user_question 在手机上弹**交互卡**（下拉/多选/文本输入 + 提交），提交即答复；配合 `@aiwayds/dsh-ask-router` 时与 TUI 面板**双端同弹、先答先得**，落选端自动收起（详见「问询交互」节） |
 
 ## 快速开始（5 步）
 
@@ -373,3 +374,19 @@ PATCH 有频控但 5s 节拍（≈12 次/分钟）远低于上限；原生流式
 
 *License: MIT。作者 fan56。设计调研：`docs/dsh-feishu-bot-design-research.md`、
 `docs/dsh-feishu-bridge-research.md`（workspace docs/ 下）。*
+
+## 问询交互（ask_user_question）
+
+agent 调 ask_user_question 时，bot 发一张 schema 2.0 **form 交互卡**（问题 →
+下拉/多选/输入控件 + 📮 提交钮），提交后卡片定稿为 ✅ 已回答、答案回传 dsh。
+
+- **接收回调**：`card.action.trigger` 走长连接。需要**一次性**在飞书开发者后台
+  开启：事件与回调 → 长连接模式 → 订阅 `card.action.trigger` + 相关权限并发布。
+  未订阅时插件照常运行，只是问询卡收不到提交（卡会一直等待）
+- **SDK 补丁**：node-sdk 的 WSClient 会静默丢弃 card 帧（同 python SDK #126），
+  已在 lark-client 内做 card→event 帧头重写；升级 SDK 需回归
+- **多端路由**：装了 `@aiwayds/dsh-ask-router`（bundles 排 UI 之前）时，本插件
+  注册为 surface——与 TUI 面板双端同弹、先答先得；未装路由时直接占 provider 槽
+  （被占则让位）。**web profile 不装路由**（上游 apiproxy 不容忍重复注册）
+- 只有 operators 白名单内的用户能提交；未答完会提示缺哪项；turn 中止时卡自动
+  收起为 ⏹ 已取消

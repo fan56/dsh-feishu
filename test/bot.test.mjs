@@ -462,3 +462,149 @@ test('/new creation failure leaves the bot cleanly unbound with the reason', asy
   assert.equal(state.boundSessionId, undefined)
   assert.equal(detached, true)
 })
+
+// -------------------------------------------------------- ask surface --
+
+function askBot(lark, ctxExtras = {}, binder = { getSessionId: () => 's1' }) {
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 's1', picker: undefined }
+  return new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined, ...ctxExtras },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark,
+    binder,
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(['ou_op']),
+    now: () => 1000,
+  })
+}
+
+/** The question id of the ask card a fake sendCard captured. */
+function askIdOf(card) {
+  const submit = card.body.elements[0].elements.at(-1)
+  return submit.value.question_id
+}
+
+test('ask flow: card out → operator submits → answers resolve + terminal patch', async () => {
+  const sends = []
+  const patches = []
+  const bot = askBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard(id, card) { patches.push({ id, card }); return true },
+  })
+  const request = {
+    questions: [{ id: 'q1', question: 'Proceed?', header: 'Go', options: [{ label: 'yes' }, { label: 'no' }] }],
+    agent: { session: { id: 's1' } },
+  }
+  const pending = bot.askViaCard(request)
+  await new Promise(r => setTimeout(r, 5)) // card send lands on the chain
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0].header.title.content, '🙋 需要你的确认')
+
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: {
+      tag: 'button',
+      value: { action: 'dsh_feishu_ask_submit', question_id: askIdOf(sends[0]) },
+      form_value: { q_0: 'yes' },
+    },
+  })
+  const answer = await pending
+  assert.deepEqual(answer.answers, [{ id: 'q1', selected: ['yes'] }])
+  assert.equal(patches.length, 1)
+  assert.equal(patches[0].card.header.template, 'green')
+})
+
+test('ask flow: incomplete submit keeps the card live and reminds what is missing', async () => {
+  const sends = []
+  const bot = askBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  })
+  const request = { questions: [{ id: 'q1', question: 'A?', header: 'A' }, { id: 'q2', question: 'B?', header: 'B' }] }
+  const pending = bot.askViaCard(request)
+  await new Promise(r => setTimeout(r, 5))
+  const questionId = askIdOf(sends[0])
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_ask_submit', question_id: questionId }, form_value: { q_0: 'x' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  // The missing-item reminder arrived as a body card…
+  assert.equal(sends.length, 2)
+  assert.match(JSON.stringify(sends[1]), /B/)
+  // …and a complete submit afterwards resolves.
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_ask_submit', question_id: questionId }, form_value: { q_0: 'x', q_1: 'y' } },
+  })
+  const answer = await pending
+  assert.equal(answer.answers.length, 2)
+})
+
+test('ask flow: non-operator submits are ignored, the ask stays pending', async () => {
+  const sends = []
+  const bot = askBot({ async sendCard(_c, card) { sends.push(card); return 'm1' }, async patchCard() { return true } })
+  const request = { questions: [{ id: 'q1', question: 'A?' }] }
+  const pending = bot.askViaCard(request)
+  await new Promise(r => setTimeout(r, 5))
+  bot.onCardAction({
+    operator: { open_id: 'ou_stranger' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_ask_submit', question_id: askIdOf(sends[0]) }, form_value: { q_0: 'x' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  let settled = false
+  void pending.finally(() => { settled = true })
+  await new Promise(r => setTimeout(r, 5))
+  assert.equal(settled, false, 'a stranger cannot settle the question')
+})
+
+test('ask flow: abort dismisses the card and rejects with ASK_ABORTED', async () => {
+  const patches = []
+  const bot = askBot({ async sendCard() { return 'm1' }, async patchCard(id, card) { patches.push(card); return true } })
+  const controller = new AbortController()
+  const request = { questions: [{ id: 'q1', question: 'A?' }], signal: controller.signal }
+  const pending = bot.askViaCard(request)
+  await new Promise(r => setTimeout(r, 5))
+  controller.abort()
+  await assert.rejects(pending, /aborted/)
+  await new Promise(r => setTimeout(r, 5))
+  assert.equal(patches.length, 1)
+  assert.match(patches[0].header.title.content, /取消/)
+})
+
+test('registerAskSurface: router present → surface registered, provider slot untouched', () => {
+  let surface
+  let providerTouched = 0
+  const bot = askBot({}, {
+    get: key => key === 'askSurfaces'
+      ? { register(s) { surface = s; return () => {} } }
+      : key === 'userQuestions' ? { registerProvider() { providerTouched += 1; return () => {} } } : undefined,
+  })
+  bot.registerAskSurface()
+  assert.ok(surface !== undefined)
+  assert.equal(surface.name, 'feishu')
+  assert.equal(providerTouched, 0)
+  assert.equal(surface.claim({ agent: { session: { id: 's1' } } }), true)
+  assert.equal(surface.claim({ agent: { session: { id: 'other' } } }), false)
+})
+
+test('registerAskSurface: no router → direct provider; DUPLICATE yields without throwing', () => {
+  let registered
+  const bot = askBot({}, { get: key => key === 'userQuestions' ? { registerProvider(p) { registered = p; return () => {} } } : undefined })
+  bot.registerAskSurface()
+  assert.ok(registered !== undefined)
+
+  const duplicate = askBot({}, {
+    get: key => key === 'userQuestions'
+      ? {
+        registerProvider() {
+          const err = new Error('a user-questions provider is already registered')
+          err.name = 'UserQuestionError'
+          err.code = 'DUPLICATE_PROVIDER'
+          throw err
+        },
+      }
+      : undefined,
+  })
+  duplicate.registerAskSurface() // yields — must not throw
+})

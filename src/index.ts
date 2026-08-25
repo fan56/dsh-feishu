@@ -198,6 +198,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         // Bridge SDK log lines into the plugin channel so nothing from the
         // Lark SDK ever touches the console/stderr behind the TUI's back.
         onLog: (level, message) => ctx.logger[level]('dsh-feishu[lark-sdk]: %s', message),
+        // Card interaction callbacks (ask-user submits) — the bot resolves
+        // pending questions from these.
+        onCardAction: data => bot?.onCardAction(data),
       }),
       binder: new SessionBinder(ctx),
       store: new StateStore(ctx),
