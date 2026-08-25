@@ -344,7 +344,7 @@ test('buildProgressCard appends the stats footer behind a divider in one markdow
   assert.deepEqual(card.config, { width_mode: 'fill' })
   assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].tag, 'markdown')
-  assert.equal(card.body.elements[0].content, 'step one done\n\n---\n\n⏱ 30s · Turn 2')
+  assert.equal(card.body.elements[0].content, 'step one done\n\n---\n\n⏱ 30s · Round 2')
 })
 
 test('buildProgressCard omits the divider when the footer is empty', () => {
