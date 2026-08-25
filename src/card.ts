@@ -249,7 +249,7 @@ function todoSectionLines(state: RunState): string[] | undefined {
 export interface FooterFields {
   /** Elapsed time of the turn (ms). */
   elapsedMs?: number
-  /** Assistant rounds of the current turn ("Turn N"). */
+  /** Completed LLM rounds of the current turn ("Round N"). */
   rounds?: number
   /** Model id (`deepseek-v4`, provider prefix stripped here). */
   model?: string
@@ -283,7 +283,7 @@ export function shortModelName(model: string): string {
 
 /**
  * Assemble the stats-footer line, e.g.
- * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Turn 8`.
+ * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Round 8`.
  * Fields with no value (or zero counters) are skipped; separators only join
  * fields that actually rendered. Returns '' when nothing is available.
  */
@@ -299,7 +299,7 @@ export function buildFooter(fields: FooterFields): string {
   }
   if (fields.cacheHitPercent !== undefined) parts.push(`⚡ CH ${fields.cacheHitPercent.toFixed(1)}%`)
   if (fields.toolCalls !== undefined && fields.toolCalls > 0) parts.push(`🔧 ${fields.toolCalls} calls`)
-  if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Turn ${fields.rounds}`)
+  if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Round ${fields.rounds}`)
   return parts.join(' · ')
 }
 

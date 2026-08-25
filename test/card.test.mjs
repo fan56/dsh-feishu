@@ -230,7 +230,7 @@ test('buildFooter renders every field in order with · separators', () => {
     toolCalls: 23,
     thinking: 'high',
   })
-  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Turn 8')
+  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Round 8')
 })
 
 test('buildFooter omits missing fields without leaving separators', () => {
@@ -306,7 +306,7 @@ test('shortModelName strips the provider path', () => {
   assert.equal(shortModelName('org/nested/deepseek-v4'), 'deepseek-v4')
 })
 
-test('the turn card closes with a stats footer line behind a divider (no Turn repeat)', () => {
+test('the turn card closes with a stats footer line behind a divider (no Round repeat)', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm', reasoningEffort: 'high' } } }, 1100, 2))
@@ -322,7 +322,7 @@ test('the turn card closes with a stats footer line behind a divider (no Turn re
   const body = card.body.elements[0].content
   assert.ok(body.includes('\n---\n\n⏱ 1s · 🤖 m · 🧠 high · 📊 ctx 50%'))
   // The round lives in the card header — the footer must not repeat it.
-  assert.ok(!body.includes('Turn '))
+  assert.ok(!body.includes('Round '))
   // The hash covers the footer so beat patches follow it.
   assert.ok(hash.includes('🧠 high'))
 })
@@ -339,7 +339,7 @@ test('no built card ever carries a note element (schema V2 rejects it)', () => {
 // ----------------------------------------------------------- progress card --
 
 test('buildProgressCard appends the stats footer behind a divider in one markdown element', () => {
-  const card = buildProgressCard('step one done', '⏱ 30s · Turn 2')
+  const card = buildProgressCard('step one done', '⏱ 30s · Round 2')
   assert.equal(card.schema, '2.0')
   assert.deepEqual(card.config, { width_mode: 'fill' })
   assert.equal(card.body.elements.length, 1)
