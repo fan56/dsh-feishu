@@ -407,8 +407,11 @@ function sessionCell(row: ResumeRow): string {
 /**
  * Build the `/resume` session-picker card (schema 2.0): a native table element
  * (`tag: 'table'`, card JSON 2.0; Feishu client ≥7.20) with three narrow columns
- — `#` for the `/resume N` index, `会话` (`preview · dir`), `时间` — so the list
- * stays readable on a phone. Rows arrive already truncated by
+ — `#` for the `/resume N` index, `会话` (`preview · dir`), `时间` — so the
+ * list stays readable on a phone. The `时间` column shows each row's
+ * last-update time: in mtime mode it IS the sort key (jsonl log mtime); in
+ * fallback mode (no mtime map / map miss) it is an event-tail approximation
+ * and may diverge from the row's actual sort key (`createdAt`). Rows arrive already truncated by
  * {@link buildResumeRows}; an empty list degrades to a plain markdown notice
  * instead of rendering an empty table.
  */

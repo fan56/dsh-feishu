@@ -39,16 +39,53 @@ test('root-session filter uses VALUE tests on delegationDepth', () => {
   assert.equal(isResumableSessionHeader(header('e', 1, { delegationDepth: 2 })), false)
 })
 
-test('rows sort by createdAt desc and cap at the limit', async () => {
+test('rows fall back to createdAt ordering when no last-update map is given', async () => {
   const headers = [
     header('old', 100),
     header('newest', 300),
     header('middle', 200),
     header('sub', 400, { origin: 'subagent', delegationDepth: 1 }),
   ]
-  const rows = await buildResumeRows(persistence(headers), 2)
+  const rows = await buildResumeRows(persistence(headers), undefined, 2)
   assert.deepEqual(rows.map(r => r.sessionId), ['newest', 'middle'])
   assert.deepEqual(rows.map(r => r.index), [1, 2])
+})
+
+test('a session created earlier but updated later sorts first (mtime map)', async () => {
+  const headers = [header('old-but-active', 100), header('new-but-stale', 300)]
+  const lastUpdates = new Map([['old-but-active', 900], ['new-but-stale', 300]])
+  const rows = await buildResumeRows(persistence(headers), lastUpdates)
+  assert.deepEqual(rows.map(r => r.sessionId), ['old-but-active', 'new-but-stale'])
+  // The displayed time column carries the same last-update value used for sorting.
+  assert.equal(rows[0].lastTime, 900)
+})
+
+test('sessions missing from the last-update map fall back to createdAt', async () => {
+  const headers = [header('mapped', 100), header('unmapped-old', 50), header('unmapped-new', 200)]
+  const lastUpdates = new Map([['mapped', 150]])
+  const rows = await buildResumeRows(persistence(headers), lastUpdates)
+  // unmapped-new (createdAt 200) beats mapped (lastTime 150); unmapped-old trails.
+  assert.deepEqual(rows.map(r => r.sessionId), ['unmapped-new', 'mapped', 'unmapped-old'])
+  assert.deepEqual(rows.map(r => r.index), [1, 2, 3])
+})
+
+test('an mtime-provided lastTime is not overwritten by the inspect event tail', async () => {
+  const headers = [header('rich', 100, { cwd: '/home/me/repo' })]
+  const events = new Map([['rich', [userEvent('hello'), { type: 'turn/end', seq: 9, time: 123456, data: {} }]]])
+  const lastUpdates = new Map([['rich', 999]])
+  const rows = await buildResumeRows(persistence(headers, events), lastUpdates)
+  assert.equal(rows[0].lastTime, 999)
+})
+
+test('equal mtime and createdAt ties break by id localeCompare (descending)', async () => {
+  const headers = [header('s-b', 100), header('s-a', 100), header('s-c', 100), header('s-d', 100)]
+  // Same last-update value for every session — the first comparator tier is a
+  // full tie, so the deterministic order must come from the id tie-break.
+  const lastUpdates = new Map([['s-a', 500], ['s-b', 500], ['s-c', 500], ['s-d', 500]])
+  const rows = await buildResumeRows(persistence(headers), lastUpdates)
+  // localeCompare desc: 's-d' > 's-c' > 's-b' > 's-a'
+  assert.deepEqual(rows.map(r => r.sessionId), ['s-d', 's-c', 's-b', 's-a'])
+  assert.deepEqual(rows.map(r => r.index), [1, 2, 3, 4])
 })
 
 test('preview prefers the first direct human prompt and skips injected noise', () => {

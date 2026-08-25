@@ -26,7 +26,7 @@ import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
-import { buildResumeRows, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
+import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
   foldBoundEvent,
   foldChildEvent,
@@ -244,7 +244,10 @@ export class FeishuBot {
     }
     let rows: ResumeRow[]
     try {
-      rows = await buildResumeRows(persistence)
+      // Same last-update ordering as the TUI picker (jsonl mtimes; the walk
+      // is best-effort and never throws — an unknown store root degrades to
+      // createdAt ordering).
+      rows = await buildResumeRows(persistence, await loadSessionLastUpdates())
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: /resume list failed: %o', error)
       await this.reply('读取会话列表失败，请稍后再试。')
