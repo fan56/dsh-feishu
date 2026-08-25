@@ -91,6 +91,22 @@ export interface RunState {
    * snapshot — a rough growth estimate, not a billed number.
    */
   pendingChars: number
+  /**
+   * Cache-hit accounting of the CURRENT route segment (TUI semantics):
+   * cumulative billed input tokens = input + cacheRead + cacheWrite —
+   * output tokens never enter the denominator. cacheRead is the hit side;
+   * fresh input and cache writes (this request's misses, the premise of
+   * future hits) are the miss side. A provider/model VALUE change resets the
+   * segment (the new route owns a fresh prompt cache).
+   */
+  cacheInputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** Segment hit rate in percent (cacheRead / billedInput), undefined before any usage. */
+  cacheHitRate: number | undefined
+  /** Route of the current cache segment (may lag provider/model during a change). */
+  chProvider: string | undefined
+  chModel: string | undefined
 }
 
 /** Fresh state (no turn observed). */
@@ -120,6 +136,12 @@ export function initialRunState(): RunState {
     contextWindow: undefined,
     lastUsageTokens: undefined,
     pendingChars: 0,
+    cacheInputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheHitRate: undefined,
+    chProvider: undefined,
+    chModel: undefined,
   }
 }
 
@@ -147,7 +169,10 @@ function beginTurn(state: RunState, time: number): void {
   state.maxRetries = undefined
   state.assistantTexts = []
   state.lastAssistantLine = undefined
-  state.lastUsageTokens = undefined
+  // The billed-context baseline SURVIVES turn boundaries — context only
+  // grows between turns, and the backfilled baseline of a mid-run bind must
+  // not be wiped by the next turn/start (TUI semantics: occupancy is
+  // session-level, never turn-level).
   state.pendingChars = 0
 }
 
@@ -183,20 +208,32 @@ function assistantTextOf(data: unknown): string {
   return textOfContent(content)
 }
 
+/** Normalized usage components of an assistant/message snapshot. */
+interface UsageComponents {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+}
+
 /**
- * Billed context tokens of an assistant/message usage snapshot
- * (input + cache read + cache write + output), or undefined when the event
- * carries no usage (adapter reported none).
+ * Billed usage of an assistant/message usage snapshot, or undefined when the
+ * event carries no usage (adapter reported none). Cache components default to
+ * zero — gateways that do not report caching (e.g. zhipu GLM) simply never
+ * grow them, and the CH footer field stays absent.
  */
-function usageTokensOf(data: unknown): number | undefined {
+function usageComponentsOf(data: unknown): UsageComponents | undefined {
   const usage = rec<{ usage?: { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown } }>(data).usage
   if (usage === undefined) return undefined
   const input = typeof usage.inputTokens === 'number' ? usage.inputTokens : undefined
   const output = typeof usage.outputTokens === 'number' ? usage.outputTokens : undefined
   if (input === undefined || output === undefined) return undefined
-  const cacheRead = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0
-  const cacheWrite = typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0
-  return input + cacheRead + cacheWrite + output
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadTokens: typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0,
+    cacheWriteTokens: typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0,
+  }
 }
 
 /** Route scalars off a `request/header` event (`data.header.config`). */
@@ -237,9 +274,17 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       state.maxRetries = undefined
       state.thinkingSince = undefined
       // Usage snapshot finalizes the billed context; the streamed estimate
-      // restarts from what follows this message.
-      const usageTokens = usageTokensOf(event.data)
-      if (usageTokens !== undefined) state.lastUsageTokens = usageTokens
+      // restarts from what follows this message. The same components feed the
+      // route-segment cache-hit accounting (output stays out of it).
+      const usage = usageComponentsOf(event.data)
+      if (usage !== undefined) {
+        state.lastUsageTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens + usage.outputTokens
+        state.cacheInputTokens += usage.inputTokens
+        state.cacheReadTokens += usage.cacheReadTokens
+        state.cacheWriteTokens += usage.cacheWriteTokens
+        const billedInput = state.cacheInputTokens + state.cacheReadTokens + state.cacheWriteTokens
+        state.cacheHitRate = billedInput > 0 ? (state.cacheReadTokens / billedInput) * 100 : undefined
+      }
       state.pendingChars = 0
       break
     }
@@ -263,11 +308,27 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
     }
     case 'request/header': {
       const config = headerConfigOf(event.data)
-      if (config?.provider !== undefined) state.provider = config.provider
-      if (config?.model !== undefined) state.model = config.model
+      if (config === undefined) break
+      if (config.provider !== undefined) state.provider = config.provider
+      if (config.model !== undefined) state.model = config.model
       // undefined means the field is ABSENT from the header — keep the last
       // known value; an explicit off is not representable here.
-      if (config?.reasoningEffort !== undefined) state.reasoningEffort = config.reasoningEffort
+      if (config.reasoningEffort !== undefined) state.reasoningEffort = config.reasoningEffort
+      // Cache accounting is per route segment: a provider/model VALUE change
+      // owns a fresh prompt cache, so mixing routes would dilute the hit
+      // rate. The first header only establishes the baseline (TUI semantics;
+      // same-value headers — e.g. a resume re-emission — never reset).
+      const provider = config.provider ?? state.chProvider
+      const model = config.model ?? state.chModel
+      if (provider !== undefined && model !== undefined && state.chProvider !== undefined
+        && (provider !== state.chProvider || model !== state.chModel)) {
+        state.cacheInputTokens = 0
+        state.cacheReadTokens = 0
+        state.cacheWriteTokens = 0
+        state.cacheHitRate = undefined
+      }
+      if (provider !== undefined) state.chProvider = provider
+      if (model !== undefined) state.chModel = model
       break
     }
     case 'request/context': {
@@ -461,6 +522,108 @@ export function contextTokensEstimate(state: RunState): number | undefined {
 
 /** Default fallback label pattern (`subagent <id8>`) — not a real name. */
 const FALLBACK_LABEL_RE = /^subagent [0-9a-f]{8}$/
+
+// ---------------------------------------------------- route-log backfill --
+
+/**
+ * Route facts derivable from the BOUND session's own append-only log. The
+ * route events (`request/header`, `request/context`) are appended only on
+ * session start or on a route CHANGE — a bot that binds mid-run never sees
+ * them on the live firehose, so model / think level / context window (and
+ * the cache-hit baseline) must be recovered from the log. Same pattern as
+ * the child-name backfill and dsh-tui-pi's round reconcile.
+ */
+export interface RouteBackfill {
+  readonly provider: string | undefined
+  readonly model: string | undefined
+  readonly reasoningEffort: string | undefined
+  readonly contextWindow: number | undefined
+  /** Cache-hit segment totals at the end of the log (authoritative so far). */
+  readonly cacheInputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly cacheHitRate: number | undefined
+}
+
+/**
+ * Scan a bound session's log for the route facts, applying the SAME
+ * segment-reset semantics as the live fold (a provider/model value change
+ * restarts the cache accounting mid-log). Pure and defensive — malformed
+ * payloads degrade to no-ops, never throw.
+ */
+export function backfillRouteFromLog(events: readonly SessionEvent[]): RouteBackfill {
+  let provider: string | undefined
+  let model: string | undefined
+  let reasoningEffort: string | undefined
+  let contextWindow: number | undefined
+  let chProvider: string | undefined
+  let chModel: string | undefined
+  let cacheInput = 0
+  let cacheRead = 0
+  let cacheWrite = 0
+  let cacheHitRate: number | undefined
+  for (const event of events) {
+    switch (event.type) {
+      case 'request/header': {
+        const config = headerConfigOf(event.data)
+        if (config === undefined) break
+        if (config.provider !== undefined) provider = config.provider
+        if (config.model !== undefined) model = config.model
+        if (config.reasoningEffort !== undefined) reasoningEffort = config.reasoningEffort
+        const p = config.provider ?? chProvider
+        const m = config.model ?? chModel
+        if (p !== undefined && m !== undefined && chProvider !== undefined && (p !== chProvider || m !== chModel)) {
+          cacheInput = 0
+          cacheRead = 0
+          cacheWrite = 0
+          cacheHitRate = undefined
+        }
+        if (p !== undefined) chProvider = p
+        if (m !== undefined) chModel = m
+        break
+      }
+      case 'request/context': {
+        const window = rec<{ contextWindow?: unknown }>(event.data).contextWindow
+        if (typeof window === 'number' && Number.isFinite(window) && window > 0) contextWindow = window
+        break
+      }
+      case 'assistant/message': {
+        const usage = usageComponentsOf(event.data)
+        if (usage === undefined) break
+        cacheInput += usage.inputTokens
+        cacheRead += usage.cacheReadTokens
+        cacheWrite += usage.cacheWriteTokens
+        const billedInput = cacheInput + cacheRead + cacheWrite
+        cacheHitRate = billedInput > 0 ? (cacheRead / billedInput) * 100 : undefined
+        break
+      }
+      default:
+        break
+    }
+  }
+  return { provider, model, reasoningEffort, contextWindow, cacheInputTokens: cacheInput, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, cacheHitRate }
+}
+
+/**
+ * Apply route backfill onto the run state. Route display fields only fill
+ * holes (a live event is never overwritten); the cache segment totals are
+ * ASSIGNED — the scan is authoritative for everything appended so far, and
+ * live folds continue from its boundary without double counting.
+ */
+export function applyRouteBackfill(state: RunState, backfill: RouteBackfill): void {
+  if (state.provider === undefined && backfill.provider !== undefined) state.provider = backfill.provider
+  if (state.model === undefined && backfill.model !== undefined) state.model = backfill.model
+  if (state.reasoningEffort === undefined && backfill.reasoningEffort !== undefined) state.reasoningEffort = backfill.reasoningEffort
+  if (state.contextWindow === undefined && backfill.contextWindow !== undefined) state.contextWindow = backfill.contextWindow
+  state.cacheInputTokens = backfill.cacheInputTokens
+  state.cacheReadTokens = backfill.cacheReadTokens
+  state.cacheWriteTokens = backfill.cacheWriteTokens
+  state.cacheHitRate = backfill.cacheHitRate
+  // Reconstruct the segment trackers so a later live route-change header
+  // resets correctly against the recovered baseline.
+  if (state.chProvider === undefined && backfill.provider !== undefined) state.chProvider = backfill.provider
+  if (state.chModel === undefined && backfill.model !== undefined) state.chModel = backfill.model
+}
 
 // --------------------------------------------------- child-log backfill --
 

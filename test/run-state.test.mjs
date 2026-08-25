@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   applyChildBackfill,
+  applyRouteBackfill,
   backfillFromChildLog,
+  backfillRouteFromLog,
   contextTokensEstimate,
   foldBoundEvent,
   foldChildEvent,
@@ -305,4 +307,85 @@ test('applyChildBackfill: label replaces fallback, rounds only correct UP, holes
   // Unknown child id: no-op.
   applyChildBackfill(state, 'nope', { label: 'x', rounds: 9, lastTool: 'x', tail: 'x' })
   assert.equal(state.subagents.has('nope'), false)
+})
+
+// ------------------------------------------- cache-hit accounting + backfill --
+
+test('cache hit accumulates per route segment; output never enters the rate', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm1' } } }, 1000, 1))
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 100, outputTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 400 },
+    message: { content: [{ type: 'text', text: 'cold' }] },
+  }, 1100, 2))
+  // Output tokens are huge but must not dilute: 0/(100+0+400) = 0%.
+  assert.equal(state.cacheHitRate, 0)
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 20, outputTokens: 30, cacheReadTokens: 380, cacheWriteTokens: 30 },
+    message: { content: [{ type: 'text', text: 'warm' }] },
+  }, 1200, 3))
+  assert.equal(state.cacheHitRate, 380 / 930 * 100)
+  // A provider/model VALUE change restarts the segment; same-model headers do not.
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm1' } } }, 1300, 4))
+  assert.equal(state.cacheHitRate, 380 / 930 * 100)
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm2' } } }, 1400, 5))
+  assert.equal(state.cacheHitRate, undefined)
+  assert.equal(state.cacheReadTokens, 0)
+  // Display route fields survive the segment reset.
+  assert.equal(state.model, 'm2')
+})
+
+test('usage without cache components (zhipu) leaves the CH accumulators at zero', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 28_995, outputTokens: 777 },
+    message: { content: [{ type: 'text', text: 'x' }] },
+  }, 1000, 1))
+  assert.equal(state.cacheReadTokens + state.cacheWriteTokens, 0)
+  assert.equal(state.lastUsageTokens, 28_995 + 777)
+})
+
+test('backfillRouteFromLog recovers route facts and segments the cache history', () => {
+  const events = [
+    event('request/header', { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha', reasoningEffort: 'high' } } }, 1000, 1),
+    event('request/context', { provider: 'openrouter', model: 'stealth/ox-alpha', contextWindow: 1_048_576 }, 1100, 2),
+    event('assistant/message', {
+      usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 1500 },
+      message: { content: [{ type: 'text', text: 'on route A' }] },
+    }, 1200, 3),
+    // Route switch mid-log: the cache segment restarts from here.
+    event('request/header', { header: { config: { provider: 'p2', model: 'other-model' } } }, 1300, 4),
+    event('assistant/message', {
+      usage: { inputTokens: 500, outputTokens: 100, cacheReadTokens: 300, cacheWriteTokens: 100 },
+      message: { content: [{ type: 'text', text: 'on route B' }] },
+    }, 1400, 5),
+  ]
+  const backfill = backfillRouteFromLog(events)
+  assert.equal(backfill.provider, 'p2')
+  assert.equal(backfill.model, 'other-model')
+  assert.equal(backfill.reasoningEffort, 'high') // persists from the earlier header
+  assert.equal(backfill.contextWindow, 1_048_576)
+  // Only route B's usage counts: 300 / (500 + 300 + 100).
+  assert.equal(backfill.cacheHitRate, 300 / 900 * 100)
+})
+
+test('applyRouteBackfill fills route holes and assigns the authoritative cache totals', () => {
+  const state = initialRunState()
+  applyRouteBackfill(state, backfillRouteFromLog([
+    event('request/header', { header: { config: { provider: 'p', model: 'm', reasoningEffort: 'low' } } }, 1000, 1),
+    event('request/context', { contextWindow: 200_000 }, 1100, 2),
+    event('assistant/message', {
+      usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 1500 },
+      message: { content: [{ type: 'text', text: 'x' }] },
+    }, 1200, 3),
+  ]))
+  assert.equal(state.model, 'm')
+  assert.equal(state.reasoningEffort, 'low')
+  assert.equal(state.contextWindow, 200_000)
+  assert.equal(state.cacheHitRate, 8000 / 10_500 * 100)
+  assert.equal(state.chProvider, 'p')
+  // Live values are never overwritten by a later backfill.
+  state.model = 'live-model'
+  applyRouteBackfill(state, backfillRouteFromLog([]))
+  assert.equal(state.model, 'live-model')
 })

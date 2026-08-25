@@ -226,10 +226,11 @@ test('buildFooter renders every field in order with · separators', () => {
     rounds: 8,
     model: 'org/deepseek-v4',
     contextPercent: 43.2,
+    cacheHitPercent: 85.04,
     toolCalls: 23,
     thinking: 'high',
   })
-  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 CH 43% · 🔧 23 calls · Turn 8')
+  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Turn 8')
 })
 
 test('buildFooter omits missing fields without leaving separators', () => {
@@ -239,12 +240,14 @@ test('buildFooter omits missing fields without leaving separators', () => {
   assert.equal(buildFooter({ rounds: 0, toolCalls: 0, elapsedMs: 5000 }), '⏱ 5s')
 })
 
-test('buildFooter falls back from percent to raw tokens', () => {
+test('buildFooter falls back from percent to raw tokens; CH stays absent without cache data', () => {
   const withPercent = buildFooter({ contextPercent: -5, contextTokens: 12_300 })
-  assert.match(withPercent, /📊 CH 0%/) // clamped, percent wins when present
+  assert.match(withPercent, /📊 ctx 0%/) // clamped, percent wins when present
   const tokensOnly = buildFooter({ contextTokens: 950 })
-  assert.equal(tokensOnly, '📊 CH 950')
-  assert.equal(buildFooter({ contextTokens: 1_234_000 }), '📊 CH 1.2M')
+  assert.equal(tokensOnly, '📊 ctx 950')
+  assert.equal(buildFooter({ contextTokens: 1_234_000 }), '📊 ctx 1.2M')
+  // A gateway that reports no cache usage (zhipu GLM) → no CH segment at all.
+  assert.ok(!buildFooter({ contextPercent: 43, cacheHitPercent: undefined }).includes('CH'))
 })
 
 test('buildFooter shows the thinking level only when known', () => {
@@ -274,8 +277,28 @@ test('footerFieldsOf derives fields from the run state and clock', () => {
   // 500 tokens of a 1000-token window → 50%.
   assert.equal(fields.contextPercent, 50)
   assert.equal(fields.contextTokens, undefined)
+  // Usage carried no cache components → CH stays absent, not a fake 0.0%.
+  assert.equal(fields.cacheHitPercent, undefined)
   // Header seen, effort absent → off (not omitted); a real level renders verbatim.
   assert.equal(fields.thinking, 'off')
+})
+
+test('footerFieldsOf carries the segment cache-hit rate once cache usage arrives', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm' } } }, 1100, 2))
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 400 },
+    message: { content: [{ type: 'text', text: 'cold start' }] },
+  }, 1200, 3))
+  // Pure cache-write round: 0% so far — but the field is PRESENT (activity > 0).
+  assert.equal(footerFieldsOf(state, 1300).cacheHitPercent, 0)
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 20, outputTokens: 30, cacheReadTokens: 380, cacheWriteTokens: 30 },
+    message: { content: [{ type: 'text', text: 'warm' }] },
+  }, 1400, 4))
+  // read 380 / (120 input + 380 read + 430 write) — output never in the denominator.
+  assert.equal(footerFieldsOf(state, 1500).cacheHitPercent, 380 / 930 * 100)
 })
 
 test('shortModelName strips the provider path', () => {
@@ -297,7 +320,7 @@ test('the turn card closes with a stats footer line behind a divider (no Turn re
   assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].tag, 'markdown')
   const body = card.body.elements[0].content
-  assert.ok(body.includes('\n---\n\n⏱ 1s · 🤖 m · 🧠 high · 📊 CH 50%'))
+  assert.ok(body.includes('\n---\n\n⏱ 1s · 🤖 m · 🧠 high · 📊 ctx 50%'))
   // The round lives in the card header — the footer must not repeat it.
   assert.ok(!body.includes('Turn '))
   // The hash covers the footer so beat patches follow it.

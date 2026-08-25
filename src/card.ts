@@ -239,9 +239,12 @@ function todoSectionLines(state: RunState): string[] | undefined {
 // ------------------------------------------------------------------ footer --
 
 /**
- * Optional fields of the shared note footer. Every field is independent —
+ * Optional fields of the shared stats footer. Every field is independent —
  * unavailable data simply stays out of the line and its separator never
- * renders.
+ * renders. `ctx` (context occupancy) and `CH` (prompt-cache hit rate) are
+ * TWO separate indicators: occupancy = billed context tokens vs the model's
+ * window; hit rate = cacheRead / (input + cacheRead + cacheWrite), output
+ * excluded, route-segment cumulative (TUI footer semantics).
  */
 export interface FooterFields {
   /** Elapsed time of the turn (ms). */
@@ -254,6 +257,8 @@ export interface FooterFields {
   contextPercent?: number
   /** Fallback context size in tokens when no window is known. */
   contextTokens?: number
+  /** Prompt-cache hit rate in percent — only when the gateway reports caching. */
+  cacheHitPercent?: number
   /** Settled tool-call count of the current turn. */
   toolCalls?: number
   /**
@@ -277,8 +282,8 @@ export function shortModelName(model: string): string {
 }
 
 /**
- * Assemble the note-footer statistics line, e.g.
- * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 CH 43% · 🔧 23 calls · Turn 8`.
+ * Assemble the stats-footer line, e.g.
+ * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Turn 8`.
  * Fields with no value (or zero counters) are skipped; separators only join
  * fields that actually rendered. Returns '' when nothing is available.
  */
@@ -288,10 +293,11 @@ export function buildFooter(fields: FooterFields): string {
   if (fields.model !== undefined && fields.model !== '') parts.push(`🤖 ${shortModelName(fields.model)}`)
   if (fields.thinking !== undefined) parts.push(`🧠 ${fields.thinking}`)
   if (fields.contextPercent !== undefined) {
-    parts.push(`📊 CH ${Math.min(100, Math.max(0, Math.round(fields.contextPercent)))}%`)
+    parts.push(`📊 ctx ${Math.min(100, Math.max(0, Math.round(fields.contextPercent)))}%`)
   } else if (fields.contextTokens !== undefined && fields.contextTokens > 0) {
-    parts.push(`📊 CH ${fmtTokens(fields.contextTokens)}`)
+    parts.push(`📊 ctx ${fmtTokens(fields.contextTokens)}`)
   }
+  if (fields.cacheHitPercent !== undefined) parts.push(`⚡ CH ${fields.cacheHitPercent.toFixed(1)}%`)
   if (fields.toolCalls !== undefined && fields.toolCalls > 0) parts.push(`🔧 ${fields.toolCalls} calls`)
   if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Turn ${fields.rounds}`)
   return parts.join(' · ')
@@ -319,6 +325,12 @@ export function footerFieldsOf(state: RunState, now: number): FooterFields {
       ? (tokens / state.contextWindow) * 100
       : undefined,
     contextTokens: state.contextWindow !== undefined ? undefined : tokens,
+    // CH renders only when the gateway actually reports cache usage — a
+    // no-cache gateway (zhipu GLM reports neither component) leaves the
+    // field absent rather than showing a meaningless 0.0%.
+    cacheHitPercent: state.cacheReadTokens > 0 || state.cacheWriteTokens > 0
+      ? state.cacheHitRate
+      : undefined,
     toolCalls,
     // A seen header proves the route is known; effort absent from it means
     // reasoning is off for that route. We KEEP `🧠 off` in that case rather

@@ -29,7 +29,9 @@ import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
 import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
   applyChildBackfill,
+  applyRouteBackfill,
   backfillFromChildLog,
+  backfillRouteFromLog,
   foldBoundEvent,
   foldChildEvent,
   initialProgressCursor,
@@ -87,6 +89,8 @@ export class FeishuBot {
   private pendingPicker: PendingPicker | undefined
   private cardMessageId: string | undefined
   private cardHash: string | undefined
+  /** Session id whose route facts were already backfilled from its log. */
+  private routeBackfilledFor: string | undefined
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -138,6 +142,7 @@ export class FeishuBot {
       if (live !== undefined) {
         try {
           await this.binder.bind(bound)
+          this.backfillRoute()
           this.maybeOpenCardForRunningAgent()
         } catch (error) {
           this.ctx.logger.warn('dsh-feishu: stored binding %s attach failed: %o', bound, error)
@@ -295,6 +300,7 @@ export class FeishuBot {
       await this.store.update({ boundSessionId: row.sessionId })
       this.pendingPicker = undefined
       this.resetRunView()
+      this.backfillRoute()
       await this.reply(
         `已进入会话：${row.preview}\n`
         + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
@@ -427,6 +433,7 @@ export class FeishuBot {
     try {
       const bound = await this.binder.bind(id)
       await this.store.update({ boundSessionId: id })
+      this.backfillRoute()
       this.maybeOpenCardForRunningAgent()
       return bound.agent
     } catch {
@@ -465,6 +472,30 @@ export class FeishuBot {
       const known = this.runState.subagents.has(sessionId)
       foldChildEvent(this.runState, sessionId, event)
       if (!known) this.backfillChild(sessionId)
+    }
+  }
+
+  /**
+   * Backfill the route facts (provider/model/think level/context window and
+   * the cache-hit segment) from the BOUND session's own log. The route events
+   * are appended only at session start or on a route change, so a mid-run
+   * bind never sees them live — without this the footer shows no model, no
+   * think level and a windowless ctx. Runs once per bound session; best-effort.
+   */
+  private backfillRoute(): void {
+    const id = this.binder.getSessionId()
+    if (id === undefined || this.routeBackfilledFor === id) return
+    const sessions = (this.ctx as Context & {
+      sessions?: { get(id: string): { events?: unknown[] } | undefined }
+    }).sessions
+    if (sessions === undefined) return
+    try {
+      const events = sessions.get(id)?.events
+      if (!Array.isArray(events) || events.length === 0) return
+      applyRouteBackfill(this.runState, backfillRouteFromLog(events as SessionEvent[]))
+      this.routeBackfilledFor = id
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: route backfill for %s failed: %o', id, error)
     }
   }
 
@@ -652,6 +683,7 @@ export class FeishuBot {
     this.cardHash = undefined
     this.progressCursor = initialProgressCursor()
     this.turnOriginMessageId = undefined
+    this.routeBackfilledFor = undefined
   }
 
   // --------------------------------------------------------------- /status --

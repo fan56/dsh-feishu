@@ -229,3 +229,54 @@ test('child discovery without a sessions service keeps the fallback label', () =
   assert.ok(row !== undefined)
   assert.equal(row.label, 'subagent child-2') // hash-derived fallback survives
 })
+
+// ------------------------------------------------ route facts backfill --
+
+test('route backfill recovers model/think level/window/cache baseline from the bound log', () => {
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      sessions: {
+        get(id) {
+          assert.equal(id, 's1')
+          return {
+            events: [
+              { type: 'request/header', data: { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha', reasoningEffort: 'high' } } }, time: 1, seq: 1 },
+              { type: 'request/context', data: { provider: 'openrouter', model: 'stealth/ox-alpha', contextWindow: 1_048_576 }, time: 2, seq: 2 },
+              { type: 'assistant/message', data: { usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 1500 }, message: { content: [{ type: 'text', text: 'prior turn' }] } }, time: 3, seq: 3 },
+            ],
+          }
+        },
+      },
+    },
+    config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' } },
+    binder: { getSessionId: () => 's1' },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.backfillRoute()
+  assert.equal(bot.runState.model, 'stealth/ox-alpha')
+  assert.equal(bot.runState.reasoningEffort, 'high')
+  assert.equal(bot.runState.contextWindow, 1_048_576)
+  assert.equal(bot.runState.cacheHitRate, 8000 / 10_500 * 100)
+  // Idempotent per binding: a second call never re-reads the log.
+  let reads = 1
+  bot.backfillRoute()
+  assert.equal(reads, 1)
+})
+
+test('route backfill degrades silently without a sessions service', () => {
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} } }, // no `sessions` service
+    config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' } },
+    binder: { getSessionId: () => 's1' },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.backfillRoute()
+  assert.equal(bot.runState.model, undefined) // no log access, no crash
+})
