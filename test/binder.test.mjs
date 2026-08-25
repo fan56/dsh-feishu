@@ -36,8 +36,25 @@ function makeRegistry() {
         handles.push(handle)
         return handle
       },
-      // Deliberately NO create() — the binder must never call it (the mock
-      // would throw on any accidental invocation via the type mismatch).
+      async create(options) {
+        calls.create += 1
+        calls.createMeta = options.meta
+        const agent = {
+          id: String(options.sessionId),
+          session: { id: String(options.sessionId) },
+          status: 'idle',
+          disposed: false,
+        }
+        const handle = {
+          agent,
+          dispose: async () => { agent.disposed = true },
+        }
+        handles.push(handle)
+        return handle
+      },
+      // create() is ONLY for the binder's explicit createNew (the /new flow);
+      // the bind paths must never reach it — the tests below assert that by
+      // checking calls.create stays 0 through attach/resume.
     },
   }
 }
@@ -127,4 +144,33 @@ test('concurrent binds serialize without leaking handles', async () => {
   const disposed = registry.handles.filter(h => h.agent.disposed).length
   assert.equal(disposed >= 1, true)
   assert.equal(binder.getSessionId(), 'y')
+})
+
+// ------------------------------------------------------ /new create arm --
+
+test('createNew mints a fresh root session the binder owns', async () => {
+  const reg = makeRegistry()
+  const binder = new SessionBinder({ agents: reg.agents })
+  const result = await binder.createNew('/Users/x/github')
+  assert.equal(result.mode, 'created')
+  assert.match(result.sessionId, /^[0-9a-f-]{36}$/) // a fresh UUID identity
+  assert.equal(result.agent.session.id, result.sessionId)
+  // The binder owns the handle — detach disposes it.
+  const handle = reg.handles.find(h => String(h.agent.session.id) === result.sessionId)
+  assert.ok(handle !== undefined)
+  await binder.detach()
+  assert.equal(binder.getSessionId(), undefined)
+})
+
+test('createNew inherits cwd into meta and releases the previous owned handle', async () => {
+  const reg = makeRegistry()
+  const binder = new SessionBinder({ agents: reg.agents })
+  const first = await binder.bind('old-1')
+  assert.equal(first.mode, 'resumed')
+  const created = await binder.createNew('/tmp/work')
+  assert.equal(created.mode, 'created')
+  assert.equal(binder.getSessionId(), created.sessionId)
+  assert.equal(reg.calls.createMeta.cwd, '/tmp/work')
+  // The first owned handle was released; exactly one remains live.
+  assert.equal(reg.handles.filter(h => !h.agent.disposed).length, 1)
 })

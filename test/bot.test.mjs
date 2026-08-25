@@ -394,3 +394,71 @@ test('an expired persisted picker replies 过期 and clears itself', async () =>
   assert.ok(JSON.stringify(bot.lark.sent[0]).includes('选择已过期'))
   assert.equal(state.picker, undefined)
 })
+
+// -------------------------------------------------------- /new flow --
+
+test('/new greys the old card, creates + binds a fresh session, sends the 🆕 boundary card', async () => {
+  const patches = []
+  const sends = []
+  const updates = []
+  const binder = {
+    getSessionId: () => 'old-1',
+    getAgent: () => undefined,
+    detach: async () => {},
+    async createNew(cwd) { createCalls.push(cwd); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
+  }
+  const createCalls = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: {
+      async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+      async patchCard(id, card) { patches.push({ id, card }); return true },
+    },
+    binder,
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p); updates.push(p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.cardMessageId = 'm-old'
+
+  await bot.handleNew()
+
+  // Old card greyed out first (the visual boundary for the old stream)…
+  assert.equal(patches.length, 1)
+  assert.match(patches[0].card.header.title.content, /已解绑/)
+  // …then the 🆕 card opens the new stream.
+  assert.equal(sends.length, 1)
+  assert.match(sends[0].header.title.content, /🆕 新会话 · fresh-aa/)
+  assert.equal(sends[0].header.template, 'green')
+  // Binding switched and persisted.
+  assert.equal(state.boundSessionId, 'fresh-aaaa-bbbb')
+  assert.equal(binder.getSessionId === undefined, false)
+})
+
+test('/new creation failure leaves the bot cleanly unbound with the reason', async () => {
+  const sends = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
+  let detached = false
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard(_c, card) { sends.push(card); return 'm1' }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => (detached ? undefined : 'old-1'),
+      getAgent: () => undefined,
+      detach: async () => { detached = true },
+      async createNew() { throw new Error('registry closed') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  await bot.handleNew()
+  // No 🆕 card; the failure reply carries the reason.
+  assert.equal(sends.length, 1)
+  assert.match(JSON.stringify(sends[0]), /新会话创建失败：registry closed/)
+  assert.equal(state.boundSessionId, undefined)
+  assert.equal(detached, true)
+})

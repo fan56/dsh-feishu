@@ -10,9 +10,10 @@
  *     persisted session; the bot OWNS that handle and disposes it on
  *     rebind/detach.
  *
- * `agents.create` is deliberately never called — the bot cannot mint a second
- * main session. Resuming an already-live session is equally forbidden (the
- * registry would race the live agent) — the attach arm covers that case.
+ * `agents.create` is called from exactly one place — the operator's explicit
+ * /new (never implicitly mid-flow), so the bot cannot mint surprise sessions.
+ * Resuming an already-live session is equally forbidden (the registry would
+ * race the live agent) — the attach arm covers that case.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -20,7 +21,7 @@ import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 /** How the current binding came to be. */
-export type BindMode = 'attached' | 'resumed'
+export type BindMode = 'attached' | 'resumed' | 'created'
 
 /** Result of a successful bind. */
 export interface BindResult {
@@ -33,6 +34,7 @@ export interface BindResult {
 interface AgentsRegistry {
   get(id: SessionId): Agent | undefined
   resume(options: { resumeSessionId: SessionId }): Promise<AgentHandle>
+  create(options: { sessionId: SessionId; meta?: { cwd?: string } }): Promise<AgentHandle>
 }
 
 /**
@@ -74,6 +76,34 @@ export class SessionBinder {
     const live = this.agents.get(SessionId(id))
     if (live !== undefined) return live
     return this.owned?.agent
+  }
+
+  /**
+   * Create a FRESH root session and bind to it — the explicit /new flow.
+   * The "never create" invariant now means "never create IMPLICITLY": this
+   * is the operator's deliberate action, same right the TUI/web surfaces
+   * have. We own the resulting handle exactly like the resume arm.
+   */
+  async createNew(cwd: string): Promise<BindResult> {
+    if (this.binding !== undefined) await this.binding.catch(() => undefined)
+    const task = this.createNewInner(cwd)
+    this.binding = task
+    try {
+      return await task
+    } finally {
+      this.binding = undefined
+    }
+  }
+
+  private async createNewInner(cwd: string): Promise<BindResult> {
+    await this.releaseOwned()
+    const handle = await this.agents.create({
+      sessionId: SessionId(crypto.randomUUID()),
+      meta: { cwd },
+    })
+    this.owned = handle
+    this.sessionId = String(handle.agent.session.id)
+    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent }
   }
 
   /** Bind one session id (attach when live, else resume). */

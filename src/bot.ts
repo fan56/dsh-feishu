@@ -326,16 +326,58 @@ export class FeishuBot {
     }
   }
 
+  /**
+   * /new: close the current binding and start a FRESH session bound to the
+   * bot. The old stream gets its visual boundary — the last card greys out
+   * (已解绑), then a 🆕 header card marks where the new session begins; the
+   * chat history itself is never deleted (round cards are the operator's
+   * record). The new session inherits the previous one's cwd when readable,
+   * else the process cwd.
+   */
   private async handleNew(): Promise<void> {
-    if (this.binder.getSessionId() === undefined) {
-      await this.reply('当前未绑定会话。发 /resume 查看可进入的会话。')
-      return
+    const previousId = this.binder.getSessionId() ?? this.store.get().boundSessionId
+    let cwd = process.cwd()
+    if (previousId !== undefined) {
+      const sessions = this.ctx.get('sessions') as
+        | { get(id: string): { header?: { cwd?: string } } | undefined }
+        | undefined
+      const headerCwd = sessions?.get(previousId)?.header?.cwd
+      if (typeof headerCwd === 'string' && headerCwd !== '') cwd = headerCwd
     }
-    await this.binder.detach()
-    await this.store.update({ boundSessionId: undefined })
-    this.resetRunView()
+    // Grey out the live card BEFORE resetRunView clears cardMessageId —
+    // the original ordering made this patch dead code.
     await this.closeCardAsDetached()
-    await this.reply('已解绑。发 /resume 进入其他会话。')
+    this.resetRunView()
+    try {
+      const created = await this.binder.createNew(cwd)
+      await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
+      const chatId = this.store.get().lastChatId
+      if (chatId !== undefined) {
+        const card: Schema2Card = {
+          schema: '2.0',
+          config: { width_mode: 'fill' },
+          header: {
+            title: { tag: 'plain_text', content: `🆕 新会话 · ${created.sessionId.slice(0, 8)}` },
+            subtitle: { tag: 'plain_text', content: `dsh · ${cwd.split('/').pop() ?? cwd}` },
+            template: 'green',
+          },
+          body: {
+            elements: [{
+              tag: 'markdown',
+              content: '以上是旧会话的记录；从这里开始是新会话。直接发消息即可派活，`/resume` 可回到旧会话。',
+            }],
+          },
+        }
+        await this.lark.sendCard(chatId, card)
+      }
+    } catch (error) {
+      // Creation failed — ensure we stay cleanly unbound and say why.
+      await this.binder.detach()
+      await this.store.update({ boundSessionId: undefined })
+      this.ctx.logger.warn('dsh-feishu: /new create failed: %o', error)
+      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      await this.reply(`新会话创建失败：${reason === '' ? '未知错误' : reason}`)
+    }
   }
 
   private async handleStop(): Promise<void> {

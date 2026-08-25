@@ -82,7 +82,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 152 个单测确认环境正常
+npm test               # 可选：跑 156 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -201,7 +201,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | --- | --- |
 | `/resume` | 列出最近更新的 10 个可恢复根会话（按最后更新时间排序，与 TUI 一致；**自动剔除无对话内容的 scratch 会话**——TUI 每次启动的 resume 命令残留不再霸占顶部；选择列表 5 分钟有效且**跨 dsh 重启持久化**；进入失败时回复携带具体原因） |
 | `/resume N` | 进入列表第 N 个会话；live 会话直接附着，冷会话从持久化恢复 |
-| `/new` | 解绑当前会话，回到未绑定态（**不会**创建新会话；再进要 `/resume`） |
+| `/new` | 结束当前绑定并**创建接入一个全新会话**：旧流最后一张卡灰化定稿 + 🆕 绿色边界卡分隔（聊天历史不删除）；新会话继承旧会话 cwd；`/resume` 可回旧会话；创建失败回复具体原因 |
 | `/stop` | 停止当前正在运行的 turn（排队中的消息保留，下一轮继续处理） |
 | `/status` | 绑定与运行快照：绑定态 / rounds / tools ✔✘ / 子代理数 / think 显示开关 |
 | `/sub N` | 查看第 N 个子代理近况（round 数、最近工具、最新输出 tail） |
@@ -279,8 +279,8 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
   在多客户端下随机分摊事件，锁保证一台机器只有一个 bot 实例。
 - **凭证纪律**：App Secret 走 credentials 服务或环境变量；repo 与 settings.yaml 中
   只有 ref 名。
-- **不代建会话**：永不调用 `agents.create`，从机制上消灭「双 main」；对已 live 的
-  会话只附着、绝不二次 resume。
+- **只在用户显式动作时建会话**：`agents.create` 仅存在于 `/new` 这一个入口（操作者主动
+  开新会话，与 TUI/web 同权），绝不隐式创建；对已 live 的会话只附着、绝不二次 resume。
 
 ## 工作原理
 
@@ -342,7 +342,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（152 个纯逻辑单测）
+npm test         # 构建 + node --test（156 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 
