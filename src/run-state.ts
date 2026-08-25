@@ -92,21 +92,18 @@ export interface RunState {
    */
   pendingChars: number
   /**
-   * Cache-hit accounting of the CURRENT route segment (TUI semantics):
-   * cumulative billed input tokens = input + cacheRead + cacheWrite —
-   * output tokens never enter the denominator. cacheRead is the hit side;
-   * fresh input and cache writes (this request's misses, the premise of
-   * future hits) are the miss side. A provider/model VALUE change resets the
-   * segment (the new route owns a fresh prompt cache).
+   * Cache-hit accounting, SESSION-cumulative (operator's chosen scope):
+   * hit rate = ΣcacheRead / (Σinput + ΣcacheRead + ΣcacheWrite) — output
+   * tokens never enter the denominator (cache hit is an input-side metric);
+   * cacheWrite counts as this request's miss (the premise of future hits).
+   * Route changes do NOT reset the totals — the rate describes the whole
+   * session's input traffic.
    */
   cacheInputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
-  /** Segment hit rate in percent (cacheRead / billedInput), undefined before any usage. */
+  /** Session hit rate in percent (Σread / ΣbilledInput), undefined before any usage. */
   cacheHitRate: number | undefined
-  /** Route of the current cache segment (may lag provider/model during a change). */
-  chProvider: string | undefined
-  chModel: string | undefined
 }
 
 /** Fresh state (no turn observed). */
@@ -140,8 +137,6 @@ export function initialRunState(): RunState {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     cacheHitRate: undefined,
-    chProvider: undefined,
-    chModel: undefined,
   }
 }
 
@@ -314,21 +309,9 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       // undefined means the field is ABSENT from the header — keep the last
       // known value; an explicit off is not representable here.
       if (config.reasoningEffort !== undefined) state.reasoningEffort = config.reasoningEffort
-      // Cache accounting is per route segment: a provider/model VALUE change
-      // owns a fresh prompt cache, so mixing routes would dilute the hit
-      // rate. The first header only establishes the baseline (TUI semantics;
-      // same-value headers — e.g. a resume re-emission — never reset).
-      const provider = config.provider ?? state.chProvider
-      const model = config.model ?? state.chModel
-      if (provider !== undefined && model !== undefined && state.chProvider !== undefined
-        && (provider !== state.chProvider || model !== state.chModel)) {
-        state.cacheInputTokens = 0
-        state.cacheReadTokens = 0
-        state.cacheWriteTokens = 0
-        state.cacheHitRate = undefined
-      }
-      if (provider !== undefined) state.chProvider = provider
-      if (model !== undefined) state.chModel = model
+      // No cache-accumulator reset on a route change: the CH rate is
+      // session-cumulative by design (Σread / Σbilled-input over the whole
+      // session's input traffic, whatever routes carried it).
       break
     }
     case 'request/context': {
@@ -538,7 +521,9 @@ export interface RouteBackfill {
   readonly model: string | undefined
   readonly reasoningEffort: string | undefined
   readonly contextWindow: number | undefined
-  /** Cache-hit segment totals at the end of the log (authoritative so far). */
+  /** Billed context tokens of the LAST usage snapshot in the log (occupancy baseline). */
+  readonly lastUsageTokens: number | undefined
+  /** Session-cumulative cache totals at the end of the log (authoritative so far). */
   readonly cacheInputTokens: number
   readonly cacheReadTokens: number
   readonly cacheWriteTokens: number
@@ -546,18 +531,15 @@ export interface RouteBackfill {
 }
 
 /**
- * Scan a bound session's log for the route facts, applying the SAME
- * segment-reset semantics as the live fold (a provider/model value change
- * restarts the cache accounting mid-log). Pure and defensive — malformed
- * payloads degrade to no-ops, never throw.
+ * Scan a bound session's log for the route facts. Pure and defensive —
+ * malformed payloads degrade to no-ops, never throw.
  */
 export function backfillRouteFromLog(events: readonly SessionEvent[]): RouteBackfill {
   let provider: string | undefined
   let model: string | undefined
   let reasoningEffort: string | undefined
   let contextWindow: number | undefined
-  let chProvider: string | undefined
-  let chModel: string | undefined
+  let lastUsageTokens: number | undefined
   let cacheInput = 0
   let cacheRead = 0
   let cacheWrite = 0
@@ -570,16 +552,6 @@ export function backfillRouteFromLog(events: readonly SessionEvent[]): RouteBack
         if (config.provider !== undefined) provider = config.provider
         if (config.model !== undefined) model = config.model
         if (config.reasoningEffort !== undefined) reasoningEffort = config.reasoningEffort
-        const p = config.provider ?? chProvider
-        const m = config.model ?? chModel
-        if (p !== undefined && m !== undefined && chProvider !== undefined && (p !== chProvider || m !== chModel)) {
-          cacheInput = 0
-          cacheRead = 0
-          cacheWrite = 0
-          cacheHitRate = undefined
-        }
-        if (p !== undefined) chProvider = p
-        if (m !== undefined) chModel = m
         break
       }
       case 'request/context': {
@@ -590,6 +562,7 @@ export function backfillRouteFromLog(events: readonly SessionEvent[]): RouteBack
       case 'assistant/message': {
         const usage = usageComponentsOf(event.data)
         if (usage === undefined) break
+        lastUsageTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens + usage.outputTokens
         cacheInput += usage.inputTokens
         cacheRead += usage.cacheReadTokens
         cacheWrite += usage.cacheWriteTokens
@@ -601,12 +574,12 @@ export function backfillRouteFromLog(events: readonly SessionEvent[]): RouteBack
         break
     }
   }
-  return { provider, model, reasoningEffort, contextWindow, cacheInputTokens: cacheInput, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, cacheHitRate }
+  return { provider, model, reasoningEffort, contextWindow, lastUsageTokens, cacheInputTokens: cacheInput, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, cacheHitRate }
 }
 
 /**
  * Apply route backfill onto the run state. Route display fields only fill
- * holes (a live event is never overwritten); the cache segment totals are
+ * holes (a live event is never overwritten); the cache totals are
  * ASSIGNED — the scan is authoritative for everything appended so far, and
  * live folds continue from its boundary without double counting.
  */
@@ -615,14 +588,11 @@ export function applyRouteBackfill(state: RunState, backfill: RouteBackfill): vo
   if (state.model === undefined && backfill.model !== undefined) state.model = backfill.model
   if (state.reasoningEffort === undefined && backfill.reasoningEffort !== undefined) state.reasoningEffort = backfill.reasoningEffort
   if (state.contextWindow === undefined && backfill.contextWindow !== undefined) state.contextWindow = backfill.contextWindow
+  if (state.lastUsageTokens === undefined && backfill.lastUsageTokens !== undefined) state.lastUsageTokens = backfill.lastUsageTokens
   state.cacheInputTokens = backfill.cacheInputTokens
   state.cacheReadTokens = backfill.cacheReadTokens
   state.cacheWriteTokens = backfill.cacheWriteTokens
   state.cacheHitRate = backfill.cacheHitRate
-  // Reconstruct the segment trackers so a later live route-change header
-  // resets correctly against the recovered baseline.
-  if (state.chProvider === undefined && backfill.provider !== undefined) state.chProvider = backfill.provider
-  if (state.chModel === undefined && backfill.model !== undefined) state.chModel = backfill.model
 }
 
 // --------------------------------------------------- child-log backfill --

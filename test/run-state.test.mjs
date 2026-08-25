@@ -311,7 +311,7 @@ test('applyChildBackfill: label replaces fallback, rounds only correct UP, holes
 
 // ------------------------------------------- cache-hit accounting + backfill --
 
-test('cache hit accumulates per route segment; output never enters the rate', () => {
+test('cache hit is session-cumulative: output excluded, route changes never reset', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm1' } } }, 1000, 1))
   foldBoundEvent(state, event('assistant/message', {
@@ -325,13 +325,11 @@ test('cache hit accumulates per route segment; output never enters the rate', ()
     message: { content: [{ type: 'text', text: 'warm' }] },
   }, 1200, 3))
   assert.equal(state.cacheHitRate, 380 / 930 * 100)
-  // A provider/model VALUE change restarts the segment; same-model headers do not.
-  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm1' } } }, 1300, 4))
-  assert.equal(state.cacheHitRate, 380 / 930 * 100)
+  // A provider/model change (even a same-model re-emission) must NOT reset:
+  // the rate describes the whole session's input traffic.
   foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm2' } } }, 1400, 5))
-  assert.equal(state.cacheHitRate, undefined)
-  assert.equal(state.cacheReadTokens, 0)
-  // Display route fields survive the segment reset.
+  assert.equal(state.cacheHitRate, 380 / 930 * 100)
+  assert.equal(state.cacheReadTokens, 380)
   assert.equal(state.model, 'm2')
 })
 
@@ -365,8 +363,8 @@ test('backfillRouteFromLog recovers route facts and segments the cache history',
   assert.equal(backfill.model, 'other-model')
   assert.equal(backfill.reasoningEffort, 'high') // persists from the earlier header
   assert.equal(backfill.contextWindow, 1_048_576)
-  // Only route B's usage counts: 300 / (500 + 300 + 100).
-  assert.equal(backfill.cacheHitRate, 300 / 900 * 100)
+  // BOTH routes' usage counts (session scope): 8300 / (1500 + 8300 + 1600).
+  assert.equal(backfill.cacheHitRate, 8300 / 11_400 * 100)
 })
 
 test('applyRouteBackfill fills route holes and assigns the authoritative cache totals', () => {
@@ -383,7 +381,8 @@ test('applyRouteBackfill fills route holes and assigns the authoritative cache t
   assert.equal(state.reasoningEffort, 'low')
   assert.equal(state.contextWindow, 200_000)
   assert.equal(state.cacheHitRate, 8000 / 10_500 * 100)
-  assert.equal(state.chProvider, 'p')
+  // The occupancy baseline rides along — ctx% renders on the very first card.
+  assert.equal(state.lastUsageTokens, 1000 + 8000 + 1500 + 200)
   // Live values are never overwritten by a later backfill.
   state.model = 'live-model'
   applyRouteBackfill(state, backfillRouteFromLog([]))
