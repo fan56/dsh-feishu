@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  applyChildBackfill,
+  backfillFromChildLog,
   contextTokensEstimate,
   foldBoundEvent,
   foldChildEvent,
@@ -247,4 +249,60 @@ test('progress throttle never fires outside a running turn', () => {
   foldBoundEvent(state, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 500_000, 3))
   const cursor = initialProgressCursor()
   assert.equal(shouldPushProgress(state, cursor, 900_000, 180_000), false)
+})
+
+// ------------------------------------------------ child naming + backfill --
+
+test('agent-start label reaches a row that child events already created (race fix)', () => {
+  const state = initialRunState()
+  // Child events arrive first — the row is created lazily with the fallback.
+  foldChildEvent(state, 'c1bb44aa', event('assistant/message', { message: { content: [{ type: 'text', text: 'digging' }] } }, 1000, 1))
+  assert.equal(state.subagents.get('c1bb44aa').label, 'subagent c1bb44aa')
+  // Then the parent's agent-start lands with the real spawn label.
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'workhorse', childId: 'c1bb44aa' }, 1100, 2))
+  assert.equal(state.subagents.get('c1bb44aa').label, 'workhorse')
+  assert.equal(subagentDisplayLabel(state.subagents.get('c1bb44aa')), 'workhorse·c1bb')
+})
+
+test('backfillFromChildLog derives label, rounds, last tool and tail from the log', () => {
+  const events = [
+    event('subagent/descriptor', { version: 2, mode: 'one-shot', provider: 'registry', label: 'oldfox' }, 1000, 1),
+    event('tool/call', { callId: 'a', name: 'bash', arguments: '' }, 1100, 2),
+    event('assistant/message', { message: { content: [{ type: 'text', text: 'first pass' }] } }, 1200, 3),
+    event('tool/call', { callId: 'b', name: 'Edit', arguments: '' }, 1300, 4),
+    event('assistant/message', { message: { content: [{ type: 'text', text: 'fixed it\nship it' }] } }, 1400, 5),
+    event('garbage', { nope: true }, 1500, 6),
+  ]
+  const backfill = backfillFromChildLog(events)
+  assert.equal(backfill.label, 'oldfox')
+  assert.equal(backfill.rounds, 2)
+  assert.equal(backfill.lastTool, 'Edit')
+  assert.equal(backfill.tail, 'ship it')
+  // No descriptor → no label; malformed payloads degrade to no-ops.
+  const bare = backfillFromChildLog([
+    event('subagent/descriptor', { version: 2, mode: 'one-shot', provider: 'p' }, 100, 1),
+    event('assistant/message', { message: { content: [{ type: 'text', text: 'x' }] } }, 200, 2),
+  ])
+  assert.equal(bare.label, undefined)
+  assert.equal(bare.rounds, 1)
+})
+
+test('applyChildBackfill: label replaces fallback, rounds only correct UP, holes only filled', () => {
+  const state = initialRunState()
+  // Row exists with fallback label and one live-folded round already.
+  foldChildEvent(state, 'c1bb44aa', event('assistant/message', { message: { content: [{ type: 'text', text: 'live tail' }] } }, 1000, 1))
+  applyChildBackfill(state, 'c1bb44aa', { label: 'workhorse', rounds: 6, lastTool: 'Edit', tail: undefined })
+  const row = state.subagents.get('c1bb44aa')
+  assert.equal(row.label, 'workhorse')
+  assert.equal(row.rounds, 6) // corrected up past the live count
+  assert.equal(row.lastTool, 'Edit') // hole filled
+  assert.equal(row.tail, 'live tail') // live value wins, not overwritten with undefined
+  // Rounds never go DOWN; a fallback-pattern backfill label is ignored.
+  applyChildBackfill(state, 'c1bb44aa', { label: 'subagent deadbeef', rounds: 2, lastTool: 'bash', tail: 'stale' })
+  assert.equal(row.rounds, 6)
+  assert.equal(row.label, 'workhorse')
+  assert.equal(row.tail, 'live tail')
+  // Unknown child id: no-op.
+  applyChildBackfill(state, 'nope', { label: 'x', rounds: 9, lastTool: 'x', tail: 'x' })
+  assert.equal(state.subagents.has('nope'), false)
 })

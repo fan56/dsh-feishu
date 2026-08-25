@@ -28,6 +28,8 @@ import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
 import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
+  applyChildBackfill,
+  backfillFromChildLog,
   foldBoundEvent,
   foldChildEvent,
   initialProgressCursor,
@@ -460,7 +462,31 @@ export class FeishuBot {
       header?.parentSession !== undefined && String(header.parentSession) === boundId
       && (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0)
     ) {
+      const known = this.runState.subagents.has(sessionId)
       foldChildEvent(this.runState, sessionId, event)
+      if (!known) this.backfillChild(sessionId)
+    }
+  }
+
+  /**
+   * Backfill a newly discovered child row from the child's OWN session log.
+   * Discovery can happen long after spawn (mid-turn attach) or with the
+   * child's events beating the parent's agent-start — either way the naming
+   * events never reach the live firehose, and without this the card shows the
+   * bare hash prefix instead of the agent name. Best-effort: no sessions
+   * service or an unreadable log just keeps the fallback label.
+   */
+  private backfillChild(childId: string): void {
+    const sessions = (this.ctx as Context & {
+      sessions?: { get(id: string): { events?: unknown[] } | undefined }
+    }).sessions
+    if (sessions === undefined) return
+    try {
+      const events = sessions.get(childId)?.events
+      if (!Array.isArray(events) || events.length === 0) return
+      applyChildBackfill(this.runState, childId, backfillFromChildLog(events as SessionEvent[]))
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: child backfill for %s failed: %o', childId, error)
     }
   }
 

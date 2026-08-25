@@ -169,3 +169,63 @@ test('forced list mode ships only the markdown list card', async () => {
   assert.match(lines[0], /^1\. /)
   assert.equal(lines.at(-1), '回复 /resume N 进入对应会话')
 })
+
+// ------------------------------------------------ child naming backfill --
+
+test('child discovery backfills the agent name from the child session log', async () => {
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      sessions: {
+        get(id) {
+          assert.equal(id, 'child-1')
+          return {
+            events: [
+              { type: 'subagent/descriptor', data: { version: 2, mode: 'one-shot', provider: 'registry', label: 'workhorse' }, time: 100, seq: 1 },
+              { type: 'tool/call', data: { callId: 'a', name: 'bash', arguments: '' }, time: 150, seq: 2 },
+              { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'round one done' }] } }, time: 200, seq: 3 },
+            ],
+          }
+        },
+      },
+    },
+    config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+    binder: { getSessionId: () => 'parent-1' },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+
+  // A live child event mid-run discovers the child; the naming events predate
+  // the attach and never arrive on the firehose — only the log has them.
+  bot.onSessionEvent(
+    { id: 'child-1', header: { parentSession: 'parent-1', origin: 'subagent', delegationDepth: 1 } },
+    { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'still going' } }, time: 900, seq: 4 },
+  )
+
+  const row = bot.runState.subagents.get('child-1')
+  assert.ok(row !== undefined)
+  assert.equal(row.label, 'workhorse') // name recovered from the log, not the hash fallback
+  assert.equal(row.rounds, 1) // corrected up to the log's true count
+  assert.equal(row.lastTool, 'bash')
+})
+
+test('child discovery without a sessions service keeps the fallback label', () => {
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} } }, // no `sessions` service
+    config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' } },
+    binder: { getSessionId: () => 'parent-1' },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.onSessionEvent(
+    { id: 'child-2', header: { parentSession: 'parent-1', origin: 'subagent' } },
+    { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'x' } }, time: 900, seq: 1 },
+  )
+  const row = bot.runState.subagents.get('child-2')
+  assert.ok(row !== undefined)
+  assert.equal(row.label, 'subagent child-2') // hash-derived fallback survives
+})

@@ -318,12 +318,13 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
     case 'tool-workflow/agent-start': {
       const data = rec(event.data)
       const childId = data.childId
+      // Only a real string label is kept; anything else falls back to the
+      // hash-derived placeholder (a numeric label must not leak in).
+      const label = typeof data.label === 'string' && data.label !== '' ? data.label : undefined
       if (childId !== undefined && !state.subagents.has(childId)) {
         state.subagents.set(childId, {
           childId,
-          // Only a real string label is kept; anything else falls back to the
-          // hash-derived placeholder (a numeric label must not leak in).
-          label: typeof data.label === 'string' ? data.label : `subagent ${childId.slice(0, 8)}`,
+          label: label ?? `subagent ${childId.slice(0, 8)}`,
           rounds: 0,
           tail: undefined,
           lastTool: undefined,
@@ -335,6 +336,14 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
         const seq = rec(event.data).seq
         if (typeof runId === 'string' && typeof seq === 'number') {
           state.runSeqToChild.set(`${runId}:${seq}`, childId)
+        }
+        // The spawn label is authoritative — it must also reach a row that a
+        // child event already created lazily (cross-session delivery order is
+        // not guaranteed, so the child's first events can beat the parent's
+        // agent-start append).
+        if (label !== undefined) {
+          const row = state.subagents.get(childId)
+          if (row !== undefined) row.label = label
         }
       }
       break
@@ -452,6 +461,75 @@ export function contextTokensEstimate(state: RunState): number | undefined {
 
 /** Default fallback label pattern (`subagent <id8>`) — not a real name. */
 const FALLBACK_LABEL_RE = /^subagent [0-9a-f]{8}$/
+
+// --------------------------------------------------- child-log backfill --
+
+/**
+ * Facts derivable from a child session's own append-only log. A child
+ * discovered mid-run (mid-turn attach) or after its events raced the parent's
+ * `tool-workflow/agent-start` missed the naming events — the log is the
+ * authoritative backfill source, the same pattern dsh-tui-pi uses for its
+ * round-count reconcile.
+ */
+export interface ChildBackfill {
+  /** Durable creation label from `subagent/descriptor` (the spawn agent name). */
+  readonly label: string | undefined
+  /** assistant/message count in the log (the child's true round count). */
+  readonly rounds: number
+  /** Last invoked tool name, when any. */
+  readonly lastTool: string | undefined
+  /** Last visible output line of the last assistant message. */
+  readonly tail: string | undefined
+}
+
+/**
+ * Scan a child session's log for the backfill facts. Pure and defensive —
+ * malformed payloads degrade exactly like the live fold (no-op, no throw).
+ */
+export function backfillFromChildLog(events: readonly SessionEvent[]): ChildBackfill {
+  let label: string | undefined
+  let rounds = 0
+  let lastTool: string | undefined
+  let tail: string | undefined
+  for (const event of events) {
+    switch (event.type) {
+      case 'subagent/descriptor': {
+        const found = rec<{ label?: unknown }>(event.data).label
+        if (typeof found === 'string' && found !== '') label = found
+        break
+      }
+      case 'assistant/message': {
+        rounds += 1
+        const text = assistantTextOf(event.data)
+        if (text !== '') tail = lastNonBlankLine(text)
+        break
+      }
+      case 'tool/call': {
+        const name = rec(event.data).name
+        if (typeof name === 'string' && name !== '') lastTool = name
+        break
+      }
+      default:
+        break
+    }
+  }
+  return { label, rounds, lastTool, tail }
+}
+
+/**
+ * Apply backfill facts onto an existing child row. Rounds only correct UP
+ * (never un-count live-folded events); lastTool/tail only fill holes so a
+ * fresher live value always wins; a real label always replaces the fallback
+ * placeholder.
+ */
+export function applyChildBackfill(state: RunState, childId: string, backfill: ChildBackfill): void {
+  const row = state.subagents.get(childId)
+  if (row === undefined) return
+  if (backfill.label !== undefined && !FALLBACK_LABEL_RE.test(backfill.label)) row.label = backfill.label
+  if (backfill.rounds > row.rounds) row.rounds = backfill.rounds
+  if (row.lastTool === undefined) row.lastTool = backfill.lastTool
+  if (row.tail === undefined) row.tail = backfill.tail
+}
 
 /**
  * Display label for a subagent row: real name + short-hash suffix when the
