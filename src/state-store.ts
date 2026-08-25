@@ -10,6 +10,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
+import type { ResumeRow } from './resume-table.ts'
+
+/** A persisted /resume selection awaiting its index reply. */
+export interface StoredPicker {
+  rows: readonly ResumeRow[]
+  expiresAt: number
+}
 
 /** What the bot persists. */
 export interface BotState {
@@ -19,12 +26,40 @@ export interface BotState {
   displayThink: boolean
   /** Last chat the operator wrote from — where status cards go. */
   lastChatId: string | undefined
+  /**
+   * Latest /resume picker. Persisted (not just in-memory) so a dsh restart
+   * within the TTL does not strand the operator's `/resume N` reply — the
+   * picker's 5-minute TTL still bounds staleness.
+   */
+  picker: StoredPicker | undefined
 }
 
 const DEFAULT_STATE: BotState = {
   boundSessionId: undefined,
   displayThink: false,
   lastChatId: undefined,
+  picker: undefined,
+}
+
+/**
+ * Decode a persisted picker payload. Defensive: the stored JSON is only as
+ * trustworthy as the last writer — anything malformed, empty or missing its
+ * expiry degrades to "no picker" rather than surfacing garbage rows.
+ */
+function decodePicker(raw: unknown): StoredPicker | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined
+  try {
+    const parsed = JSON.parse(raw) as { rows?: unknown; expiresAt?: unknown }
+    if (!Array.isArray(parsed.rows) || typeof parsed.expiresAt !== 'number') return undefined
+    const rows = parsed.rows.filter((row): row is ResumeRow =>
+      row !== null && typeof row === 'object'
+      && typeof (row as ResumeRow).index === 'number'
+      && typeof (row as ResumeRow).sessionId === 'string')
+    if (rows.length === 0) return undefined
+    return { rows, expiresAt: parsed.expiresAt }
+  } catch {
+    return undefined
+  }
 }
 
 const STATE_NAMESPACE = settingsNamespace('dsh-feishu')
@@ -33,7 +68,8 @@ const STATE_SCHEMA = z.object({
   boundSessionId: z.string().default(''),
   displayThink: z.boolean().default(false),
   lastChatId: z.string().default(''),
-}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string }>
+  picker: z.string().default(''),
+}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string }>
 
 function fromSection(section: unknown): BotState {
   const value = (section ?? {}) as Partial<Record<keyof BotState, unknown>>
@@ -45,6 +81,7 @@ function fromSection(section: unknown): BotState {
     lastChatId: typeof value.lastChatId === 'string' && value.lastChatId !== ''
       ? value.lastChatId
       : undefined,
+    picker: decodePicker(value.picker),
   }
 }
 
@@ -55,7 +92,7 @@ function fromSection(section: unknown): BotState {
  */
 export class StateStore {
   private readonly memory: BotState = { ...DEFAULT_STATE }
-  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string }> | undefined
+  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string }> | undefined
   private readonly registration: Promise<void>
 
   constructor(ctx: Context) {
@@ -71,7 +108,7 @@ export class StateStore {
         try {
           if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
             this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
-              base: { boundSessionId: '', displayThink: false, lastChatId: '' },
+              base: { boundSessionId: '', displayThink: false, lastChatId: '', picker: '' },
               applies: 'live',
             })
           }
@@ -119,6 +156,7 @@ export class StateStore {
         boundSessionId: next.boundSessionId ?? '',
         displayThink: next.displayThink,
         lastChatId: next.lastChatId ?? '',
+        picker: next.picker === undefined ? '' : JSON.stringify(next.picker),
       })
     } catch {
       // Persistence failed — the in-memory copy still serves this run.

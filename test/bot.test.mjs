@@ -324,3 +324,64 @@ test('route backfill degrades silently without a sessions service', () => {
   bot.backfillRoute()
   assert.equal(bot.runState.model, undefined) // no log access, no crash
 })
+
+// ------------------------------------------------ persisted /resume picker --
+
+function pickerBot(state, bindCalls) {
+  return new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} } },
+    config: { statusIntervalMs: 30000, bodySegmentChars: 3500 },
+    lark: {
+      sent: [],
+      async sendCard(_chatId, card) { this.sent.push(card); return `m${this.sent.length}` },
+      async patchCard() { return true },
+    },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      async bind(id) { bindCalls.push(id); return { sessionId: id, mode: 'attached', agent: {} } },
+    },
+    store: {
+      updates: [],
+      ready: async () => {},
+      get: () => state,
+      async update(patch) { Object.assign(state, patch); this.updates.push(patch) },
+    },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+}
+
+test('a restart-stranded /resume N falls back to the persisted picker', async () => {
+  const state = {
+    lastChatId: 'oc_test',
+    displayThink: false,
+    picker: { rows: [{ index: 1, sessionId: 's-target', dir: 'repo', createdAt: 1, lastTime: undefined, preview: 'hello' }], expiresAt: 999_999 },
+  }
+  const bindCalls = []
+  const bot = pickerBot(state, bindCalls)
+  bot.pendingPicker = undefined // restart killed the in-memory copy
+
+  await bot.handleResumePick(1)
+
+  assert.deepEqual(bindCalls, ['s-target'])
+  const reply = JSON.stringify(bot.lark.sent[0])
+  assert.ok(reply.includes('已进入会话'))
+  // The consumed picker is cleared from BOTH the memory and the store.
+  assert.equal(state.picker, undefined)
+  assert.equal(bot.pendingPicker, undefined)
+})
+
+test('an expired persisted picker replies 过期 and clears itself', async () => {
+  const state = {
+    lastChatId: 'oc_test',
+    displayThink: false,
+    picker: { rows: [{ index: 1, sessionId: 's-old', dir: 'repo', createdAt: 1, lastTime: undefined, preview: 'x' }], expiresAt: 500 },
+  }
+  const bindCalls = []
+  const bot = pickerBot(state, bindCalls)
+  await bot.handleResumePick(1)
+  assert.deepEqual(bindCalls, []) // never reached bind
+  assert.ok(JSON.stringify(bot.lark.sent[0]).includes('选择已过期'))
+  assert.equal(state.picker, undefined)
+})

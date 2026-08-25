@@ -53,6 +53,7 @@ interface PendingPicker {
 
 const PICKER_TTL_MS = 5 * 60 * 1000
 
+
 export interface BotDeps {
   readonly ctx: Context
   readonly config: ResolvedConfig
@@ -258,6 +259,7 @@ export class FeishuBot {
       return
     }
     this.pendingPicker = { rows, expiresAt: this.now() + PICKER_TTL_MS }
+    await this.store.update({ picker: this.pendingPicker })
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
     const style = this.config.resumeListStyle ?? 'auto'
@@ -280,10 +282,20 @@ export class FeishuBot {
     }
   }
 
+  /**
+   * The effective picker: the in-memory one wins, the PERSISTED one is the
+   * fallback after a restart (bot state survives reboots; the raw picker
+   * previously died with the process, stranding `/resume N` replies).
+   */
+  private currentPicker(): PendingPicker | undefined {
+    return this.pendingPicker ?? this.store.get().picker
+  }
+
   private async handleResumePick(n: number): Promise<void> {
-    const picker = this.pendingPicker
+    const picker = this.currentPicker()
     if (picker === undefined || picker.expiresAt < this.now()) {
       this.pendingPicker = undefined
+      await this.store.update({ picker: undefined })
       await this.reply('选择已过期。先发 /resume 查看会话列表。')
       return
     }
@@ -294,7 +306,7 @@ export class FeishuBot {
     }
     try {
       const bound = await this.binder.bind(row.sessionId)
-      await this.store.update({ boundSessionId: row.sessionId })
+      await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
       this.pendingPicker = undefined
       this.resetRunView()
       this.backfillRoute()
