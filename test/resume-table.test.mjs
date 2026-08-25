@@ -128,3 +128,34 @@ test('pickResumeRow bounds-checks the index', () => {
   assert.equal(pickResumeRow(rows, 3), undefined)
   assert.equal(pickResumeRow(rows, 1.5), undefined)
 })
+
+// ------------------------------------------------ scratch-session filtering --
+
+test('scratch sessions (no conversational events) are dropped; the next candidate fills in', async () => {
+  const headers = [
+    header('scratch-1', 5000), // TUI boot scratch, freshest mtime
+    header('real-a', 4000),
+    header('scratch-2', 3000),
+    header('real-b', 2000),
+  ]
+  const events = new Map([
+    // The startup-resume scratch shape: bootstrap + a command/run, no messages.
+    ['scratch-1', [{ type: 'permission/preset', seq: 0, time: 5000, data: {} }, { type: 'command/run', seq: 1, time: 5001, data: { name: 'resume' } }]],
+    ['real-a', [userEvent('fix the login bug')]],
+    ['scratch-2', []],
+    ['real-b', [userEvent('second session')]],
+  ])
+  const rows = await buildResumeRows(persistence(headers, events))
+  assert.deepEqual(rows.map(r => r.sessionId), ['real-a', 'real-b'])
+  // Indices stay contiguous after the drops.
+  assert.deepEqual(rows.map(r => r.index), [1, 2])
+  assert.equal(rows[0].preview, 'fix the login bug')
+})
+
+test('an inspect FAILURE keeps the row — unknown is not scratch', async () => {
+  const headers = [header('unknown', 100), header('real', 50)]
+  const events = new Map([['real', [userEvent('x')]]]) // 'unknown' inspect throws
+  const rows = await buildResumeRows(persistence(headers, events))
+  assert.deepEqual(rows.map(r => r.sessionId), ['unknown', 'real'])
+  assert.equal(rows[0].preview, '? · unknown') // fallback label (no cwd), row kept
+})

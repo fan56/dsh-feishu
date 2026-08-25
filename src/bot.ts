@@ -318,7 +318,10 @@ export class FeishuBot {
       this.maybeOpenCardForRunningAgent()
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
-      await this.reply('进入会话失败，请重试或换一个。')
+      // The reason rides along (clipped): a bare "failed" on the phone gave
+      // nothing to debug from — the whole /resume investigation stalled on it.
+      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      await this.reply(`进入会话失败：${reason === '' ? '未知错误' : reason}`)
     }
   }
 

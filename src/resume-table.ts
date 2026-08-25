@@ -13,6 +13,14 @@
  *
  * `list()` is only ever called on an explicit `/resume` (spike S2c: cold
  * listing can take seconds on a long history) — never at startup.
+ *
+ * Scratch filtering: the TUI's startup /resume flow leaves a one-command
+ * session behind on EVERY dsh boot (bootstrap events + a command/run, no
+ * conversation), always with the freshest mtime — without filtering these
+ * poison the picker's top rows and `/resume 1` lands on garbage. A session
+ * whose inspected log carries no user/assistant message is dropped and the
+ * next candidate fills the row; an INSPECT FAILURE keeps the row (unknown
+ * is not scratch).
  */
 
 import { readdir, stat } from 'node:fs/promises'
@@ -29,7 +37,8 @@ export interface SessionPersistenceLike {
 
 /** One table row shown to the operator (preview/lastTime enrich during build). */
 export interface ResumeRow {
-  readonly index: number
+  /** Assigned last (contiguous from 1) — scratch filtering reorders rows. */
+  index: number
   readonly sessionId: string
   /** cwd basename (or `?`). */
   readonly dir: string
@@ -173,36 +182,61 @@ export async function buildResumeRows(
     return String(b.id).localeCompare(String(a.id))
   })
 
-  const rows: ResumeRow[] = candidates.slice(0, limit).map((header, position) => ({
-    index: position + 1,
-    sessionId: String(header.id),
-    dir: basename(header.cwd ?? '?') || '?',
-    createdAt: header.createdAt,
-    // The mtime IS the last-update time; the inspect tail below only fills
-    // this in when the store root was unknown (no mtime available).
-    lastTime: lastUpdates?.get(String(header.id)),
-    preview: '',
-  }))
-
-  let cursor = 0
-  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, rows.length)) }, async () => {
-    while (cursor < rows.length) {
-      const row = rows[cursor++]!
-      try {
-        const { events } = await persistence.inspect(SessionId(row.sessionId))
-        const preview = previewOfEvents(events)
-        row.preview = preview === undefined ? '' : clipLine(preview, PREVIEW_MAX_CHARS)
-        if (row.lastTime === undefined) {
-          const last = events.at(-1)
-          if (last !== undefined) row.lastTime = last.time
-        }
-      } catch {
-        // Inspect failed — the fallback label below keeps the row usable.
+  /** Enrich one row in place; marks scratch sessions in `scratch`. */
+  const scratch = new Set<string>()
+  const enrich = async (row: ResumeRow): Promise<void> => {
+    try {
+      const { events } = await persistence.inspect(SessionId(row.sessionId))
+      const preview = previewOfEvents(events)
+      if (preview === undefined) {
+        // Inspected fine but no conversational message ever landed here —
+        // the startup-resume scratch shape. Drop it from the picker.
+        scratch.add(row.sessionId)
+        return
       }
+      row.preview = clipLine(preview, PREVIEW_MAX_CHARS)
+      if (row.lastTime === undefined) {
+        const last = events.at(-1)
+        if (last !== undefined) row.lastTime = last.time
+      }
+    } catch {
+      // Inspect failed — the fallback label below keeps the row usable.
+      // (Unknown is not scratch: the row stays.)
     }
-  })
-  await Promise.all(workers)
+  }
 
+  // Pull candidate batches until `limit` conversational rows are filled —
+  // each dropped scratch row promotes the next candidate into the batch.
+  const rows: ResumeRow[] = []
+  let position = 0
+  while (rows.length < limit && position < candidates.length) {
+    const batch = candidates.slice(position, position + limit - rows.length).map(header => ({
+      index: 0,
+      sessionId: String(header.id),
+      dir: basename(header.cwd ?? '?') || '?',
+      createdAt: header.createdAt,
+      // The mtime IS the last-update time; the inspect tail only fills this
+      // in when the store root was unknown (no mtime available).
+      lastTime: lastUpdates?.get(String(header.id)),
+      preview: '',
+    }))
+    position += batch.length
+    let cursor = 0
+    const workers = Array.from({ length: Math.max(1, Math.min(concurrency, batch.length)) }, async () => {
+      while (cursor < batch.length) {
+        const row = batch[cursor++]!
+        await enrich(row)
+      }
+    })
+    await Promise.all(workers)
+    for (const row of batch) {
+      if (rows.length >= limit) break
+      if (!scratch.has(row.sessionId)) rows.push(row)
+    }
+  }
+
+  // The index contract: contiguous from 1 in the delivered order.
+  rows.forEach((row, i) => { row.index = i + 1 })
   for (const row of rows) {
     if (row.preview === '') {
       row.preview = `${row.dir} · ${row.sessionId.slice(0, 8)}`

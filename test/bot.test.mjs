@@ -140,8 +140,11 @@ function resumeBot(lark, resumeListStyle) {
         if (key !== 'sessionPersistence') return undefined
         return {
           async list() { return [resumeHeader('aaaaaaaa1111'), resumeHeader('bbbbbbbb2222', 2000)] },
-          // Inspect failure degrades the row to its fallback preview — fine here.
-          async inspect() { return { meta: {}, events: [] } },
+          // Realistic inspect: one user message (an empty-events log is the
+          // scratch-session shape the picker now filters out).
+          async inspect() {
+            return { meta: {}, events: [{ type: 'user/message', seq: 0, time: 1000, data: { content: [{ type: 'text', text: 'fix the login bug' }], source: { kind: 'user' } } }] }
+          },
         }
       },
     },
