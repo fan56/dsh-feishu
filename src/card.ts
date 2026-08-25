@@ -17,7 +17,7 @@
  * the markdown body after an `---` divider — schema V2 cards REJECT the
  * legacy `note` tag (server error 200861), so no note element may appear in
  * a 2.0 body. The think tail text appears only when the operator turns it on
- * (`/display think on`).
+ * (`/feishu-plugin think off` hides it; on by default).
  */
 
 import type { RunState } from './run-state.ts'

@@ -18,9 +18,11 @@ test('bot-owned commands parse', () => {
   assert.deepEqual(classifyInbound('/stop'), { kind: 'stop' })
   assert.deepEqual(classifyInbound('/sub 2'), { kind: 'sub', n: 2 })
   assert.deepEqual(classifyInbound('/sub'), { kind: 'prompt', text: '/sub' })
-  assert.deepEqual(classifyInbound('/display think on'), { kind: 'display', target: 'think', value: 'on' })
-  assert.deepEqual(classifyInbound('/display think off'), { kind: 'display', target: 'think', value: 'off' })
-  assert.deepEqual(classifyInbound('/display think maybe'), { kind: 'prompt', text: '/display think maybe' })
+  assert.deepEqual(classifyInbound('/feishu-plugin think on'), { kind: 'display', target: 'think', value: 'on' })
+  assert.deepEqual(classifyInbound('/feishu-plugin think off'), { kind: 'display', target: 'think', value: 'off' })
+  assert.deepEqual(classifyInbound('/feishu-plugin think maybe'), { kind: 'prompt', text: '/feishu-plugin think maybe' })
+  // The old name no longer routes — unknown commands fall through as prompts.
+  assert.deepEqual(classifyInbound('/display think on'), { kind: 'prompt', text: '/display think on' })
 })
 
 test('passthrough table forwards the whitelisted host commands', () => {
@@ -49,6 +51,6 @@ test('help text adapts to the binding state', () => {
   for (const text of [bound, unbound]) {
     assert.match(text, /\/resume/)
     assert.match(text, /\/stop/)
-    assert.match(text, /\/display think/)
+    assert.match(text, /\/feishu-plugin think/)
   }
 })

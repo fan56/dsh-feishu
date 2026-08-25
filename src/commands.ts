@@ -3,7 +3,7 @@
  * doc §4 three-way split:
  *
  * - bot-owned mirrors: /resume (picker), /new (detach), /status, /help,
- *   /stop, /display, /sub — implemented here, no host involvement;
+ *   /stop, /feishu-plugin, /sub — implemented here, no host involvement;
  * - host passthrough: a whitelist of agent-addressed dsh commands forwarded
  *   through ctx.commands.execute;
  * - rejected: config-class commands answered with "operate on the desktop".
@@ -109,7 +109,10 @@ export function classifyInbound(text: string): Intent {
       const n = parseIntArg(rest)
       return n === undefined ? { kind: 'prompt', text: trimmed } : { kind: 'sub', n }
     }
-    case 'display': {
+    case 'feishu-plugin': {
+      // Named after the plugin itself: ownership of phone-side commands
+      // must be self-evident (a bare /display read as a dsh/TUI command
+      // caused real confusion in live use).
       const args = (rest ?? '').trim().split(/\s+/)
       if (args[0] === 'think' && (args[1] === 'on' || args[1] === 'off')) {
         return { kind: 'display', target: 'think', value: args[1] }
@@ -139,7 +142,7 @@ export function helpText(bound: boolean): string {
     '· /stop — 停止当前正在运行的 turn',
     '· /status — 绑定与运行状态',
     '· /sub N — 查看第 N 个子代理近况',
-    '· /display think on|off — 开关思考/工具尾行显示',
+    '· /feishu-plugin think on|off — 开关思考尾行显示（默认开）',
     '· /goal /dcp /export /agents /subagents — 透传 dsh 命令',
     '· 其余以 / 开头的内容会作为 prompt 发给模型',
     '· /settings /preset /theme 等配置类命令请在电脑端操作',

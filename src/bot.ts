@@ -230,7 +230,7 @@ export class FeishuBot {
       case 'sub': await this.handleSub(intent.n); break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
-        await this.reply(intent.value === 'on' ? '已开启思考尾行显示（活动区）。' : '已关闭思考尾行显示。')
+        await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
         break
       case 'rejected':
         await this.reply(`「/${intent.name}」属于配置类命令，请在电脑端操作。`)

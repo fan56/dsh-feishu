@@ -22,7 +22,7 @@ export interface StoredPicker {
 export interface BotState {
   /** Bound root session id, when the bot is attached to one. */
   boundSessionId: string | undefined
-  /** Whether the think/tool tail line is rendered on the status card. */
+  /** Whether the think tail line is rendered on the round card (default on). */
   displayThink: boolean
   /** Last chat the operator wrote from — where status cards go. */
   lastChatId: string | undefined
@@ -36,7 +36,7 @@ export interface BotState {
 
 const DEFAULT_STATE: BotState = {
   boundSessionId: undefined,
-  displayThink: false,
+  displayThink: true,
   lastChatId: undefined,
   picker: undefined,
 }
@@ -66,7 +66,7 @@ const STATE_NAMESPACE = settingsNamespace('dsh-feishu')
 
 const STATE_SCHEMA = z.object({
   boundSessionId: z.string().default(''),
-  displayThink: z.boolean().default(false),
+  displayThink: z.boolean().default(true),
   lastChatId: z.string().default(''),
   picker: z.string().default(''),
 }) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string }>
@@ -77,7 +77,8 @@ function fromSection(section: unknown): BotState {
     boundSessionId: typeof value.boundSessionId === 'string' && value.boundSessionId !== ''
       ? value.boundSessionId
       : undefined,
-    displayThink: value.displayThink === true,
+    // Absent means the default (on) — only an explicit false turns it off.
+    displayThink: value.displayThink !== false,
     lastChatId: typeof value.lastChatId === 'string' && value.lastChatId !== ''
       ? value.lastChatId
       : undefined,
@@ -108,7 +109,7 @@ export class StateStore {
         try {
           if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
             this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
-              base: { boundSessionId: '', displayThink: false, lastChatId: '', picker: '' },
+              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '' },
               applies: 'live',
             })
           }

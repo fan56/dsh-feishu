@@ -205,7 +205,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | `/stop` | 停止当前正在运行的 turn（排队中的消息保留，下一轮继续处理） |
 | `/status` | 绑定与运行快照：绑定态 / rounds / tools ✔✘ / 子代理数 / think 显示开关 |
 | `/sub N` | 查看第 N 个子代理近况（round 数、最近工具、最新输出 tail） |
-| `/display think on\|off` | 开关活动章节里的思考尾行显示（默认 off，持久化保存） |
+| `/feishu-plugin think on\|off` | 开关活动章节里的思考尾行显示（**默认 on**，持久化保存；命令以插件名命名，手机侧命令归属一目了然） |
 | `/help` | 命令清单（随绑定态变化提示语） |
 | `/goal` `/dcp` `/export` `/agents` `/subagents` | 透传给 dsh host 命令注册表执行 |
 | 其他任何文本 | 作为 prompt 注入当前绑定的会话 |
