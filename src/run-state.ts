@@ -54,6 +54,12 @@ export interface RunState {
   turnEndReason: string | undefined
   /** assistant/message count within the current turn (the "rounds"). */
   rounds: number
+  /** Epoch ms when the CURRENT round started (turn start or the previous round's message). */
+  roundStartedAt: number | undefined
+  /** Duration of the round that just settled — the settled card's header reads it. */
+  lastRoundDurationMs: number | undefined
+  /** Text blocks of the round that just settled — its verbatim body card. */
+  lastRoundText: string
   /** Epoch ms of the latest reasoning delta (the thinking phase marker). */
   thinkingSince: number | undefined
   /** Raw reasoning buffer (capped) — tail source when think display is on. */
@@ -72,8 +78,6 @@ export interface RunState {
   /** Latest llm/retry counters of the current turn. */
   retries: number
   maxRetries: number | undefined
-  /** Text blocks of every assistant message this turn — the turn/end body. */
-  assistantTexts: string[]
   /** Last visible line of the latest assistant message (status snapshot). */
   lastAssistantLine: string | undefined
   /** Provider route of the latest `request/header` (undefined until seen). */
@@ -114,6 +118,9 @@ export function initialRunState(): RunState {
     turnEndedAt: undefined,
     turnEndReason: undefined,
     rounds: 0,
+    roundStartedAt: undefined,
+    lastRoundDurationMs: undefined,
+    lastRoundText: '',
     thinkingSince: undefined,
     reasoningBuffer: '',
     currentTool: undefined,
@@ -125,7 +132,6 @@ export function initialRunState(): RunState {
     runSeqToChild: new Map(),
     retries: 0,
     maxRetries: undefined,
-    assistantTexts: [],
     lastAssistantLine: undefined,
     provider: undefined,
     model: undefined,
@@ -151,6 +157,9 @@ function beginTurn(state: RunState, time: number): void {
   state.turnEndedAt = undefined
   state.turnEndReason = undefined
   state.rounds = 0
+  state.roundStartedAt = time
+  state.lastRoundDurationMs = undefined
+  state.lastRoundText = ''
   state.thinkingSince = undefined
   state.reasoningBuffer = ''
   state.currentTool = undefined
@@ -162,7 +171,6 @@ function beginTurn(state: RunState, time: number): void {
   state.runSeqToChild.clear()
   state.retries = 0
   state.maxRetries = undefined
-  state.assistantTexts = []
   state.lastAssistantLine = undefined
   // The billed-context baseline SURVIVES turn boundaries — context only
   // grows between turns, and the backfilled baseline of a mid-run bind must
@@ -177,6 +185,22 @@ function endTurn(state: RunState, time: number, reason: string): void {
   state.turnEndReason = reason
   state.thinkingSince = undefined
   state.currentTool = undefined
+}
+
+/**
+ * Per-round reset (the bot calls it right after a round's card settled):
+ * the next round's card starts with a fresh activity story — this round's
+ * tools, reasoning tail and message line belong to the settled card only.
+ * Turn-level state (todo, subagents, cache accounting, rounds) survives.
+ */
+export function beginRound(state: RunState): void {
+  state.currentTool = undefined
+  state.thinkingSince = undefined
+  state.reasoningBuffer = ''
+  state.toolHistory = []
+  state.lastAssistantLine = undefined
+  state.lastRoundText = ''
+  state.lastRoundDurationMs = undefined
 }
 
 /** Null-safe record read: any non-object (null included) reads as empty. */
@@ -258,10 +282,14 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
     }
     case 'assistant/message': {
       const text = assistantTextOf(event.data)
-      if (text !== '') {
-        state.assistantTexts.push(text)
-        state.lastAssistantLine = lastNonBlankLine(text)
-      }
+      if (text !== '') state.lastAssistantLine = lastNonBlankLine(text)
+      // One message = one settled round: capture its duration and verbatim
+      // text for the settled card + body, then the next round starts now.
+      state.lastRoundText = text
+      state.lastRoundDurationMs = state.roundStartedAt === undefined
+        ? 0
+        : Math.max(0, event.time - state.roundStartedAt)
+      state.roundStartedAt = event.time
       state.rounds += 1
       // A landed message proves the request round-tripped — clear retry and
       // thinking markers (dsh emits no retry-cleared event).
@@ -481,11 +509,6 @@ export function subagentRows(state: RunState): SubagentRow[] {
   })
 }
 
-/** Joined assistant body of the last turn (empty string when no text). */
-export function lastTurnBody(state: RunState): string {
-  return state.assistantTexts.join('\n\n').trim()
-}
-
 /** Reasoning tail — last visible line of the capped reasoning buffer. */
 export function reasoningTail(state: RunState): string | undefined {
   return state.reasoningBuffer === '' ? undefined : lastNonBlankLine(state.reasoningBuffer)
@@ -679,49 +702,4 @@ export function subagentDisplayLabel(row: SubagentRow): string {
   // name in the event stream — fall back to the hash prefix until a naming
   // source exists.
   return row.childId.slice(0, 8)
-}
-
-// ------------------------------------------------------- progress throttle --
-
-/**
- * Cursor of the mid-turn progress-card pusher: how much of the turn body has
- * already been shipped and when the last push went out. Pure data — the bot
- * owns the side effects.
- */
-export interface ProgressCursor {
-  /** assistantTexts length already pushed to progress cards. */
-  pushedTexts: number
-  /** Epoch ms of the last progress push (0 = never this turn). */
-  lastPushAt: number
-}
-
-/** Fresh cursor for a new turn. */
-export function initialProgressCursor(): ProgressCursor {
-  return { pushedTexts: 0, lastPushAt: 0 }
-}
-
-/**
- * Unpushed body text since the cursor — the excerpt a progress card would
- * show. Empty when nothing new was produced (pure tool rounds).
- */
-export function progressBodySince(state: RunState, cursor: ProgressCursor): string {
-  return state.assistantTexts.slice(cursor.pushedTexts).join('\n\n').trim()
-}
-
-/**
- * Whether a progress card should ship NOW: the turn is running AND there is
- * substantive unpushed text AND the minimum interval since the previous push
- * has elapsed. Merging rule: within the interval output simply stays
- * unpushed — {@link progressBodySince} naturally accumulates it for the next
- * eligible push.
- */
-export function shouldPushProgress(
-  state: RunState,
-  cursor: ProgressCursor,
-  now: number,
-  minIntervalMs: number,
-): boolean {
-  if (!state.running) return false
-  if (progressBodySince(state, cursor) === '') return false
-  return now - cursor.lastPushAt >= minIntervalMs
 }

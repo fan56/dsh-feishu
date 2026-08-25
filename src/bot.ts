@@ -5,14 +5,16 @@
  * Lifecycle rules (design doc §2/§5 定稿):
  * - silent startup — the bot never sends anything unprompted;
  * - binding only through /resume; unbound input gets one hint line;
- * - prompts inject via `agent.followup` (queued when a turn is running);
- * - one status card per turn, opened on turn/start (or on a mid-turn bind),
- *   patched in place on the status beat ONLY when content changed, finalized
- *   on turn/end, followed by the assistant body as minimal body cards;
- * - mid-turn PROGRESS cards: every substantive assistant message may ship a
- *   new excerpt card, throttled to `progressIntervalMs` (default 3 min) —
- *   output inside the window merges into the next push; the status card
- *   lifecycle above is untouched;
+ * - prompts inject via `agent.steer` while a turn runs (join the CURRENT
+ *   turn's next round — the operator's mid-course corrections land
+ *   immediately) and `agent.followup` when idle (open the next turn);
+ * - one card per ROUND: opened when the round starts (turn/start, or right
+ *   after the previous round settled), patched in place on the status beat
+ *   ONLY when content changed, settled to "Round N · 💬 回复" when its
+ *   assistant/message lands — the round's text ships verbatim as a body
+ *   card right after — and the turn's last card carries the end state;
+ * - card operations serialize on a chain so settle-patch → body → next-open
+ *   never interleave with the beat or turn/end;
  * - no replay of session history on bind (live events from bind time on).
  */
 
@@ -21,7 +23,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { isOperator } from './allowlist.ts'
-import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, footerFieldsOf, type Schema2Card } from './card.ts'
+import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
@@ -32,20 +34,16 @@ import {
   applyRouteBackfill,
   backfillFromChildLog,
   backfillRouteFromLog,
+  beginRound,
   foldBoundEvent,
   foldChildEvent,
-  initialProgressCursor,
   initialRunState,
-  lastTurnBody,
-  progressBodySince,
-  shouldPushProgress,
-  type ProgressCursor,
   type RunState,
   subagentRows,
 } from './run-state.ts'
 import type { SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
-import { clipLine, segmentText, truncateBody } from './text.ts'
+import { clipLine, segmentText } from './text.ts'
 
 /** A pending /resume table awaiting its index reply (5-minute lifetime). */
 interface PendingPicker {
@@ -54,12 +52,6 @@ interface PendingPicker {
 }
 
 const PICKER_TTL_MS = 5 * 60 * 1000
-
-/**
- * Progress-card excerpt cap (~chars): long outputs are truncated for
- * phone-narrow screens with an omission notice.
- */
-const PROGRESS_EXCERPT_CHARS = 300
 
 export interface BotDeps {
   readonly ctx: Context
@@ -82,10 +74,8 @@ export class FeishuBot {
   private readonly now: () => number
 
   private readonly runState: RunState = initialRunState()
-  /** Mid-turn progress-card throttle cursor (reset per turn). */
-  private progressCursor: ProgressCursor = initialProgressCursor()
-  /** Guards against concurrent progress pushes racing on fast messages. */
-  private pushingProgress = false
+  /** Serializes card operations (open/patch/settle/finalize) in event order. */
+  private cardChain: Promise<unknown> = Promise.resolve()
   private pendingPicker: PendingPicker | undefined
   private cardMessageId: string | undefined
   private cardHash: string | undefined
@@ -175,6 +165,13 @@ export class FeishuBot {
     this.queue.push(message)
     if (this.queue.length > 50) this.queue.splice(0, this.queue.length - 50)
     void this.drain()
+  }
+
+  /** Run a card operation after every previously queued one completes. */
+  private chain<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.cardChain.then(op, op)
+    this.cardChain = run.catch(() => undefined)
+    return run
   }
 
   private async drain(): Promise<void> {
@@ -411,14 +408,19 @@ export class FeishuBot {
       await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')
       return
     }
-    agent.followup(createUserMessage({
+    const userMessage = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
-    }))
-    // Tie the done-reaction to this message only when OUR prompt opens the
-    // next turn; a prompt queued behind a running (TUI-driven) turn would
-    // otherwise react on the wrong turn's completion.
-    if (agent.status !== 'running') {
+    })
+    if (agent.status === 'running') {
+      // Default steer: mid-turn messages join the CURRENT turn's next round
+      // (dsh inbox target next-step) so course corrections land immediately,
+      // instead of waiting out the turn as a queued followup.
+      agent.steer(userMessage)
+    } else {
+      agent.followup(userMessage)
+      // Tie the done-reaction to this message only when OUR prompt opens the
+      // next turn; a steered message belongs to a turn we do not own.
       this.turnOriginMessageId = message.messageId
     }
     await this.lark.react(message.messageId, EMOJI_SEEN)
@@ -450,15 +452,11 @@ export class FeishuBot {
     if (sessionId === boundId) {
       foldBoundEvent(this.runState, event)
       if (event.type === 'turn/start') {
-        // Seed the progress cursor at turn START: the first progress push
-        // waits one full interval, so short turns never double-push before
-        // the final summary.
-        this.progressCursor = { pushedTexts: 0, lastPushAt: event.time }
-        void this.openCard()
+        void this.chain(() => this.openCard())
       } else if (event.type === 'assistant/message') {
-        void this.maybePushProgress()
+        void this.chain(() => this.settleRound())
       } else if (event.type === 'turn/end') {
-        void this.finalizeTurn()
+        void this.chain(() => this.finalizeTurn())
       }
       return
     }
@@ -560,11 +558,9 @@ export class FeishuBot {
     if (!this.runState.running) {
       this.runState.running = true
       this.runState.turnStartedAt = this.now()
-      // Mid-turn attach counts as "just pushed" so the first progress card
-      // still waits one interval before appearing.
-      this.progressCursor = { pushedTexts: 0, lastPushAt: this.now() }
+      this.runState.roundStartedAt = this.now()
     }
-    void this.openCard()
+    void this.chain(() => this.openCard())
   }
 
   /** Status beat: patch the open card only when rendered content changed. */
@@ -577,46 +573,47 @@ export class FeishuBot {
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
-    void this.lark.patchCard(this.cardMessageId, card)
+    void this.chain(() => this.lark.patchCard(this.cardMessageId!, card))
   }
 
   /**
-   * Mid-turn progress push (feature: throttled incremental progress cards).
-   * Runs on every assistant/message of the bound session; ships a NEW card
-   * when the turn produced substantive unpushed text AND the minimum interval
-   * elapsed. Output inside the window simply stays unpushed — it merges into
-   * the next eligible push. The status-card lifecycle is untouched.
+   * One assistant/message landed = one round settled (the fold already
+   * incremented rounds and captured the round's duration/text). Settle the
+   * round's card to "Round N · 💬 回复", ship the round's message verbatim,
+   * then open the next round's card. Runs serialized on the card chain.
    */
-  private async maybePushProgress(): Promise<void> {
-    if (this.pushingProgress || !this.runState.running || this.disposed) return
+  private async settleRound(): Promise<void> {
+    if (this.disposed) return
     const chatId = this.store.get().lastChatId
-    if (chatId === undefined) return
-    const now = this.now()
-    if (!shouldPushProgress(this.runState, this.progressCursor, now, this.config.progressIntervalMs)) return
-    // Snapshot the shipped boundary BEFORE computing the body: texts landing
-    // inside the send window are NOT in this card, so they must stay unpushed
-    // and merge into the next eligible push.
-    const shippedUpTo = this.runState.assistantTexts.length
-    const body = truncateBody(progressBodySince(this.runState, this.progressCursor), PROGRESS_EXCERPT_CHARS)
-    const footer = buildFooter(footerFieldsOf(this.runState, now))
-    this.pushingProgress = true
-    try {
-      const messageId = await this.lark.sendCard(chatId, buildProgressCard(body, footer))
-      // Advance only when the card actually shipped: sendCard swallows errors
-      // and resolves to undefined on failure (never rejects). On failure the
-      // cursor stays put — the next eligible excerpt still carries anything
-      // unshipped, including this window's content.
-      if (messageId === undefined) return
-      // Advance to the snapshot, never the live length — mid-send arrivals
-      // were not shown yet and must stay unpushed.
-      this.progressCursor.pushedTexts = shippedUpTo
-      this.progressCursor.lastPushAt = now
-    } finally {
-      this.pushingProgress = false
+    const roundText = this.runState.lastRoundText
+    if (chatId !== undefined) {
+      const { card } = buildStatusCard(this.runState, {
+        sessionLabel: this.sessionLabel(),
+        displayThink: this.store.get().displayThink,
+        now: this.now(),
+        settledRoundMs: this.runState.lastRoundDurationMs,
+      })
+      if (this.cardMessageId !== undefined) {
+        const ok = await this.lark.patchCard(this.cardMessageId, card)
+        if (!ok) await this.lark.sendCard(chatId, card)
+      } else {
+        await this.lark.sendCard(chatId, card)
+      }
+      // The round's own message ships verbatim (code blocks, tables) — the
+      // card's activity line is only a clipped preview of it.
+      if (roundText !== '') {
+        await this.replyLong(roundText)
+      }
+    }
+    this.cardMessageId = undefined
+    this.cardHash = undefined
+    beginRound(this.runState)
+    if (chatId !== undefined) {
+      await this.openCard()
     }
   }
 
-  /** turn/end: finalize the card, then send the assistant body. */
+  /** turn/end: finalize the current card into the turn's end state. */
   private async finalizeTurn(): Promise<void> {
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) {
@@ -638,16 +635,11 @@ export class FeishuBot {
     } else {
       // No live card (turn opened before binding, or the open send failed) —
       // the finalized summary still ships as a fresh message instead of
-      // vanishing with only the body text.
+      // vanishing entirely. Round bodies already went out per round.
       await this.lark.sendCard(chatId, card)
     }
     this.cardMessageId = undefined
     this.cardHash = undefined
-
-    const body = lastTurnBody(this.runState)
-    if (body !== '') {
-      await this.replyLong(body)
-    }
     if (this.turnOriginMessageId !== undefined) {
       const origin = this.turnOriginMessageId
       this.turnOriginMessageId = undefined
@@ -681,7 +673,6 @@ export class FeishuBot {
     this.runState.runSeqToChild = fresh.runSeqToChild
     this.cardMessageId = undefined
     this.cardHash = undefined
-    this.progressCursor = initialProgressCursor()
     this.turnOriginMessageId = undefined
     this.routeBackfilledFor = undefined
   }

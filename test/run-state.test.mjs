@@ -5,15 +5,12 @@ import {
   applyRouteBackfill,
   backfillFromChildLog,
   backfillRouteFromLog,
+  beginRound,
   contextTokensEstimate,
   foldBoundEvent,
   foldChildEvent,
-  initialProgressCursor,
   initialRunState,
-  lastTurnBody,
-  progressBodySince,
   reasoningTail,
-  shouldPushProgress,
   subagentDisplayLabel,
   subagentRows,
   toolResultFailed,
@@ -52,7 +49,11 @@ test('a full turn folds into counters, body and final reason', () => {
   assert.deepEqual(state.toolHistory[1], { name: 'read', ok: false, durationMs: 100 })
   assert.equal(state.todo.length, 2)
   assert.equal(state.lastAssistantLine, 'answer')
-  assert.equal(lastTurnBody(state), 'first answer\n\nfinal\nanswer')
+  assert.equal(state.lastRoundText, 'final\nanswer')
+  // Round boundaries: round 1 ran 1000→2500, round 2 2500→2900.
+  assert.equal(state.rounds, 2)
+  assert.equal(state.lastRoundDurationMs, 400)
+  assert.equal(state.roundStartedAt, 2900)
   assert.equal(reasoningTail(state), 'about it')
   // thinkingSince is a live-phase marker: cleared by the landed assistant
   // messages and by turn/end — not retained after the turn.
@@ -73,7 +74,8 @@ test('turn/start resets every per-turn field', () => {
   assert.equal(state.currentTool, undefined)
   assert.equal(state.todo, undefined)
   assert.equal(state.toolHistory.length, 0)
-  assert.equal(lastTurnBody(state), '')
+  assert.equal(state.lastRoundText, '')
+  assert.equal(state.lastRoundDurationMs, undefined)
 })
 
 test('llm/retry counters update and assistant/message clears them', () => {
@@ -219,42 +221,6 @@ test('agent-start with a non-string label falls back to the hash placeholder', (
   assert.equal(state.subagents.get('49a621b2abcd').label, 'subagent 49a621b2')
 })
 
-test('progress throttle: substantive text after the interval pushes', () => {
-  const state = initialRunState()
-  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  const cursor = initialProgressCursor()
-  // Pure tool round — nothing to push even past the interval.
-  foldBoundEvent(state, event('tool/call', { callId: 'c', name: 'bash', arguments: '' }, 1100, 2))
-  assert.equal(shouldPushProgress(state, cursor, 999_000, 180_000), false)
-  // Substantive text lands but the interval has not elapsed since turn start.
-  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'step one done' }] } }, 1200, 3))
-  assert.equal(shouldPushProgress(state, cursor, 2000, 180_000), false)
-  assert.equal(progressBodySince(state, cursor), 'step one done')
-  // Past the interval — push fires.
-  assert.equal(shouldPushProgress(state, cursor, 1000 + 180_000, 180_000), true)
-  // Advance the cursor like the bot would; nothing new to push now.
-  cursor.pushedTexts = state.assistantTexts.length
-  cursor.lastPushAt = 181_000
-  assert.equal(shouldPushProgress(state, cursor, 200_000, 180_000), false)
-  // New text inside the window merges (stays unpushed)…
-  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'step two done' }] } }, 210_000, 4))
-  assert.equal(shouldPushProgress(state, cursor, 300_000, 180_000), false)
-  assert.equal(progressBodySince(state, cursor), 'step two done')
-  // …and ships once the interval passes.
-  assert.equal(shouldPushProgress(state, cursor, 362_000, 180_000), true)
-})
-
-test('progress throttle never fires outside a running turn', () => {
-  const state = initialRunState()
-  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'body' }] } }, 1100, 2))
-  foldBoundEvent(state, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 500_000, 3))
-  const cursor = initialProgressCursor()
-  assert.equal(shouldPushProgress(state, cursor, 900_000, 180_000), false)
-})
-
-// ------------------------------------------------ child naming + backfill --
-
 test('agent-start label reaches a row that child events already created (race fix)', () => {
   const state = initialRunState()
   // Child events arrive first — the row is created lazily with the fallback.
@@ -387,4 +353,52 @@ test('applyRouteBackfill fills route holes and assigns the authoritative cache t
   state.model = 'live-model'
   applyRouteBackfill(state, backfillRouteFromLog([]))
   assert.equal(state.model, 'live-model')
+})
+
+
+// ------------------------------------------------ round boundaries + reset --
+
+test('round boundaries track start time, duration and verbatim text', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'first pass' }] } }, 4000, 2))
+  assert.equal(state.rounds, 1)
+  assert.equal(state.lastRoundDurationMs, 3000)
+  assert.equal(state.roundStartedAt, 4000)
+  assert.equal(state.lastRoundText, 'first pass')
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'second pass' }] } }, 9000, 3))
+  assert.equal(state.rounds, 2)
+  assert.equal(state.lastRoundDurationMs, 5000)
+  assert.equal(state.lastRoundText, 'second pass')
+})
+
+test('beginRound clears the per-round story; turn-level state survives', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', 'pondering'), 1100, 2))
+  foldBoundEvent(state, event('tool/call', { callId: 'c1', name: 'bash', arguments: '{}' }, 1200, 3))
+  foldBoundEvent(state, event('tool/result', { callId: 'c1', message: { content: [] } }, 2400, 4))
+  foldBoundEvent(state, event('todo/write', { todos: [{ content: 't', status: 'pending' }] }, 2500, 5))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'round one done' }] } }, 2600, 6))
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm' } } }, 2650, 7))
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 900, cacheWriteTokens: 0 },
+    message: { content: [{ type: 'text', text: 'x' }] },
+  }, 2700, 8))
+  const roundsBefore = state.rounds
+  const todoBefore = state.todo
+  const rateBefore = state.cacheHitRate
+  beginRound(state)
+  assert.equal(state.currentTool, undefined)
+  assert.equal(state.thinkingSince, undefined)
+  assert.equal(state.reasoningBuffer, '')
+  assert.deepEqual(state.toolHistory, [])
+  assert.equal(state.lastAssistantLine, undefined)
+  assert.equal(state.lastRoundText, '')
+  assert.equal(state.lastRoundDurationMs, undefined)
+  // Turn-level facts survive the round reset.
+  assert.equal(state.rounds, roundsBefore)
+  assert.equal(state.todo, todoBefore)
+  assert.equal(state.cacheHitRate, rateBefore)
+  assert.equal(state.model, 'm')
 })

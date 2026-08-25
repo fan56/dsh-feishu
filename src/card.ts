@@ -1,9 +1,12 @@
 /**
  * Turn-card builder: projects the pure {@link RunState} into a Feishu card
  * (JSON schema 2.0, native markdown element) plus a content hash the
- * publisher uses to skip no-op updates. One card per turn: created on
- * turn/open, patched in place on the status beat (30s, hash-gated), finalized
- * on turn/end — never one message per event.
+ * publisher uses to skip no-op updates. One card per ROUND: opened when a
+ * round starts (turn/start, or right after the previous round settled),
+ * patched in place on the status beat (30s, hash-gated), settled to
+ * "Round N · 💬 回复" when its assistant/message lands — the same message
+ * ships verbatim as a body card — and the turn's final card carries the
+ * end state (✅/❌/⛔ + total duration).
  *
  * Layout: the header carries the round number plus the live phase
  * (🤔 thinking / 🔧 tool / ⚙️ processing / ⏳ subagent / end icon); the body is
@@ -51,6 +54,12 @@ export interface CardContext {
   displayThink: boolean
   /** Rendering clock (epoch ms) — elapsed timers derive from it. */
   now: number
+  /**
+   * Present when settling a round card (its assistant/message just landed):
+   * the header renders "Round N · 💬 回复 · <duration>" instead of the live
+   * phase. The round count itself comes from the state (already incremented).
+   */
+  settledRoundMs?: number
 }
 
 /** Tail-line clip for the think tail inside the activity list. */
@@ -130,8 +139,11 @@ export function roundNumber(state: RunState): number {
  * Header title line: `Round 3 · 🔧 bash · 8s` while running,
  * `Round 3 · ✅ 完成 · 3m12s` once ended.
  */
-export function turnHeaderTitle(state: RunState, now: number): string {
+export function turnHeaderTitle(state: RunState, now: number, settledRoundMs?: number): string {
   const round = roundNumber(state)
+  if (settledRoundMs !== undefined && state.running) {
+    return `Round ${state.rounds} · 💬 回复 · ${formatDuration(settledRoundMs)}`
+  }
   const phase = turnPhase(state)
   switch (phase.kind) {
     case 'ended': {
@@ -186,7 +198,6 @@ function activityItems(state: RunState, now: number, displayThink: boolean): str
     const suffix = displayThink && tail !== undefined ? ` — _${clipLine(tail, TAIL_CLIP)}_` : ''
     items.push(`- 🤔 thinking · ${duration}${suffix}`)
   }
-  if (items.length === 0) items.push('- ⏳ 等待模型响应…')
   return items
 }
 
@@ -249,8 +260,6 @@ function todoSectionLines(state: RunState): string[] | undefined {
 export interface FooterFields {
   /** Elapsed time of the turn (ms). */
   elapsedMs?: number
-  /** Completed LLM rounds of the current turn ("Round N"). */
-  rounds?: number
   /** Model id (`deepseek-v4`, provider prefix stripped here). */
   model?: string
   /** Context occupancy in percent (needs a known window; 0–100). */
@@ -283,7 +292,8 @@ export function shortModelName(model: string): string {
 
 /**
  * Assemble the stats-footer line, e.g.
- * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Round 8`.
+ * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls`.
+ * The round lives in the card header, never here.
  * Fields with no value (or zero counters) are skipped; separators only join
  * fields that actually rendered. Returns '' when nothing is available.
  */
@@ -299,7 +309,6 @@ export function buildFooter(fields: FooterFields): string {
   }
   if (fields.cacheHitPercent !== undefined) parts.push(`⚡ CH ${fields.cacheHitPercent.toFixed(1)}%`)
   if (fields.toolCalls !== undefined && fields.toolCalls > 0) parts.push(`🔧 ${fields.toolCalls} calls`)
-  if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Round ${fields.rounds}`)
   return parts.join(' · ')
 }
 
@@ -319,7 +328,6 @@ export function footerFieldsOf(state: RunState, now: number): FooterFields {
   const toolCalls = state.toolsDone + state.toolsFailed
   return {
     elapsedMs,
-    rounds: state.rounds,
     model: state.model,
     contextPercent: tokens !== undefined && state.contextWindow !== undefined && state.contextWindow > 0
       ? (tokens / state.contextWindow) * 100
@@ -364,13 +372,21 @@ function withStatsFooter(markdown: string, footer: string): string {
  * tail growth, todo tick) triggers the 30s-beat patch.
  */
 export function buildStatusCard(state: RunState, context: CardContext): { card: Schema2Card; hash: string } {
-  const { sessionLabel, displayThink, now } = context
-  const title = turnHeaderTitle(state, now)
+  const { sessionLabel, displayThink, now, settledRoundMs } = context
+  const title = turnHeaderTitle(state, now, settledRoundMs)
   const template = turnTemplate(state)
 
-  const sections: string[] = [
-    ['##### 🧭 活动', ...activityItems(state, now, displayThink)].join('\n'),
-  ]
+  const activity = activityItems(state, now, displayThink)
+  const sections: string[] = []
+  if (state.running) {
+    // Live card: always show the section, placeholder while the round waits
+    // for its first event.
+    sections.push(['##### 🧭 活动', ...(activity.length > 0 ? activity : ['- ⏳ 等待模型响应…'])].join('\n'))
+  } else if (activity.length > 0) {
+    // End-state card: no placeholder — an empty round (settled right before
+    // turn/end) simply omits the section instead of pretending to wait.
+    sections.push(['##### 🧭 活动', ...activity].join('\n'))
+  }
   const subs = subagentItems(state)
   if (subs.length > 0) {
     const live = subagentRows(state).filter(row => row.outcome === undefined).length
@@ -380,9 +396,7 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
   if (todo !== undefined) sections.push(todo.join('\n'))
   const markdown = sections.join('\n\n')
 
-  // The turn card carries the round in its header, so the footer drops the
-  // duplicate Turn field (progress cards keep it — they have no header).
-  const footer = buildFooter({ ...footerFieldsOf(state, now), rounds: undefined })
+  const footer = buildFooter(footerFieldsOf(state, now))
 
   const card: Schema2Card = {
     schema: '2.0',
@@ -413,21 +427,6 @@ export function buildBodyCard(body: string): Schema2Card {
     body: {
       elements: [{ tag: 'markdown', content: body }],
     },
-  }
-}
-
-/**
- * Mid-turn progress card (schema 2.0): the excerpt of what the turn produced
- * since the previous push, verbatim as a native markdown element, with the
- * stats footer appended behind an `---` divider (same no-note rule as the
- * turn card). A NEW message every time — never a patch of the status card,
- * which keeps its own in-place lifecycle.
- */
-export function buildProgressCard(body: string, footer: string): Schema2Card {
-  return {
-    schema: '2.0',
-    config: { width_mode: 'fill' },
-    body: { elements: [{ tag: 'markdown', content: withStatsFooter(body, footer) }] },
   }
 }
 

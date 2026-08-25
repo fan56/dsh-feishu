@@ -3,7 +3,6 @@ import { test } from 'node:test'
 import {
   buildBodyCard,
   buildFooter,
-  buildProgressCard,
   buildSessionListAsMarkdown,
   buildSessionListCard,
   buildStatusCard,
@@ -218,6 +217,34 @@ test('buildBodyCard ships the body verbatim in a schema 2.0 markdown element', (
   assert.equal(card.body.elements[0].content, body)
 })
 
+test('a settled round card headers "Round N · 💬 回复 · duration" while the turn runs on', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('tool/call', { callId: 'c', name: 'bash', arguments: '' }, 1100, 2))
+  foldBoundEvent(state, event('tool/result', { message: { content: [] } }, 3200, 3))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'scanned' }] } }, 4000, 4))
+  const card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000 }).card
+  assert.equal(card.header.title.content, 'Round 1 · 💬 回复 · 3s')
+  assert.equal(card.header.template, 'blue') // the turn is still running
+  // The round's message is the activity's LLM line.
+  assert.match(card.body.elements[0].content, /- 💬 _scanned_/)
+})
+
+test('an ended card with no round activity omits the activity section entirely', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }, 2000, 2))
+  foldBoundEvent(state, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2100, 3))
+  const before = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2100 }).card
+  // End-state card built right after the last settlement: no half-open round
+  // story — the section disappears instead of showing a waiting placeholder.
+  // (This card shape is produced by finalizeTurn patching the provisional
+  // next-round card once beginRound already cleared the activity.)
+  const mdEnd = buildStatusCard({ ...state, toolHistory: [], lastAssistantLine: undefined }, { sessionLabel: 'x', displayThink: false, now: 2000 }).card
+  assert.ok(mdEnd.body.elements[0].content.includes('##### 🧭 活动') === false)
+  assert.ok(before.body.elements[0].content.includes('##### 🧭 活动'))
+})
+
 // ------------------------------------------------------------------ footer --
 
 test('buildFooter renders every field in order with · separators', () => {
@@ -230,14 +257,14 @@ test('buildFooter renders every field in order with · separators', () => {
     toolCalls: 23,
     thinking: 'high',
   })
-  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls · Round 8')
+  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls')
 })
 
 test('buildFooter omits missing fields without leaving separators', () => {
   assert.equal(buildFooter({}), '')
   assert.equal(buildFooter({ model: 'deepseek-v4' }), '🤖 deepseek-v4')
   // Zero counters are noise, not data — skipped like unknown fields.
-  assert.equal(buildFooter({ rounds: 0, toolCalls: 0, elapsedMs: 5000 }), '⏱ 5s')
+  assert.equal(buildFooter({ toolCalls: 0, elapsedMs: 5000 }), '⏱ 5s')
 })
 
 test('buildFooter falls back from percent to raw tokens; CH stays absent without cache data', () => {
@@ -271,7 +298,6 @@ test('footerFieldsOf derives fields from the run state and clock', () => {
   foldBoundEvent(state, event('tool/result', { message: { content: [] } }, 1500, 6))
   const fields = footerFieldsOf(state, 2000)
   assert.equal(fields.model, 'org/deepseek-v4')
-  assert.equal(fields.rounds, 1)
   assert.equal(fields.elapsedMs, 1000)
   assert.equal(fields.toolCalls, 1)
   // 500 tokens of a 1000-token window → 50%.
@@ -331,26 +357,9 @@ test('no built card ever carries a note element (schema V2 rejects it)', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   const turn = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card
-  for (const card of [turn, buildProgressCard('b', '⏱ 1s'), buildProgressCard('b', ''), buildBodyCard('b')]) {
+  for (const card of [turn, buildBodyCard('b')]) {
     assert.equal(JSON.stringify(card).includes('"tag":"note"'), false)
   }
-})
-
-// ----------------------------------------------------------- progress card --
-
-test('buildProgressCard appends the stats footer behind a divider in one markdown element', () => {
-  const card = buildProgressCard('step one done', '⏱ 30s · Round 2')
-  assert.equal(card.schema, '2.0')
-  assert.deepEqual(card.config, { width_mode: 'fill' })
-  assert.equal(card.body.elements.length, 1)
-  assert.equal(card.body.elements[0].tag, 'markdown')
-  assert.equal(card.body.elements[0].content, 'step one done\n\n---\n\n⏱ 30s · Round 2')
-})
-
-test('buildProgressCard omits the divider when the footer is empty', () => {
-  const card = buildProgressCard('body only', '')
-  assert.equal(card.body.elements.length, 1)
-  assert.equal(card.body.elements[0].content, 'body only')
 })
 
 // ------------------------------------------------------- /resume table card --

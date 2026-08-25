@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { FeishuBot } from '../lib/bot.js'
-import { initialProgressCursor } from '../lib/run-state.js'
 
 /** Minimal FeishuBot with faked deps; private internals are driven directly. */
 function makeBot(lark, clock) {
@@ -17,67 +16,112 @@ function makeBot(lark, clock) {
   })
 }
 
-test('progress push: texts landing mid-send stay unpushed and ship next time', async () => {
-  const clock = { now: 100_000 }
-  const sent = []
-  const bot = makeBot({
-    // The send is async — a new assistant message lands inside the await window.
-    async sendCard(_chatId, card) {
-      bot.runState.assistantTexts.push('late arrival')
-      sent.push(card)
-      return 'm1'
-    },
-  }, clock)
+// ------------------------------------------------ round cards + steer --
+
+function roundBot(lark, binder = { getSessionId: () => 's1' }) {
+  return new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} } },
+    config: { statusIntervalMs: 30000, bodySegmentChars: 100 },
+    lark,
+    binder,
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), update: async () => {} },
+    allowlist: new Set(),
+    now: () => 5000,
+  })
+}
+
+test('a settled round patches its card 💬, ships its body, opens the next round card', async () => {
+  const patches = []
+  const sends = []
+  let messageId = 0
+  const bot = roundBot({
+    async sendCard(_chatId, card) { messageId += 1; sends.push({ id: `m${messageId}`, card }); return `m${messageId}` },
+    async patchCard(id, card) { patches.push({ id, card }); return true },
+  })
   bot.runState.running = true
-  bot.runState.assistantTexts.push('first result')
-  bot.progressCursor = initialProgressCursor()
+  bot.runState.rounds = 1
+  bot.runState.roundStartedAt = 1000
+  bot.runState.lastRoundDurationMs = 4000
+  bot.runState.lastRoundText = 'round one answer'
+  bot.runState.lastAssistantLine = 'round one answer'
+  bot.cardMessageId = 'm0'
 
-  await bot.maybePushProgress()
+  await bot.settleRound()
 
-  // Cursor advanced to the snapshot taken BEFORE the await, not the live length.
-  assert.equal(bot.progressCursor.pushedTexts, 1)
-  assert.equal(bot.progressCursor.lastPushAt, 100_000)
-  assert.ok(JSON.stringify(sent[0]).includes('first result'))
-  assert.ok(!JSON.stringify(sent[0]).includes('late arrival'))
-
-  // Next eligible push carries the mid-send arrival.
-  clock.now += 60_000
-  await bot.maybePushProgress()
-  assert.equal(bot.progressCursor.pushedTexts, 2)
-  assert.ok(JSON.stringify(sent[1]).includes('late arrival'))
+  // 1) the round card settles in place with the 💬 header…
+  assert.equal(patches.length, 1)
+  assert.equal(patches[0].id, 'm0')
+  assert.equal(patches[0].card.header.title.content, 'Round 1 · 💬 回复 · 4s')
+  // 2) the round's message ships verbatim…
+  assert.equal(sends.length, 2)
+  assert.equal(sends[0].card.body.elements[0].content, 'round one answer')
+  // 3) …then the next round's card opens (fresh, running).
+  assert.match(sends[1].card.header.title.content, /^Round 2 · /)
+  assert.equal(bot.cardMessageId, 'm2') // second send = the next round's card
+  // The per-round story reset for the new card.
+  assert.deepEqual(bot.runState.toolHistory, [])
+  assert.equal(bot.runState.lastRoundText, '')
 })
 
-test('progress push: sendCard failure leaves cursor untouched so content retries', async () => {
-  const clock = { now: 200_000 }
-  let attempts = 0
-  const sent = []
-  const bot = makeBot({
-    async sendCard(_chatId, card) {
-      attempts += 1
-      sent.push(card)
-      // First attempt fails the way the real client does: swallow the API
-      // error and resolve undefined (never reject).
-      if (attempts === 1) return undefined
-      return `m${attempts}`
-    },
-  }, clock)
+test('a round with no text settles its card without a body send', async () => {
+  const sends = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  })
   bot.runState.running = true
-  bot.runState.assistantTexts.push('unsent excerpt')
-  bot.progressCursor = initialProgressCursor()
+  bot.runState.rounds = 2
+  bot.runState.lastRoundDurationMs = 800
+  bot.runState.lastRoundText = '' // pure tool-call round
+  bot.cardMessageId = 'm9' // the round's card is live — settle patches it
+  await bot.settleRound()
+  // Only the next round's card was sent — no body for an empty message.
+  assert.equal(sends.length, 1)
+  assert.match(sends[0].header.title.content, /^Round 3 · /)
+})
 
-  await bot.maybePushProgress()
+test('turn/end finalizes the current card and never resends round bodies', async () => {
+  const patches = []
+  const sends = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { sends.push(card); return `m${sends.length + 1}` },
+    async patchCard(id, card) { patches.push({ id, card }); return true },
+  })
+  bot.runState.running = false
+  bot.runState.turnStartedAt = 1000
+  bot.runState.turnEndedAt = 4000
+  bot.runState.turnEndReason = 'completed'
+  bot.runState.rounds = 3
+  bot.cardMessageId = 'm9'
+  await bot.finalizeTurn()
+  assert.equal(patches.length, 1)
+  assert.equal(patches[0].card.header.title.content, 'Round 3 · ✅ 完成 · 3s')
+  assert.equal(sends.length, 0) // bodies already went out per round
+  assert.equal(bot.cardMessageId, undefined)
+})
 
-  // Failed send: cursor must NOT advance — neither pushedTexts nor lastPushAt.
-  assert.equal(attempts, 1)
-  assert.equal(bot.progressCursor.pushedTexts, 0)
-  assert.equal(bot.progressCursor.lastPushAt, 0)
+test('handlePrompt steers into the running turn, follows up when idle', async () => {
+  const calls = []
+  const reactions = []
+  const agent = {
+    status: 'running',
+    followup(m) { calls.push(['followup', m]) },
+    steer(m) { calls.push(['steer', m]) },
+  }
+  const bot = roundBot({
+    async sendCard() { return 'm1' },
+    async react(id, emoji) { reactions.push([id, emoji]) },
+  }, { getSessionId: () => 's1', getAgent: () => agent })
+  await bot.handlePrompt({ messageId: 'om_1', openId: 'ou_x', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', text: 'course correct' }, 'course correct')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], 'steer') // running → join the current turn's next round
+  assert.equal(bot.turnOriginMessageId, undefined) // not our turn — no done-reaction binding
+  assert.deepEqual(reactions[0], ['om_1', 'EYES'])
 
-  // Next eligible push retries and carries the previously unshipped content.
-  clock.now += 60_000
-  await bot.maybePushProgress()
-  assert.equal(bot.progressCursor.pushedTexts, 1)
-  assert.equal(bot.progressCursor.lastPushAt, 260_000)
-  assert.ok(JSON.stringify(sent[1]).includes('unsent excerpt'))
+  agent.status = 'idle'
+  await bot.handlePrompt({ messageId: 'om_2', openId: 'ou_x', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', text: 'new task' }, 'new task')
+  assert.equal(calls[1][0], 'followup') // idle → open the next turn
+  assert.equal(bot.turnOriginMessageId, 'om_2')
 })
 
 // ------------------------------------------------- /resume list auto degrade --
