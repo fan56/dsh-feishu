@@ -283,7 +283,7 @@ test('shortModelName strips the provider path', () => {
   assert.equal(shortModelName('org/nested/deepseek-v4'), 'deepseek-v4')
 })
 
-test('the turn-card note carries model / think level / CH without a duplicate Turn count', () => {
+test('the turn card closes with a stats footer line behind a divider (no Turn repeat)', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm', reasoningEffort: 'high' } } }, 1100, 2))
@@ -293,35 +293,41 @@ test('the turn-card note carries model / think level / CH without a duplicate Tu
     message: { content: [{ type: 'text', text: 'x' }] },
   }, 1300, 4))
   const { card, hash } = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 })
-  const note = card.body.elements[1]
-  assert.equal(note.tag, 'note')
-  const stats = note.elements[0].content
-  assert.match(stats, /🤖 m/)
-  assert.match(stats, /🧠 high/)
-  assert.match(stats, /📊 CH 50%/)
+  // Schema V2 rejects `tag: note` (server 200861) — stats ride the markdown.
+  assert.equal(card.body.elements.length, 1)
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  const body = card.body.elements[0].content
+  assert.ok(body.includes('\n---\n\n⏱ 1s · 🤖 m · 🧠 high · 📊 CH 50%'))
   // The round lives in the card header — the footer must not repeat it.
-  assert.ok(!stats.includes('Turn '))
-  assert.equal(note.elements[1].content, 'dsh-feishu · /help 查看命令')
+  assert.ok(!body.includes('Turn '))
   // The hash covers the footer so beat patches follow it.
   assert.ok(hash.includes('🧠 high'))
 })
 
+test('no built card ever carries a note element (schema V2 rejects it)', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  const turn = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card
+  for (const card of [turn, buildProgressCard('b', '⏱ 1s'), buildProgressCard('b', ''), buildBodyCard('b')]) {
+    assert.equal(JSON.stringify(card).includes('"tag":"note"'), false)
+  }
+})
+
 // ----------------------------------------------------------- progress card --
 
-test('buildProgressCard ships a schema 2.0 markdown body with note footer', () => {
+test('buildProgressCard appends the stats footer behind a divider in one markdown element', () => {
   const card = buildProgressCard('step one done', '⏱ 30s · Turn 2')
   assert.equal(card.schema, '2.0')
   assert.deepEqual(card.config, { width_mode: 'fill' })
-  assert.equal(card.body.elements.length, 2)
+  assert.equal(card.body.elements.length, 1)
   assert.equal(card.body.elements[0].tag, 'markdown')
-  assert.equal(card.body.elements[0].content, 'step one done')
-  assert.equal(card.body.elements[1].tag, 'note')
-  assert.equal(card.body.elements[1].elements[0].content, '⏱ 30s · Turn 2')
+  assert.equal(card.body.elements[0].content, 'step one done\n\n---\n\n⏱ 30s · Turn 2')
 })
 
-test('buildProgressCard omits the note when the footer is empty', () => {
+test('buildProgressCard omits the divider when the footer is empty', () => {
   const card = buildProgressCard('body only', '')
   assert.equal(card.body.elements.length, 1)
+  assert.equal(card.body.elements[0].content, 'body only')
 })
 
 // ------------------------------------------------------- /resume table card --

@@ -484,6 +484,11 @@ export class FeishuBot {
     if (messageId !== undefined) {
       this.cardMessageId = messageId
       this.cardHash = hash
+    } else {
+      // sendCard swallows the API error; without this warn an open failure is
+      // invisible (no card, no beat, finalize skips) — exactly how a rejected
+      // card JSON went unnoticed in live use.
+      this.ctx.logger.warn('dsh-feishu: turn card send failed — no live card this turn')
     }
   }
 
@@ -573,6 +578,11 @@ export class FeishuBot {
         // fall back to sending the finalized card as a fresh message.
         await this.lark.sendCard(chatId, card)
       }
+    } else {
+      // No live card (turn opened before binding, or the open send failed) —
+      // the finalized summary still ships as a fresh message instead of
+      // vanishing with only the body text.
+      await this.lark.sendCard(chatId, card)
     }
     this.cardMessageId = undefined
     this.cardHash = undefined

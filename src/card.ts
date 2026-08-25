@@ -10,9 +10,11 @@
  * markdown sections — an activity list (thinking state, tool calls by name,
  * the latest LLM message), a subagent list (status + last output line), and a
  * GFM task-list todo section whose first line carries the ☑ x/z progress.
- * The note footer carries the stats line (elapsed · model · think level ·
- * CH% · tool calls). The think tail text appears only when the operator
- * turns it on (`/display think on`).
+ * The stats line (elapsed · model · think level · CH% · tool calls) closes
+ * the markdown body after an `---` divider — schema V2 cards REJECT the
+ * legacy `note` tag (server error 200861), so no note element may appear in
+ * a 2.0 body. The think tail text appears only when the operator turns it on
+ * (`/display think on`).
  */
 
 import type { RunState } from './run-state.ts'
@@ -334,6 +336,16 @@ export function footerFieldsOf(state: RunState, now: number): FooterFields {
 // --------------------------------------------------------------- turn card --
 
 /**
+ * Append the stats footer to a card's markdown body behind an `---` divider.
+ * Schema V2 has no note component (server rejects `tag: note` with 200861),
+ * so the footer rides the markdown element as its last line. An empty footer
+ * leaves the body untouched (no dangling divider).
+ */
+function withStatsFooter(markdown: string, footer: string): string {
+  return footer === '' ? markdown : `${markdown}\n\n---\n\n${footer}`
+}
+
+/**
  * Build the whole per-turn card. The returned hash covers every rendered
  * string (header title, sections, footer) so the publisher can skip a patch
  * when nothing visible changed — while any change (round advance, phase move,
@@ -359,9 +371,6 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
   // The turn card carries the round in its header, so the footer drops the
   // duplicate Turn field (progress cards keep it — they have no header).
   const footer = buildFooter({ ...footerFieldsOf(state, now), rounds: undefined })
-  const noteElements: Array<Record<string, unknown>> = []
-  if (footer !== '') noteElements.push({ tag: 'plain_text', content: footer })
-  noteElements.push({ tag: 'plain_text', content: 'dsh-feishu · /help 查看命令' })
 
   const card: Schema2Card = {
     schema: '2.0',
@@ -372,10 +381,7 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
       template,
     },
     body: {
-      elements: [
-        { tag: 'markdown', content: markdown },
-        { tag: 'note', elements: noteElements },
-      ],
+      elements: [{ tag: 'markdown', content: withStatsFooter(markdown, footer) }],
     },
   }
   return { card, hash: JSON.stringify([template, title, sessionLabel, markdown, footer]) }
@@ -400,19 +406,16 @@ export function buildBodyCard(body: string): Schema2Card {
 
 /**
  * Mid-turn progress card (schema 2.0): the excerpt of what the turn produced
- * since the previous push, verbatim as a native markdown element, plus the
- * shared note footer. A NEW message every time — never a patch of the status
- * card, which keeps its own in-place lifecycle.
+ * since the previous push, verbatim as a native markdown element, with the
+ * stats footer appended behind an `---` divider (same no-note rule as the
+ * turn card). A NEW message every time — never a patch of the status card,
+ * which keeps its own in-place lifecycle.
  */
 export function buildProgressCard(body: string, footer: string): Schema2Card {
-  const elements: Array<Record<string, unknown>> = [{ tag: 'markdown', content: body }]
-  if (footer !== '') {
-    elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: footer }] })
-  }
   return {
     schema: '2.0',
     config: { width_mode: 'fill' },
-    body: { elements },
+    body: { elements: [{ tag: 'markdown', content: withStatsFooter(body, footer) }] },
   }
 }
 
