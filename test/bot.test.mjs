@@ -20,7 +20,7 @@ function makeBot(lark, clock) {
 
 function roundBot(lark, binder = { getSessionId: () => 's1' }) {
   return new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} } },
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
     config: { statusIntervalMs: 30000, bodySegmentChars: 100 },
     lark,
     binder,
@@ -223,17 +223,20 @@ test('child discovery backfills the agent name from the child session log', asyn
   const bot = new FeishuBot({
     ctx: {
       logger: { info() {}, warn() {}, error() {} },
-      sessions: {
-        get(id) {
-          assert.equal(id, 'child-1')
-          return {
-            events: [
-              { type: 'subagent/descriptor', data: { version: 2, mode: 'one-shot', provider: 'registry', label: 'workhorse' }, time: 100, seq: 1 },
-              { type: 'tool/call', data: { callId: 'a', name: 'bash', arguments: '' }, time: 150, seq: 2 },
-              { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'round one done' }] } }, time: 200, seq: 3 },
-            ],
-          }
-        },
+      get(key) {
+        if (key !== 'sessions') return undefined
+        return {
+          get(id) {
+            assert.equal(id, 'child-1')
+            return {
+              events: [
+                { type: 'subagent/descriptor', data: { version: 2, mode: 'one-shot', provider: 'registry', label: 'workhorse' }, time: 100, seq: 1 },
+                { type: 'tool/call', data: { callId: 'a', name: 'bash', arguments: '' }, time: 150, seq: 2 },
+                { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'round one done' }] } }, time: 200, seq: 3 },
+              ],
+            }
+          },
+        }
       },
     },
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
@@ -260,7 +263,7 @@ test('child discovery backfills the agent name from the child session log', asyn
 
 test('child discovery without a sessions service keeps the fallback label', () => {
   const bot = new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} } }, // no `sessions` service
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined }, // no sessions service
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
     lark: { async sendCard() { return 'm1' } },
     binder: { getSessionId: () => 'parent-1' },
@@ -283,17 +286,20 @@ test('route backfill recovers model/think level/window/cache baseline from the b
   const bot = new FeishuBot({
     ctx: {
       logger: { info() {}, warn() {}, error() {} },
-      sessions: {
-        get(id) {
-          assert.equal(id, 's1')
-          return {
-            events: [
-              { type: 'request/header', data: { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha', reasoningEffort: 'high' } } }, time: 1, seq: 1 },
-              { type: 'request/context', data: { provider: 'openrouter', model: 'stealth/ox-alpha', contextWindow: 1_048_576 }, time: 2, seq: 2 },
-              { type: 'assistant/message', data: { usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 1500 }, message: { content: [{ type: 'text', text: 'prior turn' }] } }, time: 3, seq: 3 },
-            ],
-          }
-        },
+      get(key) {
+        if (key !== 'sessions') return undefined
+        return {
+          get(id) {
+            assert.equal(id, 's1')
+            return {
+              events: [
+                { type: 'request/header', data: { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha', reasoningEffort: 'high' } } }, time: 1, seq: 1 },
+                { type: 'request/context', data: { provider: 'openrouter', model: 'stealth/ox-alpha', contextWindow: 1_048_576 }, time: 2, seq: 2 },
+                { type: 'assistant/message', data: { usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 8000, cacheWriteTokens: 1500 }, message: { content: [{ type: 'text', text: 'prior turn' }] } }, time: 3, seq: 3 },
+              ],
+            }
+          },
+        }
       },
     },
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
@@ -316,7 +322,7 @@ test('route backfill recovers model/think level/window/cache baseline from the b
 
 test('route backfill degrades silently without a sessions service', () => {
   const bot = new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} } }, // no `sessions` service
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined }, // no sessions service
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
     lark: { async sendCard() { return 'm1' } },
     binder: { getSessionId: () => 's1' },
@@ -332,7 +338,7 @@ test('route backfill degrades silently without a sessions service', () => {
 
 function pickerBot(state, bindCalls) {
   return new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} } },
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
     config: { statusIntervalMs: 30000, bodySegmentChars: 3500 },
     lark: {
       sent: [],

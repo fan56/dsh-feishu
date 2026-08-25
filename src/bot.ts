@@ -498,9 +498,12 @@ export class FeishuBot {
   private backfillRoute(): void {
     const id = this.binder.getSessionId()
     if (id === undefined || this.routeBackfilledFor === id) return
-    const sessions = (this.ctx as Context & {
-      sessions?: { get(id: string): { events?: unknown[] } | undefined }
-    }).sessions
+    // ctx.get (NOT property access): a service not declared in `inject`
+    // throws "cannot get property ... without inject" on property access —
+    // this bug turned successful binds into failure replies in live use.
+    const sessions = this.ctx.get('sessions') as
+      | { get(id: string): { events?: unknown[] } | undefined }
+      | undefined
     if (sessions === undefined) return
     try {
       const events = sessions.get(id)?.events
@@ -521,9 +524,12 @@ export class FeishuBot {
    * service or an unreadable log just keeps the fallback label.
    */
   private backfillChild(childId: string): void {
-    const sessions = (this.ctx as Context & {
-      sessions?: { get(id: string): { events?: unknown[] } | undefined }
-    }).sessions
+    // ctx.get (NOT property access): a service not declared in `inject`
+    // throws "cannot get property ... without inject" on property access —
+    // this bug turned successful binds into failure replies in live use.
+    const sessions = this.ctx.get('sessions') as
+      | { get(id: string): { events?: unknown[] } | undefined }
+      | undefined
     if (sessions === undefined) return
     try {
       const events = sessions.get(childId)?.events
