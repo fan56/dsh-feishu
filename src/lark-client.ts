@@ -17,7 +17,7 @@
  */
 
 import * as lark from '@larksuiteoapi/node-sdk'
-import type { AnyCard, InteractiveCard } from './card.ts'
+import type { AnyCard } from './card.ts'
 
 /** Minimal outbound surface the bot depends on (mockable in tests). */
 export interface LarkGateway {
@@ -26,7 +26,7 @@ export interface LarkGateway {
   close(): void
   sendText(chatId: string, text: string): Promise<string | undefined>
   sendCard(chatId: string, card: AnyCard): Promise<string | undefined>
-  patchCard(messageId: string, card: InteractiveCard): Promise<boolean>
+  patchCard(messageId: string, card: AnyCard): Promise<boolean>
   react(messageId: string, emojiType: string): Promise<void>
 }
 
@@ -304,7 +304,7 @@ export class LarkClient implements LarkGateway {
     }
   }
 
-  async patchCard(messageId: string, card: InteractiveCard): Promise<boolean> {
+  async patchCard(messageId: string, card: AnyCard): Promise<boolean> {
     try {
       await requestFeishu(
         () => this.client.im.message.patch({

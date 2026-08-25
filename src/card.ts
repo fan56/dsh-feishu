@@ -1,14 +1,18 @@
 /**
- * Status-card builder: projects the pure {@link RunState} into a Feishu
- * interactive card (legacy JSON schema, `lark_md` text) plus a content hash
- * the publisher uses to skip no-op updates. One card per turn: created on
- * turn/open, patched in place on the status beat, finalized on turn/end —
- * never one message per event.
+ * Turn-card builder: projects the pure {@link RunState} into a Feishu card
+ * (JSON schema 2.0, native markdown element) plus a content hash the
+ * publisher uses to skip no-op updates. One card per turn: created on
+ * turn/open, patched in place on the status beat (30s, hash-gated), finalized
+ * on turn/end — never one message per event.
  *
- * Display policy (design doc §5): status info only — tool names, ✔/✘,
- * durations, rounds, todo done/total, compact subagent rows. The think tail
- * (last reasoning line) appears only when the operator turns it on
- * (`/display think on`).
+ * Layout: the header carries the round number plus the live phase
+ * (🤔 thinking / 🔧 tool / ⚙️ processing / ⏳ subagent / end icon); the body is
+ * markdown sections — an activity list (thinking state, tool calls by name,
+ * the latest LLM message), a subagent list (status + last output line), and a
+ * GFM task-list todo section whose first line carries the ☑ x/z progress.
+ * The note footer carries the stats line (elapsed · model · think level ·
+ * CH% · tool calls). The think tail text appears only when the operator
+ * turns it on (`/display think on`).
  */
 
 import type { RunState } from './run-state.ts'
@@ -17,32 +21,25 @@ import { clipLine, formatDuration, formatWhen } from './text.ts'
 import type { ResumeRow } from './resume-table.ts'
 
 /**
- * Feishu legacy interactive card (structural — sent as JSON string). Still the
- * status-card shape; assistant body cards have moved to {@link Schema2Card}.
- */
-export interface InteractiveCard {
-  config: { wide_screen_mode: boolean }
-  /** Omitted for minimal body cards (a reply should not carry a big banner). */
-  header?: {
-    title: { tag: 'plain_text'; content: string }
-    template: 'blue' | 'green' | 'red' | 'grey' | 'orange'
-  }
-  elements: Array<Record<string, unknown>>
-}
-
-/**
  * Feishu card JSON schema 2.0 (sent as JSON string, msg_type stays
- * `interactive`): markdown elements in the body render fenced code blocks
- * (with language highlighting) and GFM tables natively.
+ * `interactive`): markdown elements in the body render headings, task lists,
+ * fenced code blocks (with language highlighting) and GFM tables natively.
+ * The header is optional — body cards ship without one (a reply should not
+ * repeat the turn-card banner).
  */
 export interface Schema2Card {
   schema: '2.0'
   config: { width_mode: string }
+  header?: {
+    title: { tag: 'plain_text'; content: string }
+    subtitle?: { tag: 'plain_text'; content: string }
+    template: 'blue' | 'green' | 'red' | 'grey' | 'orange'
+  }
   body: { elements: Array<Record<string, unknown>> }
 }
 
 /** Any card shape the gateway can send. */
-export type AnyCard = InteractiveCard | Schema2Card
+export type AnyCard = Schema2Card
 
 /** Card build inputs beyond the run state. */
 export interface CardContext {
@@ -54,14 +51,18 @@ export interface CardContext {
   now: number
 }
 
-/** Tail-line clip for think/tool details. */
+/** Tail-line clip for the think tail inside the activity list. */
 const TAIL_CLIP = 200
-
-const TODO_ICON: Record<string, string> = {
-  pending: '☐',
-  in_progress: '◐',
-  completed: '☑',
-}
+/** Clip for the latest-LLM-message bullet. */
+const MSG_CLIP = 120
+/** Clip for a subagent's last output line. */
+const SUB_TAIL_CLIP = 80
+/** Clip for one todo task-list item. */
+const TODO_CLIP = 60
+/** Settled-tool rows listed in the activity section. */
+const TOOL_ITEMS = 5
+/** Subagent rows listed in the subagent section. */
+const SUBAGENT_ITEMS = 5
 
 /** Emoji for a turn-end reason kind. */
 export function turnEndIcon(reason: string | undefined): string {
@@ -87,83 +88,150 @@ function turnEndWord(reason: string | undefined): string {
   }
 }
 
-/** The phase badge line: 🤔 thinking / 🔧 tool / ⚙️ processing / done. */
-export function statusLine(state: RunState, now: number): string {
-  if (!state.running) {
-    const reason = state.turnEndReason
-    const elapsed = state.turnStartedAt !== undefined && state.turnEndedAt !== undefined
-      ? state.turnEndedAt - state.turnStartedAt
-      : 0
-    return `${turnEndIcon(reason)} **${turnEndWord(reason)}** · ${formatDuration(elapsed)}`
-  }
-  const elapsed = state.turnStartedAt === undefined ? 0 : now - state.turnStartedAt
+// ------------------------------------------------------------------- phase --
+
+/** Live phase of the turn, in header-priority order. */
+export type TurnPhase =
+  | { readonly kind: 'ended'; readonly reason: string | undefined }
+  | { readonly kind: 'tool'; readonly name: string; readonly since: number }
+  | { readonly kind: 'thinking'; readonly since: number }
+  | { readonly kind: 'subagent'; readonly live: number }
+  | { readonly kind: 'processing' }
+
+/**
+ * Classify the turn's current phase: a running tool beats thinking, thinking
+ * beats waiting on subagents, everything else running is "processing". The
+ * subagent phase means the main agent is between rounds while child sessions
+ * still work (no live tool call, no reasoning deltas).
+ */
+export function turnPhase(state: RunState): TurnPhase {
+  if (!state.running) return { kind: 'ended', reason: state.turnEndReason }
   if (state.currentTool !== undefined) {
-    return `🔧 **${state.currentTool.name}** · ${formatDuration(Math.max(0, now - state.currentTool.startedAt))}`
+    return { kind: 'tool', name: state.currentTool.name, since: state.currentTool.startedAt }
   }
-  if (state.thinkingSince !== undefined) {
-    return `🤔 **thinking** · ${formatDuration(Math.max(0, now - state.thinkingSince))}`
-  }
-  return `⚙️ **processing** · ${formatDuration(elapsed)}`
+  if (state.thinkingSince !== undefined) return { kind: 'thinking', since: state.thinkingSince }
+  const live = subagentRows(state).filter(row => row.outcome === undefined).length
+  if (live > 0) return { kind: 'subagent', live }
+  return { kind: 'processing' }
 }
 
-/** The counters line: rounds · tools ✔/✘ · retries · subagents. */
-export function countersLine(state: RunState): string {
-  const parts: string[] = [`rounds ${state.rounds}`]
-  if (state.toolsDone > 0 || state.toolsFailed > 0) {
-    parts.push(`tools ✔${state.toolsDone}${state.toolsFailed > 0 ? ` ✘${state.toolsFailed}` : ''}`)
+/**
+ * Round number for the header: the round IN FLIGHT while running (completed
+ * rounds + 1 — "Round 1 · 🤔 thinking" reads as the first round underway),
+ * the total count once the turn ended.
+ */
+export function roundNumber(state: RunState): number {
+  return state.running ? state.rounds + 1 : state.rounds
+}
+
+/**
+ * Header title line: `Round 3 · 🔧 bash · 8s` while running,
+ * `Round 3 · ✅ 完成 · 3m12s` once ended.
+ */
+export function turnHeaderTitle(state: RunState, now: number): string {
+  const round = roundNumber(state)
+  const phase = turnPhase(state)
+  switch (phase.kind) {
+    case 'ended': {
+      const elapsed = state.turnStartedAt !== undefined && state.turnEndedAt !== undefined
+        ? state.turnEndedAt - state.turnStartedAt
+        : 0
+      return `Round ${round} · ${turnEndIcon(phase.reason)} ${turnEndWord(phase.reason)} · ${formatDuration(elapsed)}`
+    }
+    case 'tool':
+      return `Round ${round} · 🔧 ${phase.name} · ${formatDuration(Math.max(0, now - phase.since))}`
+    case 'thinking':
+      return `Round ${round} · 🤔 thinking · ${formatDuration(Math.max(0, now - phase.since))}`
+    case 'subagent':
+      return `Round ${round} · ⏳ subagent ×${phase.live}`
+    case 'processing':
+      return `Round ${round} · ⚙️ processing`
+  }
+}
+
+/** Header color: blue while running, green on completion, red on failure, grey otherwise. */
+function turnTemplate(state: RunState): NonNullable<Schema2Card['header']>['template'] {
+  if (state.running) return 'blue'
+  if (state.turnEndReason === 'completed') return 'green'
+  return state.turnEndReason === undefined ? 'grey' : 'red'
+}
+
+// ---------------------------------------------------------------- sections --
+
+/**
+ * Activity list items: the recent settled tools (name + ✔/✘ + duration), a
+ * retry counter when retrying, the latest LLM message line, then the live
+ * items (running tool, thinking state — with the think tail when display is
+ * on). Reads chronologically: what it did, what it said, what it is doing.
+ */
+function activityItems(state: RunState, now: number, displayThink: boolean): string[] {
+  const items: string[] = []
+  for (const row of state.toolHistory.slice(-TOOL_ITEMS)) {
+    items.push(`- 🔧 ${row.name} · ${row.ok ? '✔' : '✘'} ${formatDuration(row.durationMs)}`)
   }
   if (state.retries > 0) {
-    parts.push(`↻${state.retries}${state.maxRetries !== undefined ? `/${state.maxRetries}` : ''}`)
+    items.push(`- ↻ retry ${state.retries}${state.maxRetries !== undefined ? `/${state.maxRetries}` : ''}`)
   }
-  const running = subagentRows(state).filter(row => row.outcome === undefined).length
-  if (running > 0) parts.push(`🧵 ×${running}`)
-  return parts.join(' · ')
+  if (state.lastAssistantLine !== undefined) {
+    items.push(`- 💬 _${clipLine(state.lastAssistantLine, MSG_CLIP)}_`)
+  }
+  if (state.currentTool !== undefined) {
+    items.push(`- 🔧 ${state.currentTool.name} · ⏳ ${formatDuration(Math.max(0, now - state.currentTool.startedAt))}`)
+  }
+  const tail = reasoningTail(state)
+  if (state.thinkingSince !== undefined) {
+    const duration = formatDuration(Math.max(0, now - state.thinkingSince))
+    const suffix = displayThink && tail !== undefined ? ` — _${clipLine(tail, TAIL_CLIP)}_` : ''
+    items.push(`- 🤔 thinking · ${duration}${suffix}`)
+  }
+  if (items.length === 0) items.push('- ⏳ 等待模型响应…')
+  return items
 }
 
-/** The last-settled-tools line (`bash ✔1.2s · read ✘0.3s`), omitted when none. */
-export function toolsLine(state: RunState): string | undefined {
-  if (state.toolHistory.length === 0) return undefined
-  const recent = state.toolHistory.slice(-4)
-  return recent
-    .map(row => `${row.name} ${row.ok ? '✔' : '✘'}${formatDuration(row.durationMs)}`)
-    .join(' · ')
+/** Outcome words for a settled subagent row. */
+const SUBAGENT_OUTCOME: Record<string, string> = {
+  completed: '✔ 完成',
+  failed: '✘ 失败',
+  cancelled: '⛔ 已取消',
 }
 
-/** The todo line (`☑ 3/7 · ◐ 当前项…`), hidden once all done (TUI semantics). */
-export function todoLine(state: RunState): string | undefined {
-  const todo = state.todo
-  if (todo === undefined || todo.length === 0) return undefined
-  const done = todo.filter(item => item.status === 'completed').length
-  if (done === todo.length) return undefined
-  // Phone-narrow single-line form: `x/z` plus at most a clipped in-progress
-  // title — never the per-item list.
-  const current = todo.find(item => item.status === 'in_progress')
-  // Skip the segment entirely when the in-progress title is empty — a bare
-  // icon with a dangling separator reads as garbage on a phone line.
-  const icon = current === undefined || current.content.trim() === ''
-    ? ''
-    : `${TODO_ICON['in_progress']} ${clipLine(current.content, 24)} · `
-  return `${icon}☑ ${done}/${todo.length}`
-}
-
-/** Compact subagent rows (`├ workhorse·49a6 ↻ · round 2 · tail…`). */
-export function subagentLines(state: RunState): string[] {
-  return subagentRows(state).slice(0, 5).map(row => {
-    const mark = row.outcome === undefined
-      ? '↻'
-      : row.outcome === 'completed' ? '✔' : row.outcome === 'failed' ? '✘' : '⛔'
-    const parts = [`├ ${subagentDisplayLabel(row)} ${mark} · round ${row.rounds}`]
-    if (row.tail !== undefined) parts.push(clipLine(row.tail, 60))
+/**
+ * Subagent list items: status info first (running marker + rounds + last
+ * tool, or the settled outcome), then the child's last output line.
+ */
+function subagentItems(state: RunState): string[] {
+  return subagentRows(state).slice(0, SUBAGENT_ITEMS).map(row => {
+    if (row.outcome !== undefined) {
+      return `- ${subagentDisplayLabel(row)} · ${SUBAGENT_OUTCOME[row.outcome] ?? row.outcome}`
+    }
+    const parts = [`- ${subagentDisplayLabel(row)} · ⏳ round ${row.rounds}`]
+    if (row.lastTool !== undefined) parts.push(`🔧 ${row.lastTool}`)
+    if (row.tail !== undefined) parts.push(`_${clipLine(row.tail, SUB_TAIL_CLIP)}_`)
     return parts.join(' · ')
   })
 }
 
-/** The think tail line (display-on only), or undefined when there is none. */
-export function thinkTailLine(state: RunState): string | undefined {
-  const tail = reasoningTail(state)
-  if (tail === undefined) return undefined
-  const icon = state.currentTool !== undefined ? `🔧 ${state.currentTool.name}` : '🤔'
-  return `${icon} _${clipLine(tail, TAIL_CLIP)}_`
+/**
+ * Todo section lines: the `☑ x/z` status on the FIRST line, then one GFM
+ * task-list item per entry — `- [x]` done, `- [ ]` pending, in-progress
+ * carries a ◐ marker (a task list has no native in-progress state). Items
+ * with an empty title are counted in the progress but not rendered. Unlike
+ * the old one-line todo, the section stays visible when everything is done —
+ * an all-checked list is the turn's closing state, not noise.
+ */
+function todoSectionLines(state: RunState): string[] | undefined {
+  const todo = state.todo
+  if (todo === undefined || todo.length === 0) return undefined
+  const done = todo.filter(item => item.status === 'completed').length
+  const header = `##### 📋 Todo · ☑ ${done}/${todo.length}${done === todo.length ? ' · 全部完成' : ''}`
+  const items = todo
+    .filter(item => item.content.trim() !== '')
+    .map(item => {
+      if (item.status === 'completed') return `- [x] ${clipLine(item.content, TODO_CLIP)}`
+      if (item.status === 'in_progress') return `- [ ] ◐ ${clipLine(item.content, TODO_CLIP)}`
+      return `- [ ] ${clipLine(item.content, TODO_CLIP)}`
+    })
+  return [header, ...items]
 }
 
 // ------------------------------------------------------------------ footer --
@@ -208,22 +276,22 @@ export function shortModelName(model: string): string {
 
 /**
  * Assemble the note-footer statistics line, e.g.
- * `⏱ 12m34s · Turn 8 · 🤖 deepseek-v4 · 📊 ctx 43% · 🔧 23 calls · 🧠 high`.
+ * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 CH 43% · 🔧 23 calls · Turn 8`.
  * Fields with no value (or zero counters) are skipped; separators only join
  * fields that actually rendered. Returns '' when nothing is available.
  */
 export function buildFooter(fields: FooterFields): string {
   const parts: string[] = []
   if (fields.elapsedMs !== undefined) parts.push(`⏱ ${formatDuration(fields.elapsedMs)}`)
-  if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Turn ${fields.rounds}`)
   if (fields.model !== undefined && fields.model !== '') parts.push(`🤖 ${shortModelName(fields.model)}`)
+  if (fields.thinking !== undefined) parts.push(`🧠 ${fields.thinking}`)
   if (fields.contextPercent !== undefined) {
-    parts.push(`📊 ctx ${Math.min(100, Math.max(0, Math.round(fields.contextPercent)))}%`)
+    parts.push(`📊 CH ${Math.min(100, Math.max(0, Math.round(fields.contextPercent)))}%`)
   } else if (fields.contextTokens !== undefined && fields.contextTokens > 0) {
-    parts.push(`📊 ctx ${fmtTokens(fields.contextTokens)}`)
+    parts.push(`📊 CH ${fmtTokens(fields.contextTokens)}`)
   }
   if (fields.toolCalls !== undefined && fields.toolCalls > 0) parts.push(`🔧 ${fields.toolCalls} calls`)
-  if (fields.thinking !== undefined) parts.push(`🧠 ${fields.thinking}`)
+  if (fields.rounds !== undefined && fields.rounds > 0) parts.push(`Turn ${fields.rounds}`)
   return parts.join(' · ')
 }
 
@@ -263,52 +331,54 @@ export function footerFieldsOf(state: RunState, now: number): FooterFields {
   }
 }
 
+// --------------------------------------------------------------- turn card --
+
 /**
- * Build the whole card. The returned hash covers every rendered line so the
- * publisher can skip a patch when nothing visible changed.
+ * Build the whole per-turn card. The returned hash covers every rendered
+ * string (header title, sections, footer) so the publisher can skip a patch
+ * when nothing visible changed — while any change (round advance, phase move,
+ * tail growth, todo tick) triggers the 30s-beat patch.
  */
-export function buildStatusCard(state: RunState, context: CardContext): { card: InteractiveCard; hash: string } {
+export function buildStatusCard(state: RunState, context: CardContext): { card: Schema2Card; hash: string } {
   const { sessionLabel, displayThink, now } = context
-  const running = state.running
-  const template: NonNullable<InteractiveCard['header']>['template'] = !running
-    ? state.turnEndReason === 'completed' ? 'green' : state.turnEndReason === undefined ? 'grey' : 'red'
-    : 'blue'
-  const headerTitle = running
-    ? `dsh · ${sessionLabel} · 运行中`
-    : `dsh · ${sessionLabel} · ${turnEndWord(state.turnEndReason)}`
+  const title = turnHeaderTitle(state, now)
+  const template = turnTemplate(state)
 
-  const mdLines: string[] = [statusLine(state, now)]
-  const counters = countersLine(state)
-  if (counters !== '') mdLines.push(counters)
-  const tools = toolsLine(state)
-  if (tools !== undefined) mdLines.push(tools)
-  const subagents = subagentLines(state)
-  for (const line of subagents) mdLines.push(line)
-  const todo = todoLine(state)
-  if (todo !== undefined) mdLines.push(`📋 ${todo}`)
-  if (displayThink) {
-    const tail = thinkTailLine(state)
-    if (tail !== undefined) mdLines.push(tail)
+  const sections: string[] = [
+    ['##### 🧭 活动', ...activityItems(state, now, displayThink)].join('\n'),
+  ]
+  const subs = subagentItems(state)
+  if (subs.length > 0) {
+    const live = subagentRows(state).filter(row => row.outcome === undefined).length
+    sections.push([`##### 🧵 子代理${live > 0 ? ` · ⏳ ×${live}` : ''}`, ...subs].join('\n'))
   }
+  const todo = todoSectionLines(state)
+  if (todo !== undefined) sections.push(todo.join('\n'))
+  const markdown = sections.join('\n\n')
 
-  const footer = buildFooter(footerFieldsOf(state, now))
-  // The note carries the shared statistics footer first, the static hint last.
+  // The turn card carries the round in its header, so the footer drops the
+  // duplicate Turn field (progress cards keep it — they have no header).
+  const footer = buildFooter({ ...footerFieldsOf(state, now), rounds: undefined })
   const noteElements: Array<Record<string, unknown>> = []
   if (footer !== '') noteElements.push({ tag: 'plain_text', content: footer })
   noteElements.push({ tag: 'plain_text', content: 'dsh-feishu · /help 查看命令' })
 
-  const card: InteractiveCard = {
-    config: { wide_screen_mode: true },
+  const card: Schema2Card = {
+    schema: '2.0',
+    config: { width_mode: 'fill' },
     header: {
-      title: { tag: 'plain_text', content: headerTitle },
+      title: { tag: 'plain_text', content: title },
+      subtitle: { tag: 'plain_text', content: `dsh · ${sessionLabel}` },
       template,
     },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: mdLines.join('\n') } },
-      { tag: 'note', elements: noteElements },
-    ],
+    body: {
+      elements: [
+        { tag: 'markdown', content: markdown },
+        { tag: 'note', elements: noteElements },
+      ],
+    },
   }
-  return { card, hash: JSON.stringify([template, headerTitle, mdLines, footer]) }
+  return { card, hash: JSON.stringify([template, title, sessionLabel, markdown, footer]) }
 }
 
 /**

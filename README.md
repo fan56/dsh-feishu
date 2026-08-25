@@ -37,10 +37,10 @@
 | --- | --- |
 | 接入已有会话 | `/resume` 以飞书原生表格列出最近更新的 10 个可恢复根会话（`#` · 会话（预览·目录）· 最后更新时间；排序口径与 TUI 一致——jsonl 日志 mtime，缺失时回退 createdAt），`/resume N` 进入；默认 `auto` 渲染——表格卡**发送失败**（服务端拒收/限流重试耗尽/传输错误）自动降级重发一次 markdown 有序列表，`table`/`list` 可强制指定。注意：老客户端「收到了但静默渲染不出表格」发生在投递之后、发送侧检测不到，那种场景请配 `resumeListStyle: "list"` |
 | 手机派活 | 直接发文本即注入会话；turn 进行中到达的消息自动排队下一轮；消息同步出现在 TUI 转录里 |
-| 运行状态卡 | 每轮一张卡原位更新（30s 节拍 + 内容变化检测）：🤔 thinking / 🔧 工具名+耗时 / rounds 计数 / todo `☑ x/z` 进度 / 子代理行；note 页脚统计 `⏱ 耗时 · Turn N · 🤖 模型 · 📊 ctx · 🔧 calls · 🧠 档位（high/medium/low/off）` |
+| 运行状态卡 | 每个 turn 推送一张卡并 30s 节拍原位更新（内容变化检测）：header 显示 `Round N` + 当前状态（🤔 thinking / 🔧 工具名 / ⚙️ processing / ⏳ subagent ×k，收尾 ✅/❌/⛔），正文为 markdown 章节——**活动**列表（thinking 状态、工具调用（名称+耗时+✔/✘）、最新 LLM 消息行）、**子代理**列表（运行/收尾状态 + 最新输出行）、**Todo** 任务列表（首行 `☑ x/z`，条目 `- [x]`/`- [ ]`，进行中带 ◐），页脚统计 `⏱ 耗时 · 🤖 模型 · 🧠 档位 · 📊 CH% · 🔧 calls` |
 | 增量进展卡 | 长任务进行中，每个有实质产出的节点推一张新卡（正文摘录 ≤300 字 + 页脚统计），最小间隔 `progressIntervalMs`（默认 3 分钟），间隔内产出合并进下一次推送 |
 | 收完整回复 | turn 结束后状态卡定稿（✅/❌/⛔ + 总耗时 + todo），assistant 正文分段发成普通消息 |
-| 子代理可见 | 主卡内紧凑行 `├ workhorse ↻ · round 2 · tail…`；`/sub N` 看单个子代理近况 |
+| 子代理可见 | 独立**子代理**章节逐个列出：`workhorse·49a6 · ⏳ round 2 · 🔧 bash · 最新输出行`（收尾显示 ✔/✘/⛔）；`/sub N` 看单个子代理近况 |
 | 远程急停 | `/stop` 中止当前 turn（排队消息保留）；`/new` 解绑当前会话 |
 
 ## 快速开始（5 步）
@@ -83,7 +83,7 @@ git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu   # private re
 cd ~/github/dsh-feishu
 npm install            # 安装唯一真实依赖 @larksuiteoapi/node-sdk
 npm run link-closure   # 把 @deepseek-ai/* 软链到全局 dsh 闭包（无全局 dsh 时跳过）
-npm test               # 可选：跑 127 个单测确认环境正常
+npm test               # 可选：跑 131 个单测确认环境正常
 ```
 
 然后接入 profile（以 `tui` 为例）。编辑 `~/.dsh/profiles/tui/package.json`：
@@ -206,7 +206,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | `/stop` | 停止当前正在运行的 turn（排队中的消息保留，下一轮继续处理） |
 | `/status` | 绑定与运行快照：绑定态 / rounds / tools ✔✘ / 子代理数 / think 显示开关 |
 | `/sub N` | 查看第 N 个子代理近况（round 数、最近工具、最新输出 tail） |
-| `/display think on\|off` | 开关状态卡上的思考/工具尾行显示（默认 off，持久化保存） |
+| `/display think on\|off` | 开关活动章节里的思考尾行显示（默认 off，持久化保存） |
 | `/help` | 命令清单（随绑定态变化提示语） |
 | `/goal` `/dcp` `/export` `/agents` `/subagents` | 透传给 dsh host 命令注册表执行 |
 | 其他任何文本 | 作为 prompt 注入当前绑定的会话 |
@@ -311,7 +311,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 | `commands.ts` | 入站文本 → 意图路由（自有 / 透传 / 拒绝 / prompt） |
 | `binder.ts` | attach/resume 绑定核心与 handle 所有权 |
 | `run-state.ts` | firehose 事件折叠：rounds/tools/todo/retry/subagent |
-| `card.ts` | RunState → 卡片 JSON + 内容 hash（变化检测）；含 /resume 原生表格卡片（`buildSessionListCard`） |
+| `card.ts` | RunState → schema 2.0 卡片 JSON（header Round/状态 + markdown 章节 + 统计页脚）+ 内容 hash（变化检测）；含 /resume 原生表格卡片（`buildSessionListCard`） |
 | `resume-table.ts` | /resume 列表的过滤、排序、并发 inspect |
 | `state-store.ts` | settings namespace 持久化 + 内存退化 |
 | `index.ts` | 插件入口：配置校验、单实例锁、凭证解析、装配 |
@@ -344,7 +344,7 @@ patch 明文 appId/appSecret  >  DSH_FEISHU_APP_ID/SECRET env  >  credentials re
 
 ```bash
 npm run check    # tsc --noEmit（precheck 自动补链 @deepseek-ai 闭包软链）
-npm test         # 构建 + node --test（127 个纯逻辑单测）
+npm test         # 构建 + node --test（131 个纯逻辑单测）
 npm run build    # 仅构建 lib/
 ```
 

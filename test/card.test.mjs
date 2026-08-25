@@ -8,10 +8,11 @@ import {
   buildSessionListCard,
   buildStatusCard,
   footerFieldsOf,
+  roundNumber,
   shortModelName,
-  statusLine,
-  todoLine,
   turnEndIcon,
+  turnHeaderTitle,
+  turnPhase,
 } from '../lib/card.js'
 import { foldBoundEvent, foldChildEvent, initialRunState } from '../lib/run-state.js'
 
@@ -19,94 +20,132 @@ function event(type, data, time, seq) {
   return { type, data, time, seq }
 }
 
-test('running turn renders a blue card with the thinking badge', () => {
+/** Markdown content of the turn card (first body element). */
+function md(card) {
+  return card.body.elements[0].content
+}
+
+test('running turn opens a schema 2.0 card: Round header, thinking phase, activity section', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'pondering' } }, 1100, 2))
   const { card, hash } = buildStatusCard(state, { sessionLabel: 'repo · ab12cd34', displayThink: false, now: 2200 })
+  assert.equal(card.schema, '2.0')
   assert.equal(card.header.template, 'blue')
-  assert.match(card.header.title.content, /运行中/)
-  const md = card.elements[0].text.content
-  assert.match(md, /🤔 \*\*thinking\*\* · 1s/)
+  assert.equal(card.header.title.content, 'Round 1 · 🤔 thinking · 1s')
+  assert.equal(card.header.subtitle.content, 'dsh · repo · ab12cd34')
+  assert.equal(card.body.elements[0].tag, 'markdown')
+  assert.match(md(card), /^##### 🧭 活动/)
+  assert.match(md(card), /- 🤔 thinking · 1s/)
   assert.ok(hash.length > 0)
 })
 
-test('tool phase shows the tool name and settled tools line up', () => {
+test('a fresh turn with no events yet shows a waiting placeholder', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  const card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1000 }).card
+  assert.equal(card.header.title.content, 'Round 1 · ⚙️ processing')
+  assert.match(md(card), /- ⏳ 等待模型响应…/)
+})
+
+test('tool phase: header carries the tool name; settled tools list below; LLM message bullet', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('tool/call', { callId: 'c1', name: 'bash', arguments: '' }, 2000, 2))
-  let md = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 3000 }).card.elements[0].text.content
-  assert.match(md, /🔧 \*\*bash\*\* · 1s/)
+  let card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 3000 }).card
+  assert.equal(card.header.title.content, 'Round 1 · 🔧 bash · 1s')
+  assert.match(md(card), /- 🔧 bash · ⏳ 1s/)
   foldBoundEvent(state, event('tool/result', { callId: 'c1', message: { content: [{ toolCallId: 'c1', isError: false, content: [] }] } }, 2600, 3))
-  md = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 3000 }).card.elements[0].text.content
-  assert.match(md, /bash ✔/)
-  assert.match(md, /rounds 0/)
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'scanned the repo\nnext: fix tests' }] } }, 2700, 4))
+  card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 3000 }).card
+  assert.match(md(card), /- 🔧 bash · ✔ 1s/)
+  // Latest LLM message renders as one clipped bullet (its last visible line).
+  assert.match(md(card), /- 💬 _next: fix tests_/)
+  // One assistant message landed → round 2 is now in flight.
+  assert.equal(card.header.title.content, 'Round 2 · ⚙️ processing')
 })
 
-test('completed turn finalizes green; error turn finalizes red', () => {
+test('subagent phase: header shows pending subagents; section lists status + last line', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'oldfox', childId: 'c2aa' }, 1100, 2))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 2, label: 'workhorse', childId: 'c1bb' }, 1200, 3))
+  foldChildEvent(state, 'c1bb', event('tool/call', { callId: 't', name: 'bash', arguments: '' }, 1250, 4))
+  foldChildEvent(state, 'c1bb', event('assistant/message', { message: { content: [{ type: 'text', text: 'digging' }] } }, 1300, 5))
+  const card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1400 }).card
+  assert.equal(card.header.title.content, 'Round 1 · ⏳ subagent ×2')
+  assert.match(md(card), /##### 🧵 子代理 · ⏳ ×2/)
+  // Running row: label, rounds, last tool, then the last output line (italic).
+  assert.match(md(card), /- workhorse·c1bb · ⏳ round 1 · 🔧 bash · _digging_/)
+  assert.match(md(card), /- oldfox·c2aa · ⏳ round 0/)
+})
+
+test('settled subagents keep their outcome row and drop the live counter', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'oldfox', childId: 'c2aa' }, 1100, 2))
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 2, label: 'workhorse', childId: 'c1bb' }, 1200, 3))
+  foldBoundEvent(state, event('tool-workflow/agent-end', { runId: 'r', seq: 1, outcome: 'completed' }, 1300, 4))
+  const card = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1400 }).card
+  assert.equal(card.header.title.content, 'Round 1 · ⏳ subagent ×1')
+  assert.match(md(card), /##### 🧵 子代理 · ⏳ ×1/)
+  assert.match(md(card), /- oldfox·c2aa · ✔ 完成/)
+})
+
+test('completed turn finalizes green with total rounds; error turn finalizes red', () => {
   const ok = initialRunState()
   foldBoundEvent(ok, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(ok, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4000, 2))
+  foldBoundEvent(ok, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }, 2000, 2))
+  foldBoundEvent(ok, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4000, 3))
   const okCard = buildStatusCard(ok, { sessionLabel: 'x', displayThink: false, now: 4000 }).card
   assert.equal(okCard.header.template, 'green')
-  assert.match(okCard.elements[0].text.content, /✅ \*\*完成\*\* · 3s/)
+  assert.equal(okCard.header.title.content, 'Round 1 · ✅ 完成 · 3s')
 
   const bad = initialRunState()
   foldBoundEvent(bad, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(bad, event('turn/end', { turn: 1, reason: { kind: 'error', error: {} } }, 4000, 2))
   const badCard = buildStatusCard(bad, { sessionLabel: 'x', displayThink: false, now: 4000 }).card
   assert.equal(badCard.header.template, 'red')
-  assert.match(badCard.elements[0].text.content, /❌ \*\*失败\*\*/)
+  assert.match(badCard.header.title.content, /❌ 失败/)
 })
 
-test('todo line hides once all items are done', () => {
+test('todo section: ☑ x/z status on the first line, GFM task list below', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('todo/write', { todos: [
     { content: 'one', status: 'completed' },
     { content: 'two', status: 'in_progress' },
+    { content: 'three', status: 'pending' },
   ] }, 1100, 2))
-  assert.match(todoLine(state), /☑ 1\/2/)
-  assert.match(todoLine(state), /◐ two/)
+  const lines = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1200 }).card).split('\n')
+  const todoStart = lines.findIndex(line => line.startsWith('##### 📋 Todo'))
+  assert.equal(lines[todoStart], '##### 📋 Todo · ☑ 1/3')
+  assert.equal(lines[todoStart + 1], '- [x] one')
+  assert.equal(lines[todoStart + 2], '- [ ] ◐ two')
+  assert.equal(lines[todoStart + 3], '- [ ] three')
+})
+
+test('todo section stays visible when everything is done', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('todo/write', { todos: [
     { content: 'one', status: 'completed' },
-    { content: 'two', status: 'completed' },
-  ] }, 1200, 3))
-  assert.equal(todoLine(state), undefined)
-})
-
-test('todo line with an empty in-progress title drops the icon segment', () => {
-  const state = initialRunState()
-  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('todo/write', { todos: [
-    { content: '', status: 'in_progress' },
-    { content: 'two', status: 'pending' },
+    { content: '', status: 'completed' },
   ] }, 1100, 2))
-  // No dangling `◐  · ` separator in front of the counter.
-  assert.equal(todoLine(state), '☑ 0/2')
+  const lines = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1200 }).card).split('\n')
+  assert.equal(lines.find(line => line.startsWith('##### 📋 Todo')), '##### 📋 Todo · ☑ 2/2 · 全部完成')
+  // The empty-title item still counts toward x/z but renders no bullet.
+  assert.ok(!lines.includes('- [x] '))
 })
 
-test('subagent rows render compactly with running-first order', () => {
-  const state = initialRunState()
-  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'oldfox', childId: 'c2aa' }, 1100, 2))
-  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 2, label: 'workhorse', childId: 'c1bb' }, 1200, 3))
-  foldChildEvent(state, 'c1bb', event('assistant/message', { message: { content: [{ type: 'text', text: 'digging' }] } }, 1300, 4))
-  const md = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1400 }).card.elements[0].text.content
-  assert.match(md, /🧵 ×2/)
-  // Display label = real name + short-hash suffix.
-  assert.match(md, /├ workhorse·c1bb ↻ · round 1 · digging/)
-  assert.match(md, /├ oldfox·c2aa ↻ · round 0/)
-})
-
-test('think tail renders only when displayThink is on', () => {
+test('think tail renders in the activity bullet only when displayThink is on', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'deep thought' } }, 1100, 2))
-  const off = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card.elements[0].text.content
+  const off = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card)
   assert.doesNotMatch(off, /deep thought/)
-  const on = buildStatusCard(state, { sessionLabel: 'x', displayThink: true, now: 2000 }).card.elements[0].text.content
-  assert.match(on, /_deep thought_/)
+  const on = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: true, now: 2000 }).card)
+  assert.match(on, /- 🤔 thinking · 1s — _deep thought_/)
 })
 
 test('hash changes with content, not with an identical rebuild', () => {
@@ -119,10 +158,42 @@ test('hash changes with content, not with an identical rebuild', () => {
   assert.notEqual(first.hash, buildStatusCard(state, context).hash)
 })
 
-test('statusLine and turnEndIcon cover the remaining reasons', () => {
+// ------------------------------------------------------------------- phase --
+
+test('turnPhase: tool beats thinking beats subagents; processing is the fallback', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  assert.equal(turnPhase(state).kind, 'processing')
+  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'hmm' } }, 1100, 2))
+  assert.equal(turnPhase(state).kind, 'thinking')
+  foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'w', childId: 'c1' }, 1200, 3))
+  assert.equal(turnPhase(state).kind, 'thinking') // thinking still wins
+  foldBoundEvent(state, event('tool/call', { callId: 'c', name: 'bash', arguments: '' }, 1300, 4))
+  assert.equal(turnPhase(state).kind, 'tool') // a live tool beats everything
+  foldBoundEvent(state, event('tool/result', { message: { content: [] } }, 1400, 5))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'x' }] } }, 1500, 6)) // clears thinking
+  assert.equal(turnPhase(state).kind, 'subagent') // children still running
+  foldBoundEvent(state, event('tool-workflow/agent-end', { runId: 'r', seq: 1, outcome: 'completed' }, 1600, 7))
+  assert.equal(turnPhase(state).kind, 'processing')
+  foldBoundEvent(state, event('turn/end', { reason: { kind: 'completed' } }, 1700, 8))
+  assert.equal(turnPhase(state).kind, 'ended')
+})
+
+test('roundNumber: in-flight round while running, total once ended', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  assert.equal(roundNumber(state), 1)
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'x' }] } }, 1100, 2))
+  assert.equal(roundNumber(state), 2)
+  foldBoundEvent(state, event('turn/end', { reason: { kind: 'completed' } }, 1200, 3))
+  assert.equal(roundNumber(state), 1)
+})
+
+test('turnHeaderTitle and turnEndIcon cover the remaining reasons', () => {
   assert.equal(turnEndIcon('aborted'), '⛔')
   assert.equal(turnEndIcon('max-tokens'), '⚠️')
-  assert.match(statusLine(initialRunState(), 0), /❕/)
+  const idle = initialRunState()
+  assert.match(turnHeaderTitle(idle, 0), /Round 0 · ❕ 已结束/)
 })
 
 test('buildBodyCard ships the body verbatim in a schema 2.0 markdown element', () => {
@@ -158,7 +229,7 @@ test('buildFooter renders every field in order with · separators', () => {
     toolCalls: 23,
     thinking: 'high',
   })
-  assert.equal(line, '⏱ 12m34s · Turn 8 · 🤖 deepseek-v4 · 📊 ctx 43% · 🔧 23 calls · 🧠 high')
+  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 CH 43% · 🔧 23 calls · Turn 8')
 })
 
 test('buildFooter omits missing fields without leaving separators', () => {
@@ -170,10 +241,10 @@ test('buildFooter omits missing fields without leaving separators', () => {
 
 test('buildFooter falls back from percent to raw tokens', () => {
   const withPercent = buildFooter({ contextPercent: -5, contextTokens: 12_300 })
-  assert.match(withPercent, /📊 ctx 0%/) // clamped, percent wins when present
+  assert.match(withPercent, /📊 CH 0%/) // clamped, percent wins when present
   const tokensOnly = buildFooter({ contextTokens: 950 })
-  assert.equal(tokensOnly, '📊 ctx 950')
-  assert.equal(buildFooter({ contextTokens: 1_234_000 }), '📊 ctx 1.2M')
+  assert.equal(tokensOnly, '📊 CH 950')
+  assert.equal(buildFooter({ contextTokens: 1_234_000 }), '📊 CH 1.2M')
 })
 
 test('buildFooter shows the thinking level only when known', () => {
@@ -212,15 +283,24 @@ test('shortModelName strips the provider path', () => {
   assert.equal(shortModelName('org/nested/deepseek-v4'), 'deepseek-v4')
 })
 
-test('the status-card note carries the footer plus the help hint', () => {
+test('the turn-card note carries model / think level / CH without a duplicate Turn count', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm', reasoningEffort: 'high' } } }, 1100, 2))
+  foldBoundEvent(state, event('request/context', { contextWindow: 1000 }, 1200, 3))
+  foldBoundEvent(state, event('assistant/message', {
+    usage: { inputTokens: 400, outputTokens: 100 },
+    message: { content: [{ type: 'text', text: 'x' }] },
+  }, 1300, 4))
   const { card, hash } = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 })
-  const note = card.elements[1]
+  const note = card.body.elements[1]
   assert.equal(note.tag, 'note')
-  assert.match(note.elements[0].content, /🤖 m/)
-  assert.match(note.elements[0].content, /🧠 high/)
+  const stats = note.elements[0].content
+  assert.match(stats, /🤖 m/)
+  assert.match(stats, /🧠 high/)
+  assert.match(stats, /📊 CH 50%/)
+  // The round lives in the card header — the footer must not repeat it.
+  assert.ok(!stats.includes('Turn '))
   assert.equal(note.elements[1].content, 'dsh-feishu · /help 查看命令')
   // The hash covers the footer so beat patches follow it.
   assert.ok(hash.includes('🧠 high'))

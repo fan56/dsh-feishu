@@ -21,7 +21,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { isOperator } from './allowlist.ts'
-import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, footerFieldsOf, type InteractiveCard } from './card.ts'
+import { buildBodyCard, buildFooter, buildProgressCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, footerFieldsOf, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
@@ -224,7 +224,7 @@ export class FeishuBot {
       case 'sub': await this.handleSub(intent.n); break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
-        await this.reply(intent.value === 'on' ? '已开启 think/tool 尾行显示。' : '已关闭 think/tool 尾行显示。')
+        await this.reply(intent.value === 'on' ? '已开启思考尾行显示（活动区）。' : '已关闭思考尾行显示。')
         break
       case 'rejected':
         await this.reply(`「/${intent.name}」属于配置类命令，请在电脑端操作。`)
@@ -594,13 +594,14 @@ export class FeishuBot {
     this.cardMessageId = undefined
     this.cardHash = undefined
     if (messageId === undefined) return
-    const card: InteractiveCard = {
-      config: { wide_screen_mode: true },
+    const card: Schema2Card = {
+      schema: '2.0',
+      config: { width_mode: 'fill' },
       header: {
         title: { tag: 'plain_text', content: `dsh · ${this.sessionLabel()} · 已解绑` },
         template: 'grey',
       },
-      elements: [{ tag: 'div', text: { tag: 'lark_md', content: '⏏️ 会话已解绑（/resume 可重新进入）' } }],
+      body: { elements: [{ tag: 'markdown', content: '⏏️ 会话已解绑（/resume 可重新进入）' }] },
     }
     await this.lark.patchCard(messageId, card)
   }
