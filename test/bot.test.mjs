@@ -449,7 +449,8 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
   assert.equal(sends[0].header.template, 'green')
   // Binding switched and persisted — with the previous session's route.
   assert.equal(state.boundSessionId, 'fresh-aaaa-bbbb')
-  assert.deepEqual(createCalls[0][1], { provider: 'zhipu', model: 'glm-4.7' })
+  // The selection carries the reasoning effort too (ox-alpha mandates it).
+  assert.deepEqual(createCalls[0][1], { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
 })
 
 test('/new creation failure leaves the bot cleanly unbound with the reason', async () => {

@@ -22,6 +22,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
@@ -424,14 +425,14 @@ export class FeishuBot {
       const headerCwd = sessions?.get(previousId)?.header?.cwd
       if (typeof headerCwd === 'string' && headerCwd !== '') cwd = headerCwd
     }
-    // Model route for the fresh agent (a bare agents.create has NO
+    // Model selection for the fresh agent (a bare agents.create has NO
     // provider/model — the first request dies with "agent has no
     // provider/model", Round 0 ❌ in live use). Resolution order:
-    // 1. the previous session's own route (continuity: same model, fresh
-    //    context) read from its log, same source as the backfill;
+    // 1. the previous session's own selection incl. reasoning effort
+    //    (continuity: same model + effort, fresh context) from its log;
     // 2. the settings' default model via ctx.agentDefaultModel — the same
     //    fallback the TUI seeds from before creating.
-    let route: { provider?: string; model?: string } | undefined
+    let selection: ModelSelection | undefined
     if (previousId !== undefined) {
       const sessions = this.ctx.get('sessions') as
         | { get(id: string): { events?: unknown[] } | undefined }
@@ -440,17 +441,21 @@ export class FeishuBot {
       if (Array.isArray(events) && events.length > 0) {
         const backfill = backfillRouteFromLog(events as SessionEvent[])
         if (backfill.provider !== undefined && backfill.model !== undefined) {
-          route = { provider: backfill.provider, model: backfill.model }
+          selection = {
+            provider: backfill.provider,
+            model: backfill.model,
+            ...(backfill.reasoningEffort === undefined ? {} : { reasoningEffort: backfill.reasoningEffort as ModelSelection['reasoningEffort'] }),
+          }
         }
       }
     }
-    if (route === undefined) {
+    if (selection === undefined) {
       const defaultModel = this.ctx.get('agentDefaultModel') as
-        | { currentSelection?: () => { provider?: string; model?: string } | undefined }
+        | { currentSelection?: () => ModelSelection | undefined }
         | undefined
-      const selection = defaultModel?.currentSelection?.()
-      if (selection?.provider !== undefined && selection?.model !== undefined) {
-        route = { provider: selection.provider, model: selection.model }
+      const fallback = defaultModel?.currentSelection?.()
+      if (fallback?.provider !== undefined && fallback?.model !== undefined) {
+        selection = fallback
       }
     }
     // Grey out the live card BEFORE resetRunView clears cardMessageId —
@@ -458,7 +463,7 @@ export class FeishuBot {
     await this.closeCardAsDetached()
     this.resetRunView()
     try {
-      const created = await this.binder.createNew(cwd, route)
+      const created = await this.binder.createNew(cwd, selection)
       await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
       const chatId = this.store.get().lastChatId
       if (chatId !== undefined) {

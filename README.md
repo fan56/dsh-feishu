@@ -202,7 +202,7 @@ dsh-feishu: armed (1 operator(s), feishu)
 | --- | --- |
 | `/resume` | 列出最近更新的 10 个可恢复根会话（按最后更新时间排序，与 TUI 一致；**自动剔除无对话内容的 scratch 会话**）。**两种进入方式**：卡片内下拉选择后点 🚪 进入（需后台订阅 card.action.trigger），或回复 `/resume N`（永远可用）；选择列表 5 分钟有效且跨 dsh 重启持久化；进入失败回复携带具体原因 |
 | `/resume N` | 进入列表第 N 个会话；live 会话直接附着，冷会话从持久化恢复 |
-| `/new` | 结束当前绑定并**创建接入一个全新会话**：旧流最后一张卡灰化定稿 + 🆕 绿色边界卡分隔（聊天历史不删除）；新会话**继承旧会话的 cwd 和模型路由**（无旧路由时回落 settings 的 default model，即 ctx.agentDefaultModel——裸建的 agent 没有路由，第一个请求会报 no provider/model）；`/resume` 可回旧会话；创建失败回复具体原因 |
+| `/new` | 结束当前绑定并**创建接入一个全新会话**：旧流最后一张卡灰化定稿 + 🆕 绿色边界卡分隔（聊天历史不删除）；新会话**继承旧会话的 cwd、模型和推理档位**（无旧路由时回落 settings 的 default model——裸建的 agent 没有路由，第一个请求会报 no provider/model；档位经 installModelSelection 注入请求瀑布，强制推理的端点缺档位会 400）；`/resume` 可回旧会话；创建失败回复具体原因 |
 | `/stop` | 停止当前正在运行的 turn（排队中的消息保留，下一轮继续处理） |
 | `/status` | 绑定与运行快照：绑定态 / rounds / tools ✔✘ / 子代理数 / think 显示开关 |
 | `/sub N` | 查看第 N 个子代理近况（round 数、最近工具、最新输出 tail） |

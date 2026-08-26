@@ -17,7 +17,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 /** How the current binding came to be. */
@@ -38,6 +38,7 @@ interface AgentsRegistry {
     sessionId: SessionId
     meta?: { cwd?: string }
     agentOptions?: { provider?: string; model?: string }
+    setup?: (agentCtx: Context) => unknown
   }): Promise<AgentHandle>
 }
 
@@ -88,9 +89,17 @@ export class SessionBinder {
    * is the operator's deliberate action, same right the TUI/web surfaces
    * have. We own the resulting handle exactly like the resume arm.
    */
-  async createNew(cwd: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
+  /**
+   * Create a fresh agent bound to the given model selection. The selection
+   * goes in twice: agentOptions covers the pre-setup surface, and a setup
+   * hook couples it into the agent's request waterfall via
+   * installModelSelection — agentOptions alone cannot carry a reasoning
+   * effort, and effort-less requests die on endpoints that mandate
+   * reasoning (400 "Reasoning is mandatory", ox-alpha in live use).
+   */
+  async createNew(cwd: string, selection?: ModelSelection): Promise<BindResult> {
     if (this.binding !== undefined) await this.binding.catch(() => undefined)
-    const task = this.createNewInner(cwd, agentOptions)
+    const task = this.createNewInner(cwd, selection)
     this.binding = task
     try {
       return await task
@@ -99,15 +108,19 @@ export class SessionBinder {
     }
   }
 
-  private async createNewInner(cwd: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
+  private async createNewInner(cwd: string, selection?: ModelSelection): Promise<BindResult> {
     await this.releaseOwned()
+    const selectionRef = { current: selection, assembled: undefined }
     const handle = await this.agents.create({
       sessionId: SessionId(crypto.randomUUID()),
       meta: { cwd },
       // A bare create has NO route — the first request dies with "agent has
       // no provider/model" (the TUI composes its default selection before
       // creating; the bot inherits the previous session's route instead).
-      ...(agentOptions !== undefined ? { agentOptions } : {}),
+      ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
+      setup: agentCtx => {
+        installModelSelection(agentCtx, selectionRef)
+      },
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)
