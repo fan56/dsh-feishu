@@ -393,9 +393,13 @@ export class FeishuBot {
       const headerCwd = sessions?.get(previousId)?.header?.cwd
       if (typeof headerCwd === 'string' && headerCwd !== '') cwd = headerCwd
     }
-    // Inherit the previous session's model route: a bare agents.create has
-    // NO provider/model and the first request fails with "agent has no
-    // provider/model" (Round 0 ❌ in live use). Same log source as backfill.
+    // Model route for the fresh agent (a bare agents.create has NO
+    // provider/model — the first request dies with "agent has no
+    // provider/model", Round 0 ❌ in live use). Resolution order:
+    // 1. the previous session's own route (continuity: same model, fresh
+    //    context) read from its log, same source as the backfill;
+    // 2. the settings' default model via ctx.agentDefaultModel — the same
+    //    fallback the TUI seeds from before creating.
     let route: { provider?: string; model?: string } | undefined
     if (previousId !== undefined) {
       const sessions = this.ctx.get('sessions') as
@@ -407,6 +411,15 @@ export class FeishuBot {
         if (backfill.provider !== undefined && backfill.model !== undefined) {
           route = { provider: backfill.provider, model: backfill.model }
         }
+      }
+    }
+    if (route === undefined) {
+      const defaultModel = this.ctx.get('agentDefaultModel') as
+        | { currentSelection?: () => { provider?: string; model?: string } | undefined }
+        | undefined
+      const selection = defaultModel?.currentSelection?.()
+      if (selection?.provider !== undefined && selection?.model !== undefined) {
+        route = { provider: selection.provider, model: selection.model }
       }
     }
     // Grey out the live card BEFORE resetRunView clears cardMessageId —

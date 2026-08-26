@@ -623,3 +623,44 @@ test('registerAskSurface: no router → direct provider; DUPLICATE yields withou
   })
   duplicate.registerAskSurface() // yields — must not throw
 })
+
+test('/new route resolution: previous log wins; settings default is the fallback', async () => {
+  const createCalls = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
+  const mkBot = getMap => new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      get: getMap,
+    },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => 'old-1',
+      getAgent: () => undefined,
+      detach: async () => {},
+      async createNew(cwd, route) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+
+  // 1) Previous session's log carries the route → inherited (default not consulted).
+  const withLog = mkBot(key => key === 'sessions'
+    ? { get: () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'zhipu', model: 'glm-4.7' } } }, time: 1, seq: 1 }] }) }
+    : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined)
+  await withLog.handleNew()
+  assert.deepEqual(createCalls[0], { provider: 'zhipu', model: 'glm-4.7' })
+
+  // 2) No previous route → the settings default (agentDefaultModel) kicks in.
+  const noLog = mkBot(key => key === 'sessions'
+    ? { get: () => ({ events: [] }) }
+    : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined)
+  await noLog.handleNew()
+  assert.deepEqual(createCalls[1], { provider: 'fallback', model: 'default-m' })
+
+  // 3) Neither source → bare create (no agentOptions).
+  const nothing = mkBot(() => undefined)
+  await nothing.handleNew()
+  assert.equal(createCalls[2], undefined)
+})
