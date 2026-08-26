@@ -7,8 +7,12 @@
  *     hands back the SAME Agent reference; followups land in that agent's
  *     inbox. The bot does NOT own this agent and never disposes it.
  *  2. RESUME: not live — `ctx.agents.resume({ resumeSessionId })` loads the
- *     persisted session; the bot OWNS that handle and disposes it on
- *     rebind/detach.
+ *     persisted session; the bot OWNS that handle.
+ *
+ * Owned handles are never DISPOSED on rebind/detach: in the multi-surface
+ * world another surface may have adopted the live agent (the TUI attaching
+ * to a bot-created session), and disposing would kill it mid-flight.
+ * Created/resumed agents stay live in the registry until the process ends.
  *
  * `agents.create` is called from exactly one place — the operator's explicit
  * /new (never implicitly mid-flow), so the bot cannot mint surprise sessions.
@@ -161,7 +165,8 @@ export class SessionBinder {
       return { sessionId: id, mode: 'resumed', agent: previous.agent }
     }
     const handle = await this.agents.resume({ resumeSessionId: SessionId(id) })
-    if (previous !== undefined) await previous.dispose().catch(() => undefined)
+    // No dispose of `previous` (same multi-surface rule as releaseOwned):
+    // the old agent stays live and adoptable by other surfaces.
     this.owned = handle
     this.sessionId = id
     return { sessionId: id, mode: 'resumed', agent: handle.agent }
@@ -174,9 +179,14 @@ export class SessionBinder {
   }
 
   private async releaseOwned(): Promise<void> {
-    const owned = this.owned
+    // Deliberately NO dispose: in the multi-surface world an owned handle
+    // may already have been ADOPTED by another surface (the TUI attaching
+    // to a bot-created session) — disposing here would kill the agent out
+    // from under it (live: the attach succeeded, then every message failed
+    // because the returned agent had just been disposed). Surfaces attach
+    // and detach freely; created/resumed agents simply stay live in the
+    // registry until the process ends.
     this.owned = undefined
-    if (owned !== undefined) await owned.dispose().catch(() => undefined)
   }
 
   /** Dispose everything we own (plugin teardown). */

@@ -83,20 +83,21 @@ test('bind resumes a persisted (not live) session once and owns the handle', asy
   assert.deepEqual(registry.calls.resume, ['sess-cold'])
 })
 
-test('rebinding disposes the previously owned handle; attach keeps foreign agents alive', async () => {
+test('rebinding keeps the previously owned handle alive (adoptable); attach keeps foreign agents alive', async () => {
   const registry = makeRegistry()
   const binder = new SessionBinder({ agents: registry.agents })
   await binder.bind('a')
   const firstHandle = registry.handles[0]
   await binder.bind('b')
-  assert.equal(firstHandle.agent.disposed, true)
+  // Never disposed: another surface may have adopted the live agent —
+  // disposing on rebind killed it out from under them (live report).
+  assert.equal(firstHandle.agent.disposed, false)
 
   // The session goes live under a foreign owner — attach to theirs; OUR
-  // stale resume handle for the same id is released, theirs is untouched.
+  // stale resume handle for the same id is dropped, theirs is untouched.
   registry.addLive('b')
   const result = await binder.bind('b')
   assert.equal(result.mode, 'attached')
-  assert.equal(registry.handles[1].agent.disposed, true)
   assert.equal(result.agent.disposed, undefined) // the foreign agent is untouched
   assert.equal(binder.getAgent(), result.agent)
 })
@@ -113,14 +114,15 @@ test('rebinding our own still-live handle keeps ownership (no self-dispose)', as
   assert.deepEqual(registry.calls.resume, ['a'])
 })
 
-test('detach drops the binding and disposes only our handle', async () => {
+test('detach drops the binding and keeps our handle alive (adoptable)', async () => {
   const registry = makeRegistry()
   const binder = new SessionBinder({ agents: registry.agents })
   await binder.bind('a')
   await binder.detach()
   assert.equal(binder.getSessionId(), undefined)
   assert.equal(binder.getAgent(), undefined)
-  assert.equal(registry.handles[0].agent.disposed, true)
+  // The agent stays live in the registry — another surface may adopt it.
+  assert.equal(registry.handles[0].agent.disposed, false)
 })
 
 test('getAgent re-probes the registry after our reference went stale', async () => {
@@ -139,11 +141,12 @@ test('concurrent binds serialize without leaking handles', async () => {
   const registry = makeRegistry()
   const binder = new SessionBinder({ agents: registry.agents })
   const [first, second] = await Promise.all([binder.bind('x'), binder.bind('y')])
-  // The second bind wins the final binding; the first's handle got disposed.
+  // The second bind wins the final binding; the first's handle stays live
+  // (never disposed — adoptable by other surfaces).
   assert.ok(['x', 'y'].includes(first.sessionId))
   assert.ok(['x', 'y'].includes(second.sessionId))
   const disposed = registry.handles.filter(h => h.agent.disposed).length
-  assert.equal(disposed >= 1, true)
+  assert.equal(disposed, 0)
   assert.equal(binder.getSessionId(), 'y')
 })
 
@@ -173,7 +176,7 @@ test('createNew forwards the inherited agent route into agents.create', async ()
   assert.equal(reg.calls.createOptions.agentOptions, undefined)
 })
 
-test('createNew inherits cwd into meta and releases the previous owned handle', async () => {
+test('createNew inherits cwd into meta and keeps the previous handle alive', async () => {
   const reg = makeRegistry()
   const binder = new SessionBinder({ agents: reg.agents })
   const first = await binder.bind('old-1')
@@ -182,6 +185,6 @@ test('createNew inherits cwd into meta and releases the previous owned handle', 
   assert.equal(created.mode, 'created')
   assert.equal(binder.getSessionId(), created.sessionId)
   assert.equal(reg.calls.createMeta.cwd, '/tmp/work')
-  // The first owned handle was released; exactly one remains live.
-  assert.equal(reg.handles.filter(h => !h.agent.disposed).length, 1)
+  // Handles stay live (adoptable) — nothing is ever disposed on rebind.
+  assert.equal(reg.handles.filter(h => h.agent.disposed).length, 0)
 })
