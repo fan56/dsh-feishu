@@ -200,6 +200,20 @@ export function buildModelPickCard(
   }
 }
 
+/** Terminal card: the provider step is done — the flow moved to model pick (grey). */
+export function buildModelProviderSettledCard(provider: string): Schema2Card {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'fill' },
+    header: {
+      title: { tag: 'plain_text', content: '🎛 Provider 已选择' },
+      subtitle: { tag: 'plain_text', content: `dsh · ${provider}` },
+      template: 'grey',
+    },
+    body: { elements: [{ tag: 'markdown', content: `**${provider}** — 请在新的模型卡片里选择模型。` }] },
+  }
+}
+
 /** Terminal card: the selection was applied (green). */
 export function buildModelSettledCard(provider: string, model: string, note?: string): Schema2Card {
   const noteLine = note === undefined ? '' : `\n${note}`

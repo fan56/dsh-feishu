@@ -797,6 +797,8 @@ test('/model step 1 lists providers; step 2 lists the chosen provider models', a
   assert.equal(sends.length, 2)
   assert.match(sends[1].header.title.content, /2\/2 Model/)
   assert.equal(bot.modelFlow.provider, 'zhipu')
+  // The provider card greyed out — a stale submit there is a visible dead end.
+  assert.equal(bot.modelFlow.providerCardMessageId, undefined)
 })
 
 test('/model submit live-switches bot-created sessions through the selection ref', async () => {

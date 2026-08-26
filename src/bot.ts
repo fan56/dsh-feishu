@@ -37,6 +37,7 @@ import {
 import {
   buildModelPickCard,
   buildModelProviderCard,
+  buildModelProviderSettledCard,
   buildModelSettledCard,
   parseModelProviderAction,
   parseModelSubmitAction,
@@ -150,7 +151,12 @@ export class FeishuBot {
   /** Bot-created sessions' model selection refs (/model live-switch). */
   private readonly selectionRefs = new Map<string, ModelSelectionRef>()
   /** The in-flight /model two-step flow. */
-  private modelFlow: { id: string; provider: string | undefined; cardMessageId: string | undefined } | undefined
+  private modelFlow: {
+    id: string
+    provider: string | undefined
+    providerCardMessageId: string | undefined
+    cardMessageId: string | undefined
+  } | undefined
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -930,12 +936,12 @@ export class FeishuBot {
       return
     }
     const flowId = randomUUID()
-    this.modelFlow = { id: flowId, provider: undefined, cardMessageId: undefined }
+    this.modelFlow = { id: flowId, provider: undefined, providerCardMessageId: undefined, cardMessageId: undefined }
     const current = this.runState.provider !== undefined && this.runState.model !== undefined
       ? { provider: this.runState.provider, model: this.runState.model }
       : undefined
     const messageId = await this.lark.sendCard(chatId, buildModelProviderCard(providers, flowId, current))
-    if (messageId !== undefined) this.modelFlow.cardMessageId = messageId
+    if (messageId !== undefined) this.modelFlow.providerCardMessageId = messageId
   }
 
   /** /model step 2: list the chosen provider's models. */
@@ -958,7 +964,15 @@ export class FeishuBot {
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
     const messageId = await this.lark.sendCard(chatId, buildModelPickCard(parsed.provider, models, parsed.flowId))
-    if (messageId !== undefined && this.modelFlow !== undefined) this.modelFlow.cardMessageId = messageId
+    if (this.modelFlow === undefined) return
+    // Grey out the provider card — the flow moved on; a stale submit there
+    // would otherwise be a silent no-op.
+    if (this.modelFlow.providerCardMessageId !== undefined) {
+      const providerCardId = this.modelFlow.providerCardMessageId
+      void this.chain(() => this.lark.patchCard(providerCardId, buildModelProviderSettledCard(parsed.provider)))
+      this.modelFlow.providerCardMessageId = undefined
+    }
+    if (messageId !== undefined) this.modelFlow.cardMessageId = messageId
   }
 
   /**
