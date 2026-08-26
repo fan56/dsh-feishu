@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { classifyInbound, helpText } from '../lib/commands.js'
+import { classifyInbound, helpText,
+  PASSTHROUGH_COMMANDS,
+} from '../lib/commands.js'
 
 test('plain text is a prompt (trimmed)', () => {
   assert.deepEqual(classifyInbound('  fix the bug  '), { kind: 'prompt', text: 'fix the bug' })
@@ -25,10 +27,11 @@ test('bot-owned commands parse', () => {
   assert.deepEqual(classifyInbound('/display think on'), { kind: 'prompt', text: '/display think on' })
 })
 
-test('passthrough table forwards the whitelisted host commands', () => {
+test('the passthrough table is deliberately empty (interactive desktop commands are not adapted)', () => {
+  assert.deepEqual(PASSTHROUGH_COMMANDS, [])
+  // The former entries now reject with the desktop pointer.
   for (const name of ['goal', 'dcp', 'export', 'agents', 'subagents']) {
-    const line = `/${name} extra args`
-    assert.deepEqual(classifyInbound(line), { kind: 'passthrough', name, line })
+    assert.deepEqual(classifyInbound(`/${name} extra args`), { kind: 'rejected', name })
   }
 })
 

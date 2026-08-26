@@ -120,7 +120,7 @@ dsh --profile <你的 profile>
 | `/status` | 绑定与运行状态 |
 | `/sub N` | 查看第 N 个子代理近况 |
 | `/feishu-plugin think on\|off` | 开关活动区的思考尾行（默认开） |
-| `/goal` `/dcp` `/export` `/agents` `/subagents` | 透传给 dsh 执行 |
+| `/goal` `/dcp` `/export` `/agents` `/subagents` | 暂未适配手机（这些命令在桌面是交互面板）——回复会引导去电脑端 |
 | 其它任何文本 | 作为 prompt 注入当前会话（运行中则 steer 进当前 turn） |
 
 典型流程：

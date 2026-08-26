@@ -119,7 +119,7 @@ text to dispatch work.
 | `/status` | Binding and run status |
 | `/sub N` | Inspect the Nth subagent |
 | `/feishu-plugin think on\|off` | Toggle the reasoning tail in the activity section (default on) |
-| `/goal` `/dcp` `/export` `/agents` `/subagents` | Passed through to dsh |
+| `/goal` `/dcp` `/export` `/agents` `/subagents` | Not adapted for the phone yet (interactive desktop panels) — replies point to the desktop |
 | Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |
 
 Typical flow:

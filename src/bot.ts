@@ -36,7 +36,7 @@ import {
 } from './ask-card.ts'
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
-import { classifyInbound, helpText } from './commands.ts'
+import { classifyInbound, helpText, refusedReply } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
@@ -288,7 +288,7 @@ export class FeishuBot {
         await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
         break
       case 'rejected':
-        await this.reply(`「/${intent.name}」属于配置类命令，请在电脑端操作。`)
+        await this.reply(refusedReply(intent.name))
         break
       case 'passthrough': await this.handlePassthrough(intent.name, intent.line); break
       case 'prompt': await this.handlePrompt(message, intent.text); break

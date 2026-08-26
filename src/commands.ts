@@ -5,8 +5,13 @@
  * - bot-owned mirrors: /resume (picker), /new (detach), /status, /help,
  *   /stop, /feishu-plugin, /sub — implemented here, no host involvement;
  * - host passthrough: a whitelist of agent-addressed dsh commands forwarded
- *   through ctx.commands.execute;
- * - rejected: config-class commands answered with "operate on the desktop".
+ *   through ctx.commands.execute — currently EMPTY: the former entries
+ *   (/goal /dcp /export /agents /subagents) are interactive on the desktop
+ *   (panels/selectors) and have no phone UI yet; they live in
+ *   UNADAPTED_COMMANDS and answer with a "use the desktop" notice.
+ *   Re-enabling one is a one-line move back into PASSTHROUGH_COMMANDS;
+ * - rejected: config-class + not-yet-adapted commands answered with
+ *   "operate on the desktop".
  *
  * Anything else — including syntactically-valid but unregistered slash names —
  * falls through as a prompt, matching dsh's own "unknown command goes to the
@@ -29,21 +34,17 @@ export type Intent =
 
 /**
  * dsh commands forwarded verbatim to the host registry (design §4 透传表).
- * The list is deliberately tiny: these all act on the agent/session and
- * return plain text, not a selector UI.
+ * Deliberately EMPTY for now: the former entries are interactive on the
+ * desktop (panels/selectors with no phone UI) — see UNADAPTED_COMMANDS.
+ * A command becomes passthrough-eligible only when it acts on the
+ * agent/session and returns plain text.
  */
-export const PASSTHROUGH_COMMANDS: readonly string[] = [
-  'goal',
-  'dcp',
-  'export',
-  'agents',
-  'subagents',
-]
+export const PASSTHROUGH_COMMANDS: readonly string[] = []
 
 /**
- * Config-class commands the bot refuses (design §4 不做表) — the reply is a
- * pointer back to the desktop surfaces. /session is NOT here: its mirror is
- * /status (see classifyInbound).
+ * Commands the bot refuses with a "use the desktop" pointer: config-class
+ * commands (design §4 不做表) plus the former passthrough entries that turn
+ * out to need a desktop UI. /session is NOT here: its mirror is /status.
  */
 export const REJECTED_COMMANDS: readonly string[] = [
   'settings',
@@ -52,6 +53,11 @@ export const REJECTED_COMMANDS: readonly string[] = [
   'reload',
   'hotkeys',
   'model-sync',
+  'goal',
+  'dcp',
+  'export',
+  'agents',
+  'subagents',
 ]
 
 /**
@@ -64,6 +70,11 @@ export const DEFERRED_COMMANDS: readonly string[] = [
   'think',
   'skills',
 ]
+
+/** The reply text for refused commands. */
+export function refusedReply(name: string): string {
+  return `「/${name}」需要在电脑端操作（手机端暂未适配）。`
+}
 
 /** dsh's command-name charset: [a-z][a-z0-9_-]*. */
 const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s
@@ -143,7 +154,7 @@ export function helpText(bound: boolean): string {
     '· /status — 绑定与运行状态',
     '· /sub N — 查看第 N 个子代理近况',
     '· /feishu-plugin think on|off — 开关思考尾行显示（默认开）',
-    '· /goal /dcp /export /agents /subagents — 透传 dsh 命令',
+    '· /goal /dcp /agents 等暂未适配手机（电脑端操作）',
     '· 其余以 / 开头的内容会作为 prompt 发给模型',
     '· /settings /preset /theme 等配置类命令请在电脑端操作',
   ]
