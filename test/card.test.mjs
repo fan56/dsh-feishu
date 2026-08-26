@@ -6,6 +6,8 @@ import {
   buildSessionListAsMarkdown,
   buildSessionListCard,
   buildStatusCard,
+  buildResumePickerCard,
+  parseResumeAction,
   footerFieldsOf,
   roundNumber,
   shortModelName,
@@ -368,15 +370,15 @@ function resumeRow(overrides = {}) {
   return { index: 1, sessionId: 'abcdefgh1234', dir: 'repo', createdAt: 1000, lastTime: undefined, preview: '', ...overrides }
 }
 
-test('session list card renders a native schema 2.0 table with three columns', () => {
+test('resume picker card renders table + text hint + interactive form', () => {
   const rows = [
     resumeRow({ index: 1, preview: 'first prompt', lastTime: 86_400_000 }),
     resumeRow({ index: 2, dir: 'tmp', createdAt: 3_600_000, preview: 'tmp · zz' }),
   ]
-  const card = buildSessionListCard(rows, 100_000_000)
+  const card = buildResumePickerCard(rows, 'picker-1', 100_000_000)
   assert.equal(card.schema, '2.0')
   assert.deepEqual(card.config, { width_mode: 'fill' })
-  assert.equal(card.body.elements.length, 2)
+  assert.equal(card.body.elements.length, 3)
   const table = card.body.elements[0]
   assert.equal(table.tag, 'table')
   // One page per delivered batch — buildResumeRows already capped the list.
@@ -396,8 +398,34 @@ test('session list card renders a native schema 2.0 table with three columns', (
   // lastTime wins over createdAt; missing lastTime degrades to createdAt.
   assert.match(table.rows[0].time, /^\d{2}-\d{2} \d{2}:\d{2}$/)
   assert.equal(typeof table.rows[1].time, 'string')
+  // Text fallback hint + interactive form (select + submit carrying the id).
   assert.equal(card.body.elements[1].tag, 'markdown')
-  assert.equal(card.body.elements[1].content, '回复 /resume N 进入对应会话')
+  assert.match(card.body.elements[1].content, /\/resume N/)
+  const form = card.body.elements[2]
+  assert.equal(form.tag, 'form')
+  const select = form.elements[0]
+  assert.equal(select.tag, 'select_static')
+  assert.deepEqual(select.options.map(o => o.value), ['1', '2'])
+  const submit = form.elements[1]
+  assert.equal(submit.form_action_type, 'submit')
+  assert.deepEqual(submit.value, { action: 'dsh_feishu_resume', picker_id: 'picker-1' })
+})
+
+test('parseResumeAction recognizes our submit via value; falls back to the name', () => {
+  const payload = value => ({
+    operator: { open_id: 'ou_x' },
+    action: { tag: 'button', name: `dsh_feishu_resume_submit_p1`, value, form_value: { session: '2' } },
+  })
+  const parsed = parseResumeAction(payload({ action: 'dsh_feishu_resume', picker_id: 'p1' }))
+  assert.deepEqual(parsed, { pickerId: 'p1', index: 2 })
+  // Name fallback (value stripped by some SDK versions).
+  const byName = parseResumeAction(payload(undefined))
+  assert.deepEqual(byName, { pickerId: 'p1', index: 2 })
+  // Foreign actions and bad indexes are ignored.
+  assert.equal(parseResumeAction(payload({ action: 'other', picker_id: 'p1' })), undefined)
+  // Missing/invalid selection index → ignored (payload builder pins form_value, so build by hand).
+  assert.equal(parseResumeAction({ action: { tag: 'button', name: 'dsh_feishu_resume_submit_p1', value: { action: 'dsh_feishu_resume', picker_id: 'p1' }, form_value: {} } }), undefined)
+  assert.equal(parseResumeAction(null), undefined)
 })
 
 test('session list cell appends the project dir unless the fallback already has it', () => {

@@ -14,6 +14,8 @@ import type { ResumeRow } from './resume-table.ts'
 
 /** A persisted /resume selection awaiting its index reply. */
 export interface StoredPicker {
+  /** Matches the interactive picker card's submit button. */
+  id: string
   rows: readonly ResumeRow[]
   expiresAt: number
 }
@@ -49,14 +51,16 @@ const DEFAULT_STATE: BotState = {
 function decodePicker(raw: unknown): StoredPicker | undefined {
   if (typeof raw !== 'string' || raw === '') return undefined
   try {
-    const parsed = JSON.parse(raw) as { rows?: unknown; expiresAt?: unknown }
-    if (!Array.isArray(parsed.rows) || typeof parsed.expiresAt !== 'number') return undefined
+    const parsed = JSON.parse(raw) as { id?: unknown; rows?: unknown; expiresAt?: unknown }
+    if (typeof parsed.id !== 'string' || parsed.id === '' || !Array.isArray(parsed.rows) || typeof parsed.expiresAt !== 'number') {
+      return undefined
+    }
     const rows = parsed.rows.filter((row): row is ResumeRow =>
       row !== null && typeof row === 'object'
       && typeof (row as ResumeRow).index === 'number'
       && typeof (row as ResumeRow).sessionId === 'string')
     if (rows.length === 0) return undefined
-    return { rows, expiresAt: parsed.expiresAt }
+    return { id: parsed.id, rows, expiresAt: parsed.expiresAt }
   } catch {
     return undefined
   }

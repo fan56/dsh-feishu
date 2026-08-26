@@ -33,6 +33,7 @@ import {
   parseAskAction,
   parseAskFormValue,
 } from './ask-card.ts'
+import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText } from './commands.ts'
 import type { ResolvedConfig } from './config.ts'
@@ -57,6 +58,8 @@ import { clipLine, segmentText } from './text.ts'
 
 /** A pending /resume table awaiting its index reply (5-minute lifetime). */
 interface PendingPicker {
+  /** Matches the interactive picker card's submit button (card callback path). */
+  id: string
   rows: readonly ResumeRow[]
   expiresAt: number
 }
@@ -131,6 +134,8 @@ export class FeishuBot {
   private readonly pendingAsks = new Map<string, PendingAsk>()
   /** ask() request object → question id (router settled() arrives per-request). */
   private readonly askRequestIds = new WeakMap<object, string>()
+  /** The interactive /resume picker card awaiting a form submit. */
+  private resumeCardMessageId: string | undefined
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -308,7 +313,8 @@ export class FeishuBot {
       await this.reply('读取会话列表失败，请稍后再试。')
       return
     }
-    this.pendingPicker = { rows, expiresAt: this.now() + PICKER_TTL_MS }
+    const pickerId = randomUUID()
+    this.pendingPicker = { id: pickerId, rows, expiresAt: this.now() + PICKER_TTL_MS }
     await this.store.update({ picker: this.pendingPicker })
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
@@ -325,11 +331,13 @@ export class FeishuBot {
     // force the markdown list outright. In `auto` mode degrade exactly once on
     // a send-time failure; a second failure falls through to the existing
     // onError sink.
-    const messageId = await this.lark.sendCard(chatId, buildSessionListCard(rows, this.now()))
+    const messageId = await this.lark.sendCard(chatId, buildResumePickerCard(rows, pickerId, this.now()))
     if (messageId === undefined && style === 'auto') {
-      this.ctx.logger.warn('dsh-feishu: /resume table card failed to send — falling back to markdown list')
+      this.ctx.logger.warn('dsh-feishu: /resume picker card failed to send — falling back to markdown list')
       await this.lark.sendCard(chatId, buildSessionListAsMarkdown(rows, this.now()))
+      return
     }
+    this.resumeCardMessageId = messageId
   }
 
   /**
@@ -342,10 +350,27 @@ export class FeishuBot {
   }
 
   private async handleResumePick(n: number): Promise<void> {
+    await this.resumePickCore(n)
+  }
+
+  /** Interactive picker submit (card.action.trigger) → same core as /resume N. */
+  private async handleResumeAction(parsed: ParsedResumeAction): Promise<void> {
+    const picker = this.currentPicker()
+    if (picker === undefined || picker.id !== parsed.pickerId) {
+      // A stale card from an earlier list — its picker id no longer matches.
+      this.reply('选择已过期（旧列表的卡片）。先发 /resume 刷新。').catch(() => undefined)
+      return
+    }
+    await this.resumePickCore(parsed.index)
+  }
+
+  /** Shared bind flow for the text path (/resume N) and the card submit. */
+  private async resumePickCore(n: number): Promise<void> {
     const picker = this.currentPicker()
     if (picker === undefined || picker.expiresAt < this.now()) {
       this.pendingPicker = undefined
       await this.store.update({ picker: undefined })
+      this.resumeCardMessageId = undefined
       await this.reply('选择已过期。先发 /resume 查看会话列表。')
       return
     }
@@ -365,6 +390,12 @@ export class FeishuBot {
         + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
         + '直接发消息即可派活；/help 查看全部命令。',
       )
+      // Settle the interactive picker card (best-effort; absent after restart).
+      if (this.resumeCardMessageId !== undefined) {
+        const cardId = this.resumeCardMessageId
+        this.resumeCardMessageId = undefined
+        void this.chain(() => this.lark.patchCard(cardId, buildResumePickedCard(row)))
+      }
       this.maybeOpenCardForRunningAgent()
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
@@ -815,6 +846,7 @@ export class FeishuBot {
     this.runState.runSeqToChild = fresh.runSeqToChild
     this.cardMessageId = undefined
     this.cardHash = undefined
+    this.resumeCardMessageId = undefined
     this.turnOriginMessageId = undefined
     this.routeBackfilledFor = undefined
   }
@@ -924,6 +956,11 @@ export class FeishuBot {
    * foreign cards are ignored; only allowlisted operators may answer.
    */
   onCardAction(data: unknown): void {
+    const resume = parseResumeAction(data)
+    if (resume !== undefined) {
+      void this.chain(() => this.handleResumeAction(resume))
+      return
+    }
     const parsed = parseAskAction(data)
     if (parsed === undefined) return
     const entry = this.pendingAsks.get(parsed.questionId)

@@ -55,6 +55,9 @@ export function parseAskAction(data: unknown): ParsedAskAction | undefined {
     if (marker === ASK_SUBMIT_ACTION && typeof questionId === 'string' && questionId !== '') {
       return { questionId, formValue: value }
     }
+    // A value carrying a DIFFERENT action means this is not our button —
+    // the name fallback below must not fire on foreign submits.
+    if (typeof marker === 'string') return undefined
   }
   // Fallback: the button name (SDK versions may strip value on form submits).
   const name = (action as { name?: unknown }).name

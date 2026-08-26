@@ -492,6 +492,54 @@ function sessionCell(row: ResumeRow): string {
   return row.preview.startsWith(`${row.dir} ·`) ? row.preview : `${row.preview} · ${row.dir}`
 }
 
+/** Marker written into the resume picker submit button's `value.action`. */
+export const RESUME_SUBMIT_ACTION = 'dsh_feishu_resume'
+
+/** Submit button name prefix; the picker id rides after it. */
+const RESUME_SUBMIT_NAME_PREFIX = 'dsh_feishu_resume_submit_'
+
+/** One recognized card.action.trigger payload for our resume picker. */
+export interface ParsedResumeAction {
+  readonly pickerId: string
+  readonly index: number
+}
+
+/**
+ * Recognize OUR resume submit in a `card.action.trigger` payload; undefined
+ * for anything else. Same fallback ladder as the ask card: button `value`
+ * first, button `name` when an SDK strips values from form submits.
+ */
+export function parseResumeAction(data: unknown): ParsedResumeAction | undefined {
+  if (data === null || typeof data !== 'object') return undefined
+  const action = (data as { action?: unknown }).action
+  if (action === null || typeof action !== 'object') return undefined
+  const formValue = (action as { form_value?: unknown }).form_value
+  const value = formValue !== null && typeof formValue === 'object' && !Array.isArray(formValue)
+    ? (formValue ?? {}) as Record<string, unknown>
+    : {}
+  const rawIndex = (value as { session?: unknown }).session
+  const index = typeof rawIndex === 'number'
+    ? rawIndex
+    : typeof rawIndex === 'string' && /^\d+$/.test(rawIndex) ? Number.parseInt(rawIndex, 10) : Number.NaN
+  const buttonValue = (action as { value?: unknown }).value
+  if (buttonValue !== null && typeof buttonValue === 'object') {
+    const marker = (buttonValue as { action?: unknown }).action
+    const pickerId = (buttonValue as { picker_id?: unknown }).picker_id
+    if (marker === RESUME_SUBMIT_ACTION && typeof pickerId === 'string' && pickerId !== '' && Number.isInteger(index)) {
+      return { pickerId, index }
+    }
+    // A value carrying a DIFFERENT action means this is not our button —
+    // the name fallback below must not fire on foreign submits.
+    if (typeof marker === 'string') return undefined
+  }
+  const name = (action as { name?: unknown }).name
+  if (typeof name === 'string' && name.startsWith(RESUME_SUBMIT_NAME_PREFIX)) {
+    const pickerId = name.slice(RESUME_SUBMIT_NAME_PREFIX.length)
+    if (pickerId !== '' && Number.isInteger(index)) return { pickerId, index }
+  }
+  return undefined
+}
+
 /**
  * Build the `/resume` session-picker card (schema 2.0): a native table element
  * (`tag: 'table'`, card JSON 2.0; Feishu client ≥7.20) with three narrow columns
@@ -504,6 +552,40 @@ function sessionCell(row: ResumeRow): string {
  * instead of rendering an empty table.
  */
 export function buildSessionListCard(rowsInput: readonly ResumeRow[], now = Date.now()): Schema2Card {
+  return buildResumePickerCard(rowsInput, 'legacy', now)
+}
+
+/** Terminal card for the interactive resume picker: the chosen session (green). */
+export function buildResumePickedCard(row: ResumeRow): Schema2Card {
+  return {
+    schema: '2.0',
+    config: { width_mode: 'fill' },
+    header: {
+      title: { tag: 'plain_text', content: '🚪 已进入会话' },
+      subtitle: { tag: 'plain_text', content: `dsh · ${row.dir}` },
+      template: 'green',
+    },
+    body: {
+      elements: [{
+        tag: 'markdown',
+        content: `**#${row.index}** ${row.preview === '' ? row.sessionId.slice(0, 8) : row.preview}`,
+      }],
+    },
+  }
+}
+
+/**
+ * The `/resume` picker card (schema 2.0): the session table for browsing,
+ * then a form — select one session and 🚪 submit (interactive path, needs
+ * the console's card.action.trigger subscription), with the `/resume N`
+ * text path spelled out right above it as the always-works fallback. Both
+ * paths read the same pending picker.
+ */
+export function buildResumePickerCard(
+  rowsInput: readonly ResumeRow[],
+  pickerId: string,
+  now = Date.now(),
+): Schema2Card {
   // The rendered `#` column must agree with `pickResumeRow`'s positional
   // `/resume N` lookup (`rows[n - 1]`). Assert the 1-based contiguity contract
   // on the INPUT order (see {@link assertIndexContract}) — a violation is a
@@ -515,26 +597,57 @@ export function buildSessionListCard(rowsInput: readonly ResumeRow[], now = Date
   const elements: Array<Record<string, unknown>> = []
   if (rows.length === 0) {
     elements.push({ tag: 'markdown', content: '没有可恢复的会话。' })
-  } else {
-    // `page_size` is clamped to the official [1, 10] range; buildResumeRows
-    // already caps the list at RESUME_ROW_LIMIT (=10), so this never hides a
-    // row the operator could still pick.
-    elements.push({
-      tag: 'table',
-      page_size: Math.min(rows.length, 10),
-      row_height: 'low',
-      columns: [
-        { name: 'index', display_name: '#', data_type: 'number' },
-        { name: 'session', display_name: '会话', data_type: 'text' },
-        { name: 'time', display_name: '时间', data_type: 'text' },
-      ],
-      rows: rows.map(row => ({
-        index: row.index,
-        session: sessionCell(row),
-        time: formatWhen(row.lastTime ?? row.createdAt, now),
-      })),
-    })
-    elements.push({ tag: 'markdown', content: '回复 /resume N 进入对应会话' })
+    return { schema: '2.0', config: { width_mode: 'fill' }, body: { elements } }
   }
+  // `page_size` is clamped to the official [1, 10] range; buildResumeRows
+  // already caps the list at RESUME_ROW_LIMIT (=10), so this never hides a
+  // row the operator could still pick.
+  elements.push({
+    tag: 'table',
+    page_size: Math.min(rows.length, 10),
+    row_height: 'low',
+    columns: [
+      { name: 'index', display_name: '#', data_type: 'number' },
+      { name: 'session', display_name: '会话', data_type: 'text' },
+      { name: 'time', display_name: '时间', data_type: 'text' },
+    ],
+    rows: rows.map(row => ({
+      index: row.index,
+      session: sessionCell(row),
+      time: formatWhen(row.lastTime ?? row.createdAt, now),
+    })),
+  })
+  elements.push({
+    tag: 'markdown',
+    content: '回复 **/resume N** 进入对应会话；或在下方选择后点 **🚪 进入**。',
+  })
+  elements.push({
+    tag: 'form',
+    name: 'dsh_feishu_resume_form',
+    elements: [
+      {
+        tag: 'select_static',
+        name: 'session',
+        placeholder: { tag: 'plain_text', content: '选择要进入的会话…' },
+        options: rows.map(row => ({
+          text: {
+            tag: 'plain_text',
+            content: clipLine(`#${row.index} · ${sessionCell(row)} · ${formatWhen(row.lastTime ?? row.createdAt, now)}`, 48),
+          },
+          value: String(row.index),
+        })),
+      },
+      {
+        tag: 'button',
+        name: `${RESUME_SUBMIT_NAME_PREFIX}${pickerId}`,
+        // value MUST exist: value-less interactive components are rejected
+        // client-side with 200340 and the callback is never delivered.
+        value: { action: RESUME_SUBMIT_ACTION, picker_id: pickerId },
+        text: { tag: 'plain_text', content: '🚪 进入' },
+        type: 'primary',
+        form_action_type: 'submit',
+      },
+    ],
+  })
   return { schema: '2.0', config: { width_mode: 'fill' }, body: { elements } }
 }
