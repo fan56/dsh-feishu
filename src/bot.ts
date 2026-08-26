@@ -34,6 +34,16 @@ import {
   parseAskAction,
   parseAskFormValue,
 } from './ask-card.ts'
+import {
+  buildModelPickCard,
+  buildModelProviderCard,
+  buildModelSettledCard,
+  parseModelProviderAction,
+  parseModelSubmitAction,
+  type ModelInfo,
+  type ModelProviderInfo,
+} from './model-card.ts'
+import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
@@ -137,6 +147,10 @@ export class FeishuBot {
   private readonly askRequestIds = new WeakMap<object, string>()
   /** The interactive /resume picker card awaiting a form submit. */
   private resumeCardMessageId: string | undefined
+  /** Bot-created sessions' model selection refs (/model live-switch). */
+  private readonly selectionRefs = new Map<string, ModelSelectionRef>()
+  /** The in-flight /model two-step flow. */
+  private modelFlow: { id: string; provider: string | undefined; cardMessageId: string | undefined } | undefined
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -283,6 +297,7 @@ export class FeishuBot {
       case 'status': await this.reply(this.statusText()); break
       case 'stop': await this.handleStop(); break
       case 'sub': await this.handleSub(intent.n); break
+      case 'model': await this.handleModel(); break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
         await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
@@ -464,6 +479,9 @@ export class FeishuBot {
     this.resetRunView()
     try {
       const created = await this.binder.createNew(cwd, selection)
+      if (created.selectionRef !== undefined) {
+        this.selectionRefs.set(created.sessionId, created.selectionRef)
+      }
       await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
       const chatId = this.store.get().lastChatId
       if (chatId !== undefined) {
@@ -881,8 +899,99 @@ export class FeishuBot {
     this.cardMessageId = undefined
     this.cardHash = undefined
     this.resumeCardMessageId = undefined
+    this.modelFlow = undefined
     this.turnOriginMessageId = undefined
     this.routeBackfilledFor = undefined
+  }
+
+  // ------------------------------------------------------------- /model --
+
+  /** The llm service surface the model cards need (structural). */
+  private llm(): { listProviders(): readonly ModelProviderInfo[]; listModels(provider: string): Promise<readonly ModelInfo[]> } | undefined {
+    return this.ctx.get('llm') as
+      | { listProviders(): readonly ModelProviderInfo[]; listModels(provider: string): Promise<readonly ModelInfo[]> }
+      | undefined
+  }
+
+  /**
+   * /model step 1: list the registered providers (grouped classification —
+   * the next step lists the chosen provider's models).
+   */
+  private async handleModel(): Promise<void> {
+    const chatId = this.store.get().lastChatId
+    const llm = this.llm()
+    if (chatId === undefined || llm === undefined || typeof llm.listProviders !== 'function') {
+      await this.reply('当前 profile 没有 llm 服务，无法列出模型。')
+      return
+    }
+    const providers = [...llm.listProviders()].sort((a, b) => a.name.localeCompare(b.name))
+    if (providers.length === 0) {
+      await this.reply('没有已注册的 provider。')
+      return
+    }
+    const flowId = randomUUID()
+    this.modelFlow = { id: flowId, provider: undefined, cardMessageId: undefined }
+    const current = this.runState.provider !== undefined && this.runState.model !== undefined
+      ? { provider: this.runState.provider, model: this.runState.model }
+      : undefined
+    const messageId = await this.lark.sendCard(chatId, buildModelProviderCard(providers, flowId, current))
+    if (messageId !== undefined) this.modelFlow.cardMessageId = messageId
+  }
+
+  /** /model step 2: list the chosen provider's models. */
+  private async handleModelProviderPicked(parsed: { provider: string; flowId: string }): Promise<void> {
+    if (this.modelFlow === undefined || this.modelFlow.id !== parsed.flowId) return
+    const llm = this.llm()
+    if (llm === undefined || typeof llm.listModels !== 'function') return
+    let models: readonly ModelInfo[]
+    try {
+      models = await llm.listModels(parsed.provider)
+    } catch (error) {
+      await this.reply(`列出模型失败：${clipLine(String(error instanceof Error ? error.message : error), 200)}`)
+      return
+    }
+    if (models.length === 0) {
+      await this.reply(`provider ${parsed.provider} 没有可用模型。`)
+      return
+    }
+    this.modelFlow.provider = parsed.provider
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) return
+    const messageId = await this.lark.sendCard(chatId, buildModelPickCard(parsed.provider, models, parsed.flowId))
+    if (messageId !== undefined && this.modelFlow !== undefined) this.modelFlow.cardMessageId = messageId
+  }
+
+  /**
+   * /model submit: live-switch bot-created sessions through their selection
+   * ref; otherwise remember the pick as the phone default (used by /new)
+   * and point desktop-driven sessions at the desktop switcher.
+   */
+  private async handleModelSubmitted(parsed: { flowId: string; model: string }): Promise<void> {
+    const flow = this.modelFlow
+    if (flow === undefined || flow.id !== parsed.flowId || flow.provider === undefined) return
+    this.modelFlow = undefined
+    const selection = { provider: flow.provider, model: parsed.model }
+    const bound = this.binder.getSessionId()
+    const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)
+    if (ref !== undefined) {
+      ref.current = { ...selection }
+    } else {
+      await this.store.update({ phoneModel: selection })
+    }
+    const chatId = this.store.get().lastChatId
+    if (chatId !== undefined) {
+      const note = ref !== undefined
+        ? undefined
+        : bound === undefined
+          ? '已存为手机默认模型（/new 的新会话将使用它）。'
+          : '已存为手机默认模型；当前会话由桌面驱动，请在电脑端 /model 切换。'
+      const cardId = flow.cardMessageId
+      if (cardId !== undefined) {
+        void this.chain(() => this.lark.patchCard(cardId, buildModelSettledCard(selection.provider, selection.model, note)))
+      } else {
+        await this.reply(`✅ ${selection.provider} / ${selection.model}${note === undefined ? '' : '\n' + note}`)
+      }
+    }
   }
 
   // ---------------------------------------------------------- ask surface --
@@ -993,6 +1102,16 @@ export class FeishuBot {
     const resume = parseResumeAction(data)
     if (resume !== undefined) {
       void this.chain(() => this.handleResumeAction(resume))
+      return
+    }
+    const modelProvider = parseModelProviderAction(data)
+    if (modelProvider !== undefined) {
+      void this.chain(() => this.handleModelProviderPicked(modelProvider))
+      return
+    }
+    const modelSubmit = parseModelSubmitAction(data)
+    if (modelSubmit !== undefined) {
+      void this.chain(() => this.handleModelSubmitted(modelSubmit))
       return
     }
     const parsed = parseAskAction(data)

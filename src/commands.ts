@@ -28,6 +28,7 @@ export type Intent =
   | { kind: 'help' }
   | { kind: 'stop' }
   | { kind: 'sub'; n: number }
+  | { kind: 'model' }
   | { kind: 'display'; target: 'think'; value: 'on' | 'off' }
   | { kind: 'passthrough'; name: string; line: string }
   | { kind: 'rejected'; name: string }
@@ -66,7 +67,6 @@ export const REJECTED_COMMANDS: readonly string[] = [
  * list+index flows).
  */
 export const DEFERRED_COMMANDS: readonly string[] = [
-  'model',
   'think',
   'skills',
 ]
@@ -120,6 +120,7 @@ export function classifyInbound(text: string): Intent {
       const n = parseIntArg(rest)
       return n === undefined ? { kind: 'prompt', text: trimmed } : { kind: 'sub', n }
     }
+    case 'model': return { kind: 'model' }
     case 'feishu-plugin': {
       // Named after the plugin itself: ownership of phone-side commands
       // must be self-evident (a bare /display read as a dsh/TUI command
@@ -154,6 +155,7 @@ export function helpText(bound: boolean): string {
     '· /status — 绑定与运行状态',
     '· /sub N — 查看第 N 个子代理近况',
     '· /feishu-plugin think on|off — 开关思考尾行显示（默认开）',
+    '· /model — 选择模型（按 provider 分类）',
     '· /goal /dcp /agents 等暂未适配手机（电脑端操作）',
     '· 其余以 / 开头的内容会作为 prompt 发给模型',
     '· /settings /preset /theme 等配置类命令请在电脑端操作',

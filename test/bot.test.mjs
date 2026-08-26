@@ -741,3 +741,102 @@ test('interactive /resume submit inherits the picked session log route too', asy
   await bot.resumePickCore(1)
   assert.deepEqual(bindCalls[0], ['routeless-2', { provider: 'zhipu', model: 'glm-4.7' }])
 })
+
+// ------------------------------------------------------------- /model --
+
+function modelBot(llm, selectionRef, bound = 'fresh-1') {
+  const patches = []
+  const sends = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: bound, picker: undefined, phoneModel: undefined }
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: key => key === 'llm' ? llm : undefined },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: {
+      async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+      async patchCard(id, card) { patches.push({ id, card }); return true },
+    },
+    binder: {
+      getSessionId: () => bound,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async bind(id, options) { return { sessionId: id, mode: 'resumed', agent: { status: 'idle' }, ...(options ? { options } : {}) } },
+      async createNew() { throw new Error('not used') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.selectionRefs.set(bound, selectionRef)
+  return { bot, sends, patches, state }
+}
+
+const modelProviders = [
+  { id: 'zhipu', name: '智谱' },
+  { id: 'openrouter', name: 'OpenRouter' },
+]
+
+test('/model step 1 lists providers; step 2 lists the chosen provider models', async () => {
+  const listModels = []
+  const llm = {
+    listProviders: () => modelProviders,
+    async listModels(provider) {
+      listModels.push(provider)
+      return [{ id: 'glm-4.7', name: 'GLM-4.7' }, { id: 'glm-4.6', name: 'GLM-4.6' }]
+    },
+  }
+  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  await bot.handleModel()
+  assert.equal(sends.length, 1)
+  assert.match(sends[0].header.title.content, /1\/2 Provider/)
+  const providerForm = sends[0].body.elements.at(-1)
+  assert.deepEqual(providerForm.elements[0].options.map(o => o.value), ['openrouter', 'zhipu'])
+
+  const flowId = providerForm.elements[1].name.replace('dsh_feishu_model_provider_', '')
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId })
+  assert.deepEqual(listModels, ['zhipu'])
+  assert.equal(sends.length, 2)
+  assert.match(sends[1].header.title.content, /2\/2 Model/)
+  assert.equal(bot.modelFlow.provider, 'zhipu')
+})
+
+test('/model submit live-switches bot-created sessions through the selection ref', async () => {
+  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
+  const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
+  const { bot, patches, state } = modelBot(llm, ref)
+  await bot.handleModel()
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', name: 'dsh_feishu_model_submit_f1', value: { action: 'dsh_feishu_model_submit', flow_id: bot.modelFlow.id, provider: 'zhipu' }, form_value: { model: 'glm-4.7' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  // The selection ref was live-switched…
+  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.7' })
+  // …the flow card settled green…
+  assert.equal(patches.at(-1).card.header.template, 'green')
+  // …and the phone default was NOT stored (live switch, not a default).
+  assert.equal(state.phoneModel, undefined)
+})
+
+test('/model submit on a desktop-driven session stores the phone default instead', async () => {
+  const ref = undefined // no bot-owned selection ref — the session is desktop-driven
+  const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
+  const { bot, patches, state } = modelBot(llm, ref, 'desktop-1')
+  await bot.handleModel()
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', name: 'dsh_feishu_model_submit_f1', value: { action: 'dsh_feishu_model_submit', flow_id: bot.modelFlow.id, provider: 'zhipu' }, form_value: { model: 'glm-4.7' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  assert.deepEqual(state.phoneModel, { provider: 'zhipu', model: 'glm-4.7' })
+  assert.equal(patches.at(-1).card.header.template, 'green')
+  assert.match(JSON.stringify(patches.at(-1).card), /电脑端/)
+})
+
+test('/model without an llm service replies with a pointer', async () => {
+  const sends = []
+  const bot = askBot({ async sendCard(_c, card) { sends.push(card); return 'm1' } })
+  await bot.handleModel()
+  assert.match(JSON.stringify(sends[0]), /没有 llm 服务/)
+})

@@ -34,6 +34,11 @@ export interface BotState {
    * picker's 5-minute TTL still bounds staleness.
    */
   picker: StoredPicker | undefined
+  /**
+   * Phone-selected default model (/model on the phone): applied live to
+   * bot-created sessions and used by /new when no previous route exists.
+   */
+  phoneModel: { provider: string; model: string } | undefined
 }
 
 const DEFAULT_STATE: BotState = {
@@ -41,6 +46,7 @@ const DEFAULT_STATE: BotState = {
   displayThink: true,
   lastChatId: undefined,
   picker: undefined,
+  phoneModel: undefined,
 }
 
 /**
@@ -66,6 +72,20 @@ function decodePicker(raw: unknown): StoredPicker | undefined {
   }
 }
 
+/** Decode a persisted phone-selected default model. */
+function decodePhoneModel(raw: unknown): { provider: string; model: string } | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined
+  try {
+    const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown }
+    if (typeof parsed.provider === 'string' && parsed.provider !== '' && typeof parsed.model === 'string' && parsed.model !== '') {
+      return { provider: parsed.provider, model: parsed.model }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
 const STATE_NAMESPACE = settingsNamespace('dsh-feishu')
 
 const STATE_SCHEMA = z.object({
@@ -73,7 +93,8 @@ const STATE_SCHEMA = z.object({
   displayThink: z.boolean().default(true),
   lastChatId: z.string().default(''),
   picker: z.string().default(''),
-}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string }>
+  phoneModel: z.string().default(''),
+}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string }>
 
 function fromSection(section: unknown): BotState {
   const value = (section ?? {}) as Partial<Record<keyof BotState, unknown>>
@@ -87,6 +108,7 @@ function fromSection(section: unknown): BotState {
       ? value.lastChatId
       : undefined,
     picker: decodePicker(value.picker),
+    phoneModel: decodePhoneModel(value.phoneModel),
   }
 }
 
@@ -97,7 +119,7 @@ function fromSection(section: unknown): BotState {
  */
 export class StateStore {
   private readonly memory: BotState = { ...DEFAULT_STATE }
-  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string }> | undefined
+  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string }> | undefined
   private readonly registration: Promise<void>
 
   constructor(ctx: Context) {
@@ -113,7 +135,7 @@ export class StateStore {
         try {
           if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
             this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
-              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '' },
+              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '', phoneModel: '' },
               applies: 'live',
             })
           }
@@ -162,6 +184,7 @@ export class StateStore {
         displayThink: next.displayThink,
         lastChatId: next.lastChatId ?? '',
         picker: next.picker === undefined ? '' : JSON.stringify(next.picker),
+        phoneModel: next.phoneModel === undefined ? '' : JSON.stringify(next.phoneModel),
       })
     } catch {
       // Persistence failed — the in-memory copy still serves this run.

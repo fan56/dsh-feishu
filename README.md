@@ -10,6 +10,8 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 
 - **Live round cards**: one card per LLM round-trip — current state (🤔 thinking / 🔧 tool / ⏳ subagent), tool calls, and a growing tail of the in-flight message, refreshed every **5 seconds** (pseudo-streaming)
 - **Interactive ask-user cards**: when the agent calls `ask_user_question`, your phone gets an **interactive card** (dropdown / multi-select / text input + submit); the answer flows straight back. Pair it with [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) for **both desktop and phone prompting — first answer wins**
+- **Interactive /model**: pick a model on the phone, grouped by provider —
+  bot-created sessions switch live
 - **Interactive /resume**: pick a session from the card (dropdown + enter), or just reply `/resume N`
 - **`/new` starts a fresh session** that inherits the previous one's working directory, model and reasoning effort
 - **Phone dispatch**: messages sent mid-turn default to **steer** (they join the running turn — course corrections land immediately)
@@ -118,6 +120,7 @@ text to dispatch work.
 | `/stop` | Abort the running turn (queued messages survive) |
 | `/status` | Binding and run status |
 | `/sub N` | Inspect the Nth subagent |
+| `/model` | **Interactive model picker** (two steps: pick a provider → pick one of its models); live-switches bot-created sessions, otherwise saved as the phone default (applies to /new) |
 | `/feishu-plugin think on\|off` | Toggle the reasoning tail in the activity section (default on) |
 | `/goal` `/dcp` `/export` `/agents` `/subagents` | Not adapted for the phone yet (interactive desktop panels) — replies point to the desktop |
 | Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |

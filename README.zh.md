@@ -15,6 +15,7 @@
 - **交互式问询**：agent 调 ask_user_question 时，手机弹**交互卡**（下拉/多选/文本输入 + 提交），
   答完即回传；配 [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) 可与
   桌面 TUI **双端同弹、先答先得**
+- **交互式 /model**：手机上按 provider 分类选模型，bot 建的会话实时切换
 - **交互式 /resume**：会话列表卡片上直接**下拉选择 → 点进入**，也可以回复 `/resume N`
 - **`/new` 开新会话**：自动继承旧会话的工作目录、模型和推理档位
 - **手机派活**：turn 进行中发消息默认 **steer**（并入当前 turn，纠偏即时生效）

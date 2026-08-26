@@ -35,8 +35,9 @@ test('the passthrough table is deliberately empty (interactive desktop commands 
   }
 })
 
-test('config-class and deferred commands are rejected', () => {
-  for (const name of ['settings', 'preset', 'theme', 'reload', 'hotkeys', 'model-sync', 'model', 'think', 'skills']) {
+test('/model is now bot-owned; config-class and deferred commands are rejected', () => {
+  assert.deepEqual(classifyInbound('/model'), { kind: 'model' })
+  for (const name of ['settings', 'preset', 'theme', 'reload', 'hotkeys', 'model-sync', 'think', 'skills']) {
     assert.deepEqual(classifyInbound(`/${name}`), { kind: 'rejected', name })
   }
 })

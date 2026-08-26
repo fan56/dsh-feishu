@@ -21,7 +21,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 /** How the current binding came to be. */
@@ -32,6 +32,8 @@ export interface BindResult {
   readonly sessionId: string
   readonly mode: BindMode
   readonly agent: Agent
+  /** Created sessions only: the bot-owned selection ref (/model live-switch). */
+  readonly selectionRef?: ModelSelectionRef
 }
 
 /** Minimal registry surface (structural — matches ctx.agents). */
@@ -114,7 +116,7 @@ export class SessionBinder {
 
   private async createNewInner(cwd: string, selection?: ModelSelection): Promise<BindResult> {
     await this.releaseOwned()
-    const selectionRef = { current: selection, assembled: undefined }
+    const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
     const handle = await this.agents.create({
       sessionId: SessionId(crypto.randomUUID()),
       meta: { cwd },
@@ -128,7 +130,9 @@ export class SessionBinder {
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)
-    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent }
+    // The created session's model selection is bot-owned — handing the ref
+    // back lets the bot live-switch the route later (/model).
+    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
   }
 
   /** Bind one session id (attach when live, else resume). */
