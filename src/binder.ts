@@ -132,9 +132,9 @@ export class SessionBinder {
   }
 
   /** Bind one session id (attach when live, else resume). */
-  async bind(id: string): Promise<BindResult> {
+  async bind(id: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
     if (this.binding !== undefined) await this.binding.catch(() => undefined)
-    const task = this.bindInner(id)
+    const task = this.bindInner(id, agentOptions)
     this.binding = task
     try {
       return await task
@@ -143,7 +143,7 @@ export class SessionBinder {
     }
   }
 
-  private async bindInner(id: string): Promise<BindResult> {
+  private async bindInner(id: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
     const live = this.agents.get(SessionId(id))
     if (live !== undefined) {
       if (this.owned !== undefined && this.owned.agent === live) {
@@ -164,7 +164,13 @@ export class SessionBinder {
       this.sessionId = id
       return { sessionId: id, mode: 'resumed', agent: previous.agent }
     }
-    const handle = await this.agents.resume({ resumeSessionId: SessionId(id) })
+    // A cold resume with no agentOptions can revive a route-less agent
+    // (sessions created before the route fix have no request/header in
+    // their log) — the caller resolves the route, we pass it through.
+    const handle = await this.agents.resume({
+      resumeSessionId: SessionId(id),
+      ...(agentOptions !== undefined ? { agentOptions } : {}),
+    })
     // No dispose of `previous` (same multi-surface rule as releaseOwned):
     // the old agent stays live and adoptable by other surfaces.
     this.owned = handle

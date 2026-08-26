@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { isOperator } from './allowlist.ts'
@@ -381,7 +381,7 @@ export class FeishuBot {
       return
     }
     try {
-      const bound = await this.binder.bind(row.sessionId)
+      const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
       await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
       this.pendingPicker = undefined
       this.resetRunView()
@@ -598,6 +598,35 @@ export class FeishuBot {
     await this.lark.react(message.messageId, EMOJI_SEEN)
   }
 
+  /**
+   * Model route for a COLD resume: the target session's own log route first
+   * (sessions created before the route fix have none), then the settings'
+   * default model. Without it a resumed agent can come back route-less and
+   * every message dies with "agent has no provider/model".
+   */
+  private async resolveResumeRoute(sessionId: string): Promise<{ provider: string; model: string } | undefined> {
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+    if (persistence !== undefined) {
+      try {
+        const { events } = await persistence.inspect(SessionId(sessionId))
+        const backfill = backfillRouteFromLog(events)
+        if (backfill.provider !== undefined && backfill.model !== undefined) {
+          return { provider: backfill.provider, model: backfill.model }
+        }
+      } catch {
+        // unreadable log — fall through to the default model
+      }
+    }
+    const defaultModel = this.ctx.get('agentDefaultModel') as
+      | { currentSelection?: () => { provider?: string; model?: string } | undefined }
+      | undefined
+    const fallback = defaultModel?.currentSelection?.()
+    if (fallback?.provider !== undefined && fallback?.model !== undefined) {
+      return { provider: fallback.provider, model: fallback.model }
+    }
+    return undefined
+  }
+
   /** Resolve the bound session to a live agent, resuming it if needed. */
   private async ensureBoundAgent(): Promise<Agent | undefined> {
     const id = this.binder.getSessionId() ?? this.store.get().boundSessionId
@@ -605,7 +634,7 @@ export class FeishuBot {
     const live = this.binder.getAgent()
     if (live !== undefined) return live
     try {
-      const bound = await this.binder.bind(id)
+      const bound = await this.binder.bind(id, await this.resolveResumeRoute(id))
       await this.store.update({ boundSessionId: id })
       this.backfillRoute()
       this.maybeOpenCardForRunningAgent()

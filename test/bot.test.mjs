@@ -665,3 +665,79 @@ test('/new route resolution: previous log wins; settings default is the fallback
   await nothing.handleNew()
   assert.equal(createCalls[2], undefined)
 })
+
+// ------------------------------------------- cold-resume route resolution --
+
+test('cold resume passes the target session log route; default model is the fallback', async () => {
+  const bindCalls = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'routeless-1', picker: undefined }
+  const mkBot = getMap => new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: getMap },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async bind(id, options) { bindCalls.push([id, options]); return { sessionId: id, mode: 'resumed', agent: { status: 'idle' } } },
+      async createNew() { throw new Error('not used') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+
+  // 1) The target session's own log carries the route → inherited.
+  const withLog = mkBot(key => key === 'sessionPersistence'
+    ? { async inspect(id) { return { meta: {}, events: [{ type: 'request/header', data: { header: { config: { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' } } }, time: 1, seq: 1 }] } } }
+    : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'm' }) } : undefined)
+  await withLog.ensureBoundAgent()
+  assert.deepEqual(bindCalls[0], ['routeless-1', { provider: 'zhipu', model: 'glm-4.7' }])
+
+  // 2) Log without a route → the settings default model kicks in.
+  const noRoute = mkBot(key => key === 'sessionPersistence'
+    ? { async inspect() { return { meta: {}, events: [{ type: 'command/run', seq: 0, time: 1, data: {} }] } } }
+    : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined)
+  await noRoute.ensureBoundAgent()
+  assert.deepEqual(bindCalls[1], ['routeless-1', { provider: 'fallback', model: 'default-m' }])
+
+  // 3) Neither source → bind without options (failure stays visible).
+  const nothing = mkBot(() => undefined)
+  await nothing.ensureBoundAgent()
+  assert.deepEqual(bindCalls[2], ['routeless-1', undefined])
+})
+
+test('interactive /resume submit inherits the picked session log route too', async () => {
+  const bindCalls = []
+  const state = {
+    lastChatId: 'oc_test', displayThink: true, boundSessionId: undefined,
+    picker: {
+      id: 'p1',
+      rows: [{ index: 1, sessionId: 'routeless-2', dir: 'repo', createdAt: 1, lastTime: undefined, preview: 'x' }],
+      expiresAt: 999_999,
+    },
+  }
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      get: key => key === 'sessionPersistence'
+        ? { async inspect() { return { meta: {}, events: [{ type: 'request/header', data: { header: { config: { provider: 'zhipu', model: 'glm-4.7' } } }, time: 1, seq: 1 }] } } }
+        : undefined,
+    },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async bind(id, options) { bindCalls.push([id, options]); return { sessionId: id, mode: 'resumed', agent: { status: 'idle' } } },
+      async createNew() { throw new Error('not used') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.pendingPicker = state.picker
+  await bot.resumePickCore(1)
+  assert.deepEqual(bindCalls[0], ['routeless-2', { provider: 'zhipu', model: 'glm-4.7' }])
+})
