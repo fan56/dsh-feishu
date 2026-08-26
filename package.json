@@ -1,7 +1,7 @@
 {
   "name": "@aiwayds/dsh-feishu",
-  "version": "0.1.0",
-  "description": "dsh plugin: drive an existing dsh session from Feishu/Lark — outbound-only WebSocket bot, /resume session picker, run status card, assistant replies (never creates sessions)",
+  "version": "0.1.1",
+  "description": "dsh plugin: drive an existing dsh session from Feishu/Lark — round cards, interactive resume, ask-user cards, steer (outbound-only WebSocket bot)",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -51,5 +51,8 @@
     }
   },
   "author": "fan56",
-  "private": true
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
