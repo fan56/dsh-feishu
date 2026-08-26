@@ -1,171 +1,176 @@
-# dsh-feishu — 用飞书驾驶 dsh
+# dsh-feishu
 
-> [dsh](https://github.com/deepseek-ai/deepseek-harness)（DeepSeek Harness）伴生插件：
-> 把**已存在的** dsh 会话接到手机上——派活、看进度、答问询、收回复。
-> 只出站 WebSocket，不开端口、不要内网穿透。
+> [English](README.md) | [简体中文](README.zh.md)
+
+Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSeek Harness) session from Feishu/Lark on your phone — dispatch work, watch progress live, answer questions, get the results. Outbound-only WebSocket: no open ports, no tunnels.
 
 ---
 
-## ✨ 亮点
+## ✨ Highlights
 
-- **Round 卡实时直播**：每个 LLM 往返一张卡——当前状态（🤔 thinking / 🔧 工具 / ⏳ 子代理）、
-  工具调用、生成中的正文尾行，**5 秒伪流式**刷新
-- **交互式问询**：agent 调 ask_user_question 时，手机弹**交互卡**（下拉/多选/文本输入 + 提交），
-  答完即回传；配 [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) 可与
-  桌面 TUI **双端同弹、先答先得**
-- **交互式 /resume**：会话列表卡片上直接**下拉选择 → 点进入**，也可以回复 `/resume N`
-- **`/new` 开新会话**：自动继承旧会话的工作目录、模型和推理档位
-- **手机派活**：turn 进行中发消息默认 **steer**（并入当前 turn，纠偏即时生效）
-- **远程急停**：`/stop` 随时中止；白名单外的人私聊 bot 完全隐身
+- **Live round cards**: one card per LLM round-trip — current state (🤔 thinking / 🔧 tool / ⏳ subagent), tool calls, and a growing tail of the in-flight message, refreshed every **5 seconds** (pseudo-streaming)
+- **Interactive ask-user cards**: when the agent calls `ask_user_question`, your phone gets an **interactive card** (dropdown / multi-select / text input + submit); the answer flows straight back. Pair it with [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) for **both desktop and phone prompting — first answer wins**
+- **Interactive /resume**: pick a session from the card (dropdown + enter), or just reply `/resume N`
+- **`/new` starts a fresh session** that inherits the previous one's working directory, model and reasoning effort
+- **Phone dispatch**: messages sent mid-turn default to **steer** (they join the running turn — course corrections land immediately)
+- **Remote stop**: `/stop` aborts anytime; non-allowlisted users are completely invisible to the bot
 
 ## 🎬 Demo
 
-**`/new` 开新会话，手机直接派活：**
+**`/new` starts a fresh session; dispatch work right from the phone:**
 
 https://github.com/user-attachments/assets/177e8839-523b-487e-b3d1-6d725cd8aba5
 
-**`/resume` 交互式进入会话 + 问询卡答题：**
+**`/resume` interactive session picker + answering an ask-user card:**
 
 https://github.com/user-attachments/assets/c0d7092f-deda-4443-b75a-2bc93bd30d86
 
-## 🚀 安装与配置
+## 🚀 Install & Configure
 
-### 第一步：创建飞书应用（网页操作，≈10 分钟）
+### Step 1: Create the Feishu app (web, ≈10 min)
 
-登录 [open.feishu.cn](https://open.feishu.cn) → 创建「企业自建应用」：
+Sign in at [open.feishu.cn](https://open.feishu.cn) → create a **Custom App** (企业自建应用):
 
-1. 记下 `App ID`（`cli_` 开头）和 `App Secret`
-2. 「添加应用能力」→ **机器人**
-3. 「事件与回调」→ 订阅方式选 **长连接**，添加事件：
-   `im.message.receive_v1`（收消息）和 `card.action.trigger`（卡片交互——
-   问询卡与 /resume 选择卡需要）
-4. 权限管理开通：`im:message:send_as_bot`、`im:message.p2p_msg:readonly`、
+1. Note the `App ID` (starts with `cli_`) and `App Secret`
+2. "Add app capability" → **Bot**
+3. "Events & callbacks" → subscription mode **Long connection**; add events:
+   `im.message.receive_v1` (messages) and `card.action.trigger` (card
+   interactions — required by the ask cards and the /resume picker)
+4. Permissions: `im:message:send_as_bot`, `im:message.p2p_msg:readonly`,
    `im:message.reactions:write`
-5. 可用范围加自己 → **创建版本并发布**（不发布事件不通，最常见的卡点）
+5. Availability: add yourself → **create a version and publish** (events don't
+   flow until you publish — the most common stumbling block)
 
-### 第二步：安装插件到 profile（≈2 分钟）
+### Step 2: Install the plugin into your profile (≈2 min)
 
 ```bash
 git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu
 cd ~/github/dsh-feishu && npm install && npm run link-closure
 ```
 
-编辑 `~/.dsh/profiles/<你的 profile>/package.json`：
+Edit `~/.dsh/profiles/<your-profile>/package.json`:
 
 ```jsonc
 {
   "dsh": { "profile": { "bundles": [
-    // …现有 bundles…
-    "@aiwayds/dsh-feishu"          // ← 新增
+    // …existing bundles…
+    "@aiwayds/dsh-feishu"          // ← add
   ]}},
   "dependencies": {
-    // …现有依赖…
-    "@aiwayds/dsh-feishu": "link:/path/to/dsh-feishu"   // ← 新增
+    // …existing deps…
+    "@aiwayds/dsh-feishu": "link:/path/to/dsh-feishu"   // ← add
   }
 }
 ```
 
 ```bash
-cd ~/.dsh/profiles/<你的 profile> && pnpm install
+cd ~/.dsh/profiles/<your-profile> && pnpm install
 ```
 
-### 第三步：配置凭证（≈1 分钟）
+### Step 3: Credentials (≈1 min)
 
 ```yaml
-# ~/.dsh/.credentials.yaml （权限 600；改完重启 dsh 生效）
+# ~/.dsh/.credentials.yaml (chmod 600; restart dsh after changing)
 dsh-feishu-app-id: cli_xxxxxxxxxx
 dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
 ```
 
-### 第四步：白名单（≈1 分钟）
+### Step 4: Allowlist (≈1 min)
 
-只有白名单内的飞书用户能使用 bot，其余人私聊完全隐身：
+Only allowlisted Feishu users can use the bot — everyone else is invisible:
 
 ```yaml
 # ~/.dsh/cordis.patch.yml
 - id: dsh-feishu
   config:
     operators:
-      - ou_xxxxxxxxxxxxxx     # 你的 open_id（管理后台成员详情页可查）
+      - ou_xxxxxxxxxxxxxx     # your open_id (admin console → member details)
 ```
 
-### 第五步：推荐加装 ask-router（多端问询）
+### Step 5: Recommended — add ask-router (multi-surface prompting)
 
 ```bash
 npm install -g @aiwayds/dsh-ask-router
 ```
 
-bundles 里加 `@aiwayds/dsh-ask-router`，放在 **dsh-base 之后、所有 UI 之前**。
-装了它：手机问询卡与桌面 TUI 面板**双端同弹、先答先得**。不装也能用——
-手机独占问询（无其它 UI 时），或桌面 TUI 面板优先。
+Add `@aiwayds/dsh-ask-router` to `bundles`, **after dsh-base and before any UI
+bundle**. With it: phone cards and the desktop TUI panel prompt
+**simultaneously — first answer wins**. Without it things still work — the
+phone owns prompting when no other UI is present, otherwise the desktop UI
+takes it.
 
-### 启动并验证
+### Start & verify
 
 ```bash
-dsh --profile <你的 profile>
-# 日志出现 dsh-feishu: armed (1 operator(s), feishu) 即成功
+dsh --profile <your-profile>
+# the log line dsh-feishu: armed (1 operator(s), feishu) means success
 ```
 
-私聊 bot 发 `/help` → 回命令清单；`/resume` 看会话列表；发文本即派活。
+DM the bot `/help` → you get the command list; `/resume` lists sessions; send
+text to dispatch work.
 
-## 📱 使用
+## 📱 Usage
 
-| 命令 | 说明 |
+| Command | What it does |
 | --- | --- |
-| `/resume` | 交互式会话选择卡（下拉+进入；也可回复 `/resume N`），列表按最近更新排序 |
-| `/new` | 开一个全新会话并接入（继承工作目录、模型和推理档位） |
-| `/stop` | 停止当前 turn（排队消息保留） |
-| `/status` | 绑定与运行状态 |
-| `/sub N` | 查看第 N 个子代理近况 |
-| `/feishu-plugin think on\|off` | 开关活动区的思考尾行（默认开） |
-| `/goal` `/dcp` `/export` `/agents` `/subagents` | 透传给 dsh 执行 |
-| 其它任何文本 | 作为 prompt 注入当前会话（运行中则 steer 进当前 turn） |
+| `/resume` | Interactive session picker card (dropdown + enter; or reply `/resume N`), sorted by last update |
+| `/new` | Start a brand-new session and bind to it (inherits cwd, model and reasoning effort) |
+| `/stop` | Abort the running turn (queued messages survive) |
+| `/status` | Binding and run status |
+| `/sub N` | Inspect the Nth subagent |
+| `/feishu-plugin think on\|off` | Toggle the reasoning tail in the activity section (default on) |
+| `/goal` `/dcp` `/export` `/agents` `/subagents` | Passed through to dsh |
+| Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |
 
-典型流程：
+Typical flow:
 
 ```
-电脑上会话跑到一半 → 地铁上打开飞书 → /resume 选会话
-→ 发消息接着干（自动 steer）→ agent 问询时手机点选 → /stop 随时叫停
+Session running on your desktop → open Feishu on the train → /resume and pick it
+→ keep going from the phone (auto-steer) → answer ask cards with a tap → /stop anytime
 ```
 
-## ⚙️ 配置参考（`config:` 块）
+## ⚙️ Configuration (`config:` block)
 
-| key | 默认 | 说明 |
+| key | default | description |
 | --- | --- | --- |
-| `operators` | `[]` | open_id 白名单，**必填才激活** |
-| `mode` | `"on"` | `"off"` 完全停用 |
-| `domain` | `"feishu"` | `"feishu"`（国内）或 `"lark"`（国际版） |
-| `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式），范围 [5000, 600000] |
-| `bodySegmentChars` | `3500` | 长正文分段阈值 |
-| `resumeListStyle` | `"auto"` | `/resume` 列表：`auto`/`table`/`list` |
-| `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref 名 |
+| `operators` | `[]` | open_id allowlist — **required to arm the bot** |
+| `mode` | `"on"` | `"off"` disables the plugin entirely |
+| `domain` | `"feishu"` | `"feishu"` (CN) or `"lark"` (international) |
+| `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
+| `bodySegmentChars` | `3500` | long-body segmentation threshold |
+| `resumeListStyle` | `"auto"` | `/resume` list: `auto`/`table`/`list` |
+| `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref names |
 
-凭证解析优先级：patch 明文 > 环境变量 `DSH_FEISHU_APP_ID/SECRET` > credentials 服务。
+Credential resolution order: plaintext in patch > `DSH_FEISHU_APP_ID/SECRET` env
+vars > the credentials service.
 
-## 🧯 故障排查
+## 🧯 Troubleshooting
 
-| 现象 | 处理 |
+| Symptom | Fix |
 | --- | --- |
-| 启动日志 `no operators configured — dormant` | 白名单没配（第四步） |
-| `no Lark credentials` | 凭证没配（第三步），改后需重启 |
-| `startup failed` | App ID/Secret 错误或网络不通；应用未发布版本 |
-| 私聊不回 | open_id 与白名单不符（非白名单静默忽略） |
-| 问询卡点了没反应 | 后台未订阅 `card.action.trigger`（第一步第 3 条） |
-| `/resume N` 报过期 | 列表 5 分钟有效，重发 `/resume` |
+| Log: `no operators configured — dormant` | Allowlist missing (Step 4) |
+| Log: `no Lark credentials` | Credentials missing (Step 3); restart after changing |
+| Log: `startup failed` | Wrong App ID/Secret, network blocked, or the app version isn't published |
+| Bot ignores DMs | Your open_id isn't in the allowlist (non-allowlisted users are silently ignored) |
+| Ask card taps do nothing | `card.action.trigger` isn't subscribed (Step 1.3) |
+| `/resume N` says expired | The list lives 5 minutes — send `/resume` again |
 
-## 开发
+## Development
 
 ```bash
 npm run check    # tsc --noEmit
-npm test         # 构建 + node --test（173 个纯逻辑单测）
+npm test         # build + node --test (173 pure-logic unit tests)
 ```
 
-## 边界
+## Boundaries
 
-- v1 仅私聊；群聊、审批流（卡片交互层已就绪）在路线图上
-- resume 附着后不回放历史；turn 进行中附着时计数从附着时刻起算
-- web profile 请勿安装 ask-router（上游 apiproxy 不容忍重复注册）
+- v1 is DM-only; group chats and the approval flow (the card layer is already
+  built) are on the roadmap
+- After attaching, session history is not replayed; counters start from attach
+  time when a turn is already running
+- Never install ask-router into a **web** profile (the upstream apiproxy does
+  not tolerate duplicate provider registrations)
 
 ---
 
-*License: MIT. 作者 fan56.*
+*License: MIT. Author fan56.*
