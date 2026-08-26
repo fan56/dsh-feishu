@@ -401,16 +401,31 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
   const patches = []
   const sends = []
   const updates = []
+  const createCalls = []
   const binder = {
     getSessionId: () => 'old-1',
     getAgent: () => undefined,
     detach: async () => {},
-    async createNew(cwd) { createCalls.push(cwd); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
+    async createNew(cwd, route) { createCalls.push([cwd, route]); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
   }
-  const createCalls = []
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
   const bot = new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      get(key) {
+        if (key !== 'sessions') return undefined
+        return {
+          get(id) {
+            assert.equal(id, 'old-1')
+            return {
+              events: [
+                { type: 'request/header', data: { header: { config: { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' } } }, time: 1, seq: 1 },
+              ],
+            }
+          },
+        }
+      },
+    },
     config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
     lark: {
       async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
@@ -432,9 +447,9 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
   assert.equal(sends.length, 1)
   assert.match(sends[0].header.title.content, /🆕 新会话 · fresh-aa/)
   assert.equal(sends[0].header.template, 'green')
-  // Binding switched and persisted.
+  // Binding switched and persisted — with the previous session's route.
   assert.equal(state.boundSessionId, 'fresh-aaaa-bbbb')
-  assert.equal(binder.getSessionId === undefined, false)
+  assert.deepEqual(createCalls[0][1], { provider: 'zhipu', model: 'glm-4.7' })
 })
 
 test('/new creation failure leaves the bot cleanly unbound with the reason', async () => {

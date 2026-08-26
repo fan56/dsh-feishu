@@ -39,6 +39,7 @@ function makeRegistry() {
       async create(options) {
         calls.create += 1
         calls.createMeta = options.meta
+        calls.createOptions = options
         const agent = {
           id: String(options.sessionId),
           session: { id: String(options.sessionId) },
@@ -160,6 +161,16 @@ test('createNew mints a fresh root session the binder owns', async () => {
   assert.ok(handle !== undefined)
   await binder.detach()
   assert.equal(binder.getSessionId(), undefined)
+})
+
+test('createNew forwards the inherited agent route into agents.create', async () => {
+  const reg = makeRegistry()
+  const binder = new SessionBinder({ agents: reg.agents })
+  await binder.createNew('/tmp/work', { provider: 'zhipu', model: 'glm-4.7' })
+  assert.deepEqual(reg.calls.createOptions.agentOptions, { provider: 'zhipu', model: 'glm-4.7' })
+  // No route → no agentOptions key at all.
+  await binder.createNew('/tmp/work')
+  assert.equal(reg.calls.createOptions.agentOptions, undefined)
 })
 
 test('createNew inherits cwd into meta and releases the previous owned handle', async () => {

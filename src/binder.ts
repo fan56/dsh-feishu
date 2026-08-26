@@ -34,7 +34,11 @@ export interface BindResult {
 interface AgentsRegistry {
   get(id: SessionId): Agent | undefined
   resume(options: { resumeSessionId: SessionId }): Promise<AgentHandle>
-  create(options: { sessionId: SessionId; meta?: { cwd?: string } }): Promise<AgentHandle>
+  create(options: {
+    sessionId: SessionId
+    meta?: { cwd?: string }
+    agentOptions?: { provider?: string; model?: string }
+  }): Promise<AgentHandle>
 }
 
 /**
@@ -84,9 +88,9 @@ export class SessionBinder {
    * is the operator's deliberate action, same right the TUI/web surfaces
    * have. We own the resulting handle exactly like the resume arm.
    */
-  async createNew(cwd: string): Promise<BindResult> {
+  async createNew(cwd: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
     if (this.binding !== undefined) await this.binding.catch(() => undefined)
-    const task = this.createNewInner(cwd)
+    const task = this.createNewInner(cwd, agentOptions)
     this.binding = task
     try {
       return await task
@@ -95,11 +99,15 @@ export class SessionBinder {
     }
   }
 
-  private async createNewInner(cwd: string): Promise<BindResult> {
+  private async createNewInner(cwd: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
     await this.releaseOwned()
     const handle = await this.agents.create({
       sessionId: SessionId(crypto.randomUUID()),
       meta: { cwd },
+      // A bare create has NO route — the first request dies with "agent has
+      // no provider/model" (the TUI composes its default selection before
+      // creating; the bot inherits the previous session's route instead).
+      ...(agentOptions !== undefined ? { agentOptions } : {}),
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)

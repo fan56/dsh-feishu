@@ -393,12 +393,28 @@ export class FeishuBot {
       const headerCwd = sessions?.get(previousId)?.header?.cwd
       if (typeof headerCwd === 'string' && headerCwd !== '') cwd = headerCwd
     }
+    // Inherit the previous session's model route: a bare agents.create has
+    // NO provider/model and the first request fails with "agent has no
+    // provider/model" (Round 0 ❌ in live use). Same log source as backfill.
+    let route: { provider?: string; model?: string } | undefined
+    if (previousId !== undefined) {
+      const sessions = this.ctx.get('sessions') as
+        | { get(id: string): { events?: unknown[] } | undefined }
+        | undefined
+      const events = sessions?.get(previousId)?.events
+      if (Array.isArray(events) && events.length > 0) {
+        const backfill = backfillRouteFromLog(events as SessionEvent[])
+        if (backfill.provider !== undefined && backfill.model !== undefined) {
+          route = { provider: backfill.provider, model: backfill.model }
+        }
+      }
+    }
     // Grey out the live card BEFORE resetRunView clears cardMessageId —
     // the original ordering made this patch dead code.
     await this.closeCardAsDetached()
     this.resetRunView()
     try {
-      const created = await this.binder.createNew(cwd)
+      const created = await this.binder.createNew(cwd, route)
       await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
       const chatId = this.store.get().lastChatId
       if (chatId !== undefined) {
