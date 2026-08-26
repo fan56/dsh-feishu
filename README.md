@@ -22,11 +22,11 @@
 
 **`/new` 开新会话，手机直接派活：**
 
-![new session](docs/demo-new-session.mp4)
+https://github.com/fan56/dsh-feishu/releases/download/demos/demo-new-session.mp4
 
 **`/resume` 交互式进入会话 + 问询卡答题：**
 
-![resume](docs/demo-resume.mp4)
+https://github.com/fan56/dsh-feishu/releases/download/demos/demo-resume.mp4
 
 ## 🚀 安装与配置
 
