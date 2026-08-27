@@ -3,13 +3,15 @@
  * doc §4 three-way split:
  *
  * - bot-owned mirrors: /resume (picker), /new (detach), /status, /help,
- *   /stop, /feishu-plugin, /sub — implemented here, no host involvement;
+ *   /stop, /feishu-plugin, /sub, /model — implemented here, no host
+ *   involvement; plus the interactive adapters (/think /permission
+ *   /select-skill /profile-switch) that present a selection card through the
+ *   selector FW and apply the pick over an existing channel;
  * - host passthrough: a whitelist of agent-addressed dsh commands forwarded
- *   through ctx.commands.execute — currently EMPTY: the former entries
- *   (/goal /dcp /export /agents /subagents) are interactive on the desktop
- *   (panels/selectors) and have no phone UI yet; they live in
- *   UNADAPTED_COMMANDS and answer with a "use the desktop" notice.
- *   Re-enabling one is a one-line move back into PASSTHROUGH_COMMANDS;
+ *   through ctx.commands.execute — currently EMPTY as a standing table (the
+ *   former entries are interactive on the desktop and are answered with the
+ *   "use the desktop" notice via REJECTED_COMMANDS); the /permission adapter
+ *   hands its explicit `/permission <name>` form here directly;
  * - rejected: config-class + not-yet-adapted commands answered with
  *   "operate on the desktop".
  *
@@ -29,6 +31,10 @@ export type Intent =
   | { kind: 'stop' }
   | { kind: 'sub'; n: number }
   | { kind: 'model' }
+  | { kind: 'think' }
+  | { kind: 'permission' }
+  | { kind: 'select-skill' }
+  | { kind: 'profile-switch' }
   | { kind: 'display'; target: 'think'; value: 'on' | 'off' }
   | { kind: 'passthrough'; name: string; line: string }
   | { kind: 'rejected'; name: string }
@@ -63,11 +69,11 @@ export const REJECTED_COMMANDS: readonly string[] = [
 
 /**
  * Commands that exist but are deferred: selector semantics the phone cannot
- * render yet (v1 answers "use the desktop"; a later version may add
- * list+index flows).
+ * render yet (v1 answers "use the desktop"). /think and /select-skill have
+ * since left this table (interactive adapters); the /skills PANEL itself
+ * (dsh's skill browser) is still desktop-only.
  */
 export const DEFERRED_COMMANDS: readonly string[] = [
-  'think',
   'skills',
 ]
 
@@ -121,6 +127,15 @@ export function classifyInbound(text: string): Intent {
       return n === undefined ? { kind: 'prompt', text: trimmed } : { kind: 'sub', n }
     }
     case 'model': return { kind: 'model' }
+    case 'think': return { kind: 'think' }
+    case 'permission':
+      // Bare /permission opens the preset picker (TUI parity); the explicit
+      // `/permission <name>` form rides the passthrough execution directly.
+      return rest === undefined || rest.trim() === ''
+        ? { kind: 'permission' }
+        : { kind: 'passthrough', name, line: trimmed }
+    case 'select-skill': return { kind: 'select-skill' }
+    case 'profile-switch': return { kind: 'profile-switch' }
     case 'feishu-plugin': {
       // Named after the plugin itself: ownership of phone-side commands
       // must be self-evident (a bare /display read as a dsh/TUI command
@@ -156,7 +171,11 @@ export function helpText(bound: boolean): string {
     '· /sub N — 查看第 N 个子代理近况',
     '· /feishu-plugin think on|off — 开关思考尾行显示（默认开）',
     '· /model — 选择模型（按 provider 分类）',
-    '· /goal /dcp /agents 等暂未适配手机（电脑端操作）',
+    '· /think — 选择思考档位（推理 effort）',
+    '· /permission — 选择权限 preset',
+    '· /select-skill — 选择并激活技能',
+    '· /profile-switch — 切换模型 profile',
+    '· /goal /dcp /agents /skills 等暂未适配手机（电脑端操作）',
     '· 其余以 / 开头的内容会作为 prompt 发给模型',
     '· /settings /preset /theme 等配置类命令请在电脑端操作',
   ]

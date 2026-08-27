@@ -35,10 +35,12 @@ export interface BotState {
    */
   picker: StoredPicker | undefined
   /**
-   * Phone-selected default model (/model on the phone): applied live to
-   * bot-created sessions and used by /new when no previous route exists.
+   * Phone-selected default model (/model on the phone, plus the reasoning
+   * effort the interactive /think and /profile-switch adapters may carry):
+   * applied live to bot-created sessions and used by /new when no previous
+   * route exists.
    */
-  phoneModel: { provider: string; model: string } | undefined
+  phoneModel: { provider: string; model: string; reasoningEffort?: string } | undefined
 }
 
 const DEFAULT_STATE: BotState = {
@@ -72,13 +74,19 @@ function decodePicker(raw: unknown): StoredPicker | undefined {
   }
 }
 
-/** Decode a persisted phone-selected default model. */
-function decodePhoneModel(raw: unknown): { provider: string; model: string } | undefined {
+/** Decode a persisted phone-selected default model (effort optional). */
+function decodePhoneModel(raw: unknown): { provider: string; model: string; reasoningEffort?: string } | undefined {
   if (typeof raw !== 'string' || raw === '') return undefined
   try {
-    const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown }
+    const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
     if (typeof parsed.provider === 'string' && parsed.provider !== '' && typeof parsed.model === 'string' && parsed.model !== '') {
-      return { provider: parsed.provider, model: parsed.model }
+      return {
+        provider: parsed.provider,
+        model: parsed.model,
+        ...(typeof parsed.reasoningEffort === 'string' && parsed.reasoningEffort !== ''
+          ? { reasoningEffort: parsed.reasoningEffort }
+          : {}),
+      }
     }
     return undefined
   } catch {

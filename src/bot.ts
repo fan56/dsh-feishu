@@ -48,6 +48,15 @@ import {
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { SelectorManager, type SelectorOutcome } from './selector.ts'
 import { parseSelectorAction, type SelectorSpec } from './selector-card.ts'
+import {
+  runPermissionCommand,
+  runProfileSwitchCommand,
+  runSelectSkillCommand,
+  runThinkCommand,
+  type CurrentSelection,
+  type InteractiveHost,
+  type ModelSelectionUpdate,
+} from './interactive.ts'
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
@@ -174,6 +183,8 @@ export class FeishuBot {
   } | undefined
   /** Generic selection-card flows (selector FW; driven via presentSelection). */
   private readonly selectors: SelectorManager
+  /** Bot-side surfaces the interactive adapters drive (selector-FW commands). */
+  private readonly host: InteractiveHost
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -199,6 +210,18 @@ export class FeishuBot {
       allowlisted: openId => isOperator(openId, this.allowlist),
       logger: this.ctx.logger,
     })
+    this.host = {
+      ctx: this.ctx,
+      store: this.store,
+      binder: this.binder,
+      reply: text => this.reply(text),
+      presentSelection: (chatId, spec) => this.presentSelection(chatId, spec),
+      applyModelSelection: selection => this.applyModelSelection(selection),
+      injectPrompt: text => this.injectPrompt(text),
+      executeCommand: (name, line) => this.handlePassthrough(name, line),
+      currentSelection: () => this.currentModelSelection(),
+      boundAgent: () => this.ensureBoundAgent(),
+    }
   }
 
   /** Wire subscriptions, start the beat, open the Lark connection. */
@@ -329,6 +352,10 @@ export class FeishuBot {
       case 'stop': await this.handleStop(); break
       case 'sub': await this.handleSub(intent.n); break
       case 'model': await this.handleModel(); break
+      case 'think': await this.interactiveCommand(runThinkCommand); break
+      case 'permission': await this.interactiveCommand(runPermissionCommand); break
+      case 'select-skill': await this.interactiveCommand(runSelectSkillCommand); break
+      case 'profile-switch': await this.interactiveCommand(runProfileSwitchCommand); break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
         await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
@@ -659,17 +686,17 @@ export class FeishuBot {
     }
   }
 
-  private async handlePrompt(message: InboundMessage, text: string): Promise<void> {
-    if (text === '') return
-    if (this.binder.isReadOnlyView()) {
-      await this.reply('当前为只读旁观（该会话正由另一进程驱动）。发 /resume 切换会话，或在那边直接派活。')
-      return
-    }
+  /**
+   * Shared prompt-injection channel (operator messages AND the interactive
+   * adapters' skill activation): running turns get steered (join the CURRENT
+   * turn's next round), idle sessions open the next turn. 'refused' covers
+   * the read-only view and the missing binding — callers word their replies.
+   */
+  private async injectPrompt(text: string): Promise<'steered' | 'opened' | 'refused'> {
+    if (text === '') return 'refused'
+    if (this.binder.isReadOnlyView()) return 'refused'
     const agent = await this.ensureBoundAgent()
-    if (agent === undefined) {
-      await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')
-      return
-    }
+    if (agent === undefined) return 'refused'
     const userMessage = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
@@ -679,8 +706,25 @@ export class FeishuBot {
       // (dsh inbox target next-step) so course corrections land immediately,
       // instead of waiting out the turn as a queued followup.
       agent.steer(userMessage)
-    } else {
-      agent.followup(userMessage)
+      return 'steered'
+    }
+    agent.followup(userMessage)
+    return 'opened'
+  }
+
+  private async handlePrompt(message: InboundMessage, text: string): Promise<void> {
+    if (text === '') return
+    const readOnly = this.binder.isReadOnlyView()
+    const outcome = await this.injectPrompt(text)
+    if (outcome === 'refused') {
+      if (readOnly) {
+        await this.reply('当前为只读旁观（该会话正由另一进程驱动）。发 /resume 切换会话，或在那边直接派活。')
+      } else {
+        await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')
+      }
+      return
+    }
+    if (outcome === 'opened') {
       // Tie the done-reaction to this message only when OUR prompt opens the
       // next turn; a steered message belongs to a turn we do not own.
       this.turnOriginMessageId = message.messageId
@@ -1045,6 +1089,90 @@ export class FeishuBot {
   }
 
   /**
+   * Shared model-selection apply core — /model submits AND the interactive
+   * adapters (/think, /profile-switch) land here so the live-switch and
+   * phone-default branches cannot drift apart. Live-switches bot-created
+   * sessions through their selection ref (an absent effort CLEARS any
+   * inherited one — installModelSelection's contract); otherwise remembers
+   * the pick as the phone default (used by /new, honored on the next live
+   * bind).
+   */
+  private async applyModelSelection(selection: ModelSelectionUpdate): Promise<'live' | 'phone-default'> {
+    const bound = this.binder.getSessionId()
+    const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)
+    if (ref !== undefined) {
+      ref.current = {
+        provider: selection.provider,
+        model: selection.model,
+        ...(selection.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selection.reasoningEffort as ModelSelection['reasoningEffort'] }),
+      }
+      return 'live'
+    }
+    await this.store.update({
+      phoneModel: selection.reasoningEffort === undefined
+        ? { provider: selection.provider, model: selection.model }
+        : { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort },
+    })
+    return 'phone-default'
+  }
+
+  /**
+   * Best-effort current model selection of the BOUND session — the data
+   * source for the interactive /think adapter. Chain (mirrors the /model
+   * and cold-resume routes): the bot-owned selection ref, the run view
+   * (live route folds + the bind-time log backfill), the persisted log
+   * itself, then the settings' default model. Undefined = nothing known.
+   */
+  private async currentModelSelection(): Promise<CurrentSelection | undefined> {
+    const bound = this.binder.getSessionId() ?? this.store.get().boundSessionId
+    if (bound !== undefined) {
+      const refSelection = this.selectionRefs.get(bound)?.current
+      if (refSelection?.provider !== undefined && refSelection.model !== undefined) {
+        return {
+          provider: refSelection.provider,
+          model: refSelection.model,
+          ...(refSelection.reasoningEffort === undefined ? {} : { reasoningEffort: refSelection.reasoningEffort }),
+        }
+      }
+    }
+    if (this.runState.provider !== undefined && this.runState.model !== undefined) {
+      return {
+        provider: this.runState.provider,
+        model: this.runState.model,
+        ...(this.runState.reasoningEffort === undefined ? {} : { reasoningEffort: this.runState.reasoningEffort }),
+      }
+    }
+    if (bound !== undefined) {
+      const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+      if (persistence !== undefined) {
+        try {
+          const { events } = await persistence.inspect(SessionId(bound))
+          const backfill = backfillRouteFromLog(events)
+          if (backfill.provider !== undefined && backfill.model !== undefined) {
+            return {
+              provider: backfill.provider,
+              model: backfill.model,
+              ...(backfill.reasoningEffort === undefined ? {} : { reasoningEffort: backfill.reasoningEffort }),
+            }
+          }
+        } catch {
+          // unreadable log — fall through to the default model
+        }
+      }
+      const defaultModel = this.ctx.get('agentDefaultModel') as
+        | { currentSelection?: () => ModelSelection | undefined }
+        | undefined
+      const fallback = defaultModel?.currentSelection?.()
+      if (fallback?.provider !== undefined && fallback?.model !== undefined) {
+        return { provider: fallback.provider, model: fallback.model }
+      }
+    }
+    return undefined
+  }
+
+  /**
    * /model submit: live-switch bot-created sessions through their selection
    * ref; otherwise remember the pick as the phone default (used by /new)
    * and point desktop-driven sessions at the desktop switcher.
@@ -1053,17 +1181,12 @@ export class FeishuBot {
     const flow = this.modelFlow
     if (flow === undefined || flow.id !== parsed.flowId || flow.provider === undefined) return
     this.modelFlow = undefined
-    const selection = { provider: flow.provider, model: parsed.model }
+    const selection: ModelSelectionUpdate = { provider: flow.provider, model: parsed.model }
+    const target = await this.applyModelSelection(selection)
     const bound = this.binder.getSessionId()
-    const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)
-    if (ref !== undefined) {
-      ref.current = { ...selection }
-    } else {
-      await this.store.update({ phoneModel: selection })
-    }
     const chatId = this.store.get().lastChatId
     if (chatId !== undefined) {
-      const note = ref !== undefined
+      const note = target === 'live'
         ? undefined
         : bound === undefined
           ? '已存为手机默认模型（/new 的新会话将使用它）。'
@@ -1237,6 +1360,22 @@ export class FeishuBot {
    */
   presentSelection(chatId: string, spec: SelectorSpec): Promise<SelectorOutcome> {
     return this.selectors.present(chatId, spec)
+  }
+
+  // -------------------------------------------------- interactive commands --
+
+  /**
+   * Run one interactive command adapter (selector-FW consumer). The adapters
+   * own their degraded replies; this wrapper only contains an unexpected
+   * throw (e.g. a rejected selection card) so the dispatch loop survives.
+   */
+  private async interactiveCommand(run: (host: InteractiveHost) => Promise<void>): Promise<void> {
+    try {
+      await run(this.host)
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: interactive command failed: %o', error)
+      await this.reply('交互选择失败，请稍后再试。')
+    }
   }
 
   // --------------------------------------------------------------- /status --

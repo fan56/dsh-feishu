@@ -37,9 +37,22 @@ test('the passthrough table is deliberately empty (interactive desktop commands 
 
 test('/model is now bot-owned; config-class and deferred commands are rejected', () => {
   assert.deepEqual(classifyInbound('/model'), { kind: 'model' })
-  for (const name of ['settings', 'preset', 'theme', 'reload', 'hotkeys', 'model-sync', 'think', 'skills']) {
+  for (const name of ['settings', 'preset', 'theme', 'reload', 'hotkeys', 'model-sync', 'skills']) {
     assert.deepEqual(classifyInbound(`/${name}`), { kind: 'rejected', name })
   }
+})
+
+test('interactive adapter commands route to their own intents', () => {
+  assert.deepEqual(classifyInbound('/think'), { kind: 'think' })
+  assert.deepEqual(classifyInbound('/think high'), { kind: 'think' }) // args ignored, like /model
+  assert.deepEqual(classifyInbound('/select-skill'), { kind: 'select-skill' })
+  assert.deepEqual(classifyInbound('/select-skill foo'), { kind: 'select-skill' })
+  assert.deepEqual(classifyInbound('/profile-switch'), { kind: 'profile-switch' })
+  assert.deepEqual(classifyInbound('/profile-switch work'), { kind: 'profile-switch' })
+  // Bare /permission opens the picker; the explicit form rides passthrough.
+  assert.deepEqual(classifyInbound('/permission'), { kind: 'permission' })
+  assert.deepEqual(classifyInbound('/permission   '), { kind: 'permission' })
+  assert.deepEqual(classifyInbound('/permission plan'), { kind: 'passthrough', name: 'permission', line: '/permission plan' })
 })
 
 test('unknown slash commands fall through as prompts', () => {
@@ -56,5 +69,9 @@ test('help text adapts to the binding state', () => {
     assert.match(text, /\/resume/)
     assert.match(text, /\/stop/)
     assert.match(text, /\/feishu-plugin think/)
+    assert.match(text, /\/think/)
+    assert.match(text, /\/permission/)
+    assert.match(text, /\/select-skill/)
+    assert.match(text, /\/profile-switch/)
   }
 })
