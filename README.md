@@ -171,7 +171,7 @@ npm test         # build + node --test (173 pure-logic unit tests)
   `writer.lock` beside the session dir before touching disk — when another
   process is driving that session, takeover is refused with the holder's pid
   instead of silently forking the log into interleaved seq numbers; same-process
-  attach (shared agent instance) bypasses the lock and behaves as before
+  attach (shared agent instance) bypasses the lock and behaves as before; a refused `/resume` degrades into a READ-ONLY watch over the persisted log — the phone still receives every turn's final reply (poll-delayed, no streaming detail)
 - v1 is DM-only; group chats and the approval flow (the card layer is already
   built) are on the roadmap
 - After attaching, session history is not replayed; counters start from attach

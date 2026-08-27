@@ -435,18 +435,34 @@ export class FeishuBot {
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
       if (error instanceof WriterLockedError) {
-        // Single-writer guard: another process is driving this session right
-        // now. Say who, give an exit path, and say why we refused — a bare
-        // "failed" would read as the bot being broken. createdAt is
-        // localized best-effort; pid reuse can keep a dead holder looking
-        // alive, hence the manual-clear hint.
-        const since = formatHolderSince(error.holder.createdAt)
-        await this.reply(
-          `该会话正由另一进程驱动（pid ${error.holder.pid}${since}）。\n`
-          + '为避免日志分叉，已拒绝从这里接管。请在那边继续操作；那边的会话结束后再 /resume 即可恢复。\n'
-          + '若确认已无任何进程在写该会话，删除会话目录里的 writer.lock 后重试即可。',
-        )
-        return
+        // Single-writer guard fired: another process drives this session.
+        // Degrade to a READ-ONLY view over its persisted log instead of a
+        // dead end — the same fold pipeline paints round cards, so every
+        // turn's final reply still lands on the phone (poll-delayed).
+        try {
+          const since = formatHolderSince(error.holder.createdAt)
+          await this.binder.watchRemote(row.sessionId, async events => {
+            for (const event of events) {
+              // Route through the normal firehose handler with a stub session
+              // header matching the bound id: turn cards, tool rows and todo
+              // updates all reuse the live pipeline verbatim.
+              this.onSessionEvent({ id: row.sessionId } as Session, event as unknown as SessionEvent)
+            }
+          })
+          await this.store.update({ boundSessionId: row.sessionId })
+          await this.reply(
+            `已进入只读旁观：${row.preview}\n`
+            + `该会话正由另一进程驱动（pid ${error.holder.pid}${since}），为避免日志分叉不能从这里派活；\n`
+            + '对面的最终回复会同步到这里。/resume 或 /new 可切换。',
+          )
+          return
+        } catch (watchError: unknown) {
+          this.ctx.logger.warn('dsh-feishu: watch remote %s failed: %o', row.sessionId, watchError)
+          // Fall through to the plain refusal below — watching is best-effort.
+          const reason2 = clipLine(String(watchError instanceof Error ? watchError.message : watchError), 200)
+          await this.reply(`只读旁观失败：${reason2 === '' ? '未知错误' : reason2}`)
+          return
+        }
       }
       // The reason rides along (clipped): a bare "failed" on the phone gave
       // nothing to debug from — the whole /resume investigation stalled on it.
@@ -626,6 +642,10 @@ export class FeishuBot {
 
   private async handlePrompt(message: InboundMessage, text: string): Promise<void> {
     if (text === '') return
+    if (this.binder.isReadOnlyView()) {
+      await this.reply('当前为只读旁观（该会话正由另一进程驱动）。发 /resume 切换会话，或在那边直接派活。')
+      return
+    }
     const agent = await this.ensureBoundAgent()
     if (agent === undefined) {
       await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')

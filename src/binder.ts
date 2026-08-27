@@ -23,9 +23,10 @@
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionLogRoot } from './resume-table.ts'
-import { WriterLockedError, acquireWriterLock, releaseOwnedWriterLock, type WriterLockHolder } from './writer-lock.ts'
+import { RemoteSessionTail } from './remote-tail.ts'
+import { WriterLockedError, acquireWriterLock, projectKeyFor, releaseOwnedWriterLock, type WriterLockHolder } from './writer-lock.ts'
 
 /** How the current binding came to be. */
 export type BindMode = 'attached' | 'resumed' | 'created'
@@ -44,33 +45,6 @@ interface PersistenceSeam {
   list(signal?: AbortSignal): Promise<HeaderLike[]>
 }
 
-/**
- * Project-directory name under which the jsonl backend groups a cwd's
- * sessions — byte-identical port of upstream `projectKey()` in
- * @deepseek-ai/dsh-session-persistence-jsonl. ANY divergence makes the lock
- * land beside some decoy path instead of the real log; update only in sync
- * with upstream.
- */
-function projectKeyFor(cwd: string): string {
-  if (cwd.length === 0) throw new Error('cannot encode an empty project path')
-  let readable = ''
-  let separatorRun = false
-  for (let i = 0; i < cwd.length; i++) {
-    const code = cwd.charCodeAt(i)
-    const ch = String.fromCharCode(code)
-    if (ch === '/' || ch === '\\' || ch === ':') {
-      if (!separatorRun) readable += '-'
-      separatorRun = true
-    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
-      readable += ch
-      separatorRun = false
-    } else {
-      readable += `~${code.toString(16).toUpperCase().padStart(4, '0')}`
-      separatorRun = false
-    }
-  }
-  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
-}
 
 /** Result of a successful bind. */
 export interface BindResult {
@@ -106,6 +80,10 @@ export class SessionBinder {
   private binding: Promise<BindResult> | undefined
   /** Kept for the persistence seam that resolves header metadata. */
   private readonly ctx: Context
+  /** Decoder/interval seam for the read-only remote view (tests inject). */
+  private readonly viewerOptions: { intervalMs?: number; decode?(file: string): Promise<string> }
+  /** Active read-only view (another process drives the session). */
+  private remoteTail: RemoteSessionTail | undefined
   /**
    * Session dirs whose cross-process writer lock WE hold. Deliberately not
    * cleared on rebind/detach: the agent stays live (adoptable) in this
@@ -122,11 +100,61 @@ export class SessionBinder {
    */
   private readonly heldLockDirs = new Set<string>()
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, options: { viewerOptions?: { intervalMs?: number; decode?(file: string): Promise<string> } } = {}) {
     this.ctx = ctx
+    this.viewerOptions = options.viewerOptions ?? {}
     // ctx.agents is injected (plugin `inject`); the structural cast keeps
     // this module free of the full registry type.
     this.agents = (ctx as Context & { agents: AgentsRegistry }).agents
+  }
+
+  /** While a remote watch is active, the phone is a viewer, not a driver. */
+  isReadOnlyView(): boolean {
+    return this.remoteTail !== undefined
+  }
+
+  /**
+   * READ-ONLY cross-process view: another dsh process drives this session
+   * (the writer guard refused our cold resume), so sync the phone's cards
+   * from its persisted log instead. Durable rows only — every turn's final
+   * assistant message arrives (poll-delayed, streaming detail omitted).
+   */
+  async watchRemote(
+    sessionId: string,
+    onEvents: (events: Array<Record<string, unknown>>) => void,
+  ): Promise<void> {
+    await this.stopWatchRemote()
+    const cwd = await this.headerCwdOf(sessionId)
+    if (cwd === undefined) throw new Error(`cannot locate the log of ${sessionId} for read-only viewing`)
+    this.sessionId = sessionId
+    const file = join(sessionLogRoot(), projectKeyFor(cwd), sessionId, 'session.jsonl.zstd')
+    const tail = new RemoteSessionTail(file, {
+      onEvents: list => {
+        if (this.remoteTail !== tail) return
+        onEvents(list as unknown as Array<Record<string, unknown>>)
+      },
+    }, this.viewerOptions)
+    this.remoteTail = tail
+    await tail.tickOnce() // deterministic backfill of stored history
+    tail.start()
+  }
+
+  private async stopWatchRemote(): Promise<void> {
+    if (this.remoteTail === undefined) return
+    this.remoteTail.stop()
+    this.remoteTail = undefined
+  }
+
+  /** Historical cwd for a session from persisted headers — best-effort. */
+  private async headerCwdOf(sessionId: string): Promise<string | undefined> {
+    try {
+      const persistence = this.ctx.get('sessionPersistence') as PersistenceSeam | undefined
+      const stored = (await persistence?.list().catch(() => [])) ?? []
+      const header = stored.find(candidate => String(candidate.id) === sessionId)
+      return typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
+    } catch {
+      return undefined
+    }
   }
 
   /** The bound session id, when bound. */
@@ -284,19 +312,9 @@ export class SessionBinder {
     const id = String(meta.id)
     let cwd = typeof meta.cwd === 'string' && meta.cwd !== '' ? meta.cwd : undefined
     if (cwd === undefined) {
-      // Every access below is best-effort by design: a host without this
-      // service (or an oddly-shaped mock) must degrade to "unguarded bind",
-      // never turn the guard itself into a resume breaker.
-      try {
-        const persistence = (this.ctx as Context & { get?(key: string): unknown }).get?.('sessionPersistence') as
-          | PersistenceSeam
-          | undefined
-        const stored = (await persistence?.list().catch(() => [])) ?? []
-        const header = stored.find(candidate => String(candidate.id) === id)
-        cwd = typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
-      } catch {
-        return undefined
-      }
+      // Best-effort by design: no trustworthy cwd → unguarded skip (fail-open),
+      // never lock a decoy path.
+      cwd = await this.headerCwdOf(id).catch(() => undefined)
     }
     if (cwd === undefined) return undefined
 
@@ -316,6 +334,7 @@ export class SessionBinder {
 
   /** Drop the binding (detach). Only OUR handle is disposed — never an attached one. */
   async detach(): Promise<void> {
+    await this.stopWatchRemote()
     this.sessionId = undefined
     await this.releaseOwned()
   }
@@ -333,6 +352,7 @@ export class SessionBinder {
 
   /** Dispose everything we own (plugin teardown). */
   async dispose(): Promise<void> {
+    await this.stopWatchRemote()
     await this.detach()
     // Plugin teardown: release every writer lock this binder ESTABLISHED.
     // Locks intentionally survive detach/rebind while their agent stays live

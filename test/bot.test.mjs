@@ -9,7 +9,7 @@ function makeBot(lark, clock) {
     ctx: { logger: { info() {}, warn() {}, error() {} } },
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500 },
     lark,
-    binder: {},
+    binder: { isReadOnlyView: () => false },
     store,
     allowlist: new Set(),
     now: () => clock.now,
@@ -18,7 +18,7 @@ function makeBot(lark, clock) {
 
 // ------------------------------------------------ round cards + steer --
 
-function roundBot(lark, binder = { getSessionId: () => 's1' }) {
+function roundBot(lark, binder = { getSessionId: () => 's1', isReadOnlyView: () => false }) {
   return new FeishuBot({
     ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
     config: { statusIntervalMs: 30000, bodySegmentChars: 100 },
@@ -111,7 +111,7 @@ test('handlePrompt steers into the running turn, follows up when idle', async ()
   const bot = roundBot({
     async sendCard() { return 'm1' },
     async react(id, emoji) { reactions.push([id, emoji]) },
-  }, { getSessionId: () => 's1', getAgent: () => agent })
+  }, { getSessionId: () => 's1', getAgent: () => agent, isReadOnlyView: () => false })
   await bot.handlePrompt({ messageId: 'om_1', openId: 'ou_x', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', text: 'course correct' }, 'course correct')
   assert.equal(calls.length, 1)
   assert.equal(calls[0][0], 'steer') // running → join the current turn's next round
@@ -150,7 +150,7 @@ function resumeBot(lark, resumeListStyle) {
     },
     config: { statusIntervalMs: 30000, progressIntervalMs: 60000, bodySegmentChars: 3500, ...(resumeListStyle ? { resumeListStyle } : {}) },
     lark,
-    binder: {},
+    binder: { isReadOnlyView: () => false },
     store,
     allowlist: new Set(),
     now: () => 100_000,
@@ -405,6 +405,7 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
   const binder = {
     getSessionId: () => 'old-1',
     getAgent: () => undefined,
+    isReadOnlyView: () => false,
     detach: async () => {},
     async createNew(cwd, route) { createCalls.push([cwd, route]); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
   }

@@ -298,3 +298,36 @@ test('createNew guards the freshly minted session dir before create; failure rel
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// Read-only remote view: cold-refused sessions degrade to a persisted-log
+// watcher on the phone side; decoder injected — no real disk below the env.
+
+test('watchRemote backfills durable rows and detach clears the view', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  try {
+    const reg = makeRegistry()
+    const log = [
+      '{"type":"session","id":"sess-view"}',
+      '{"type":"user/message","seq":0,"data":{}}',
+      '{"type":"reasoning-chunks","seq0":1,"time0":1,"data":{"dt":[],"texts":["s"]}}',
+      '{"type":"assistant/message","seq":2,"data":{}}',
+      '{"type":"turn/end","seq":3,"data":{}}',
+    ].join('\n')
+    const binder = new SessionBinder(
+      makeGuardContext({ headers: [{ id: 'sess-view', cwd: '/proj/v' }], registry: reg }),
+      { viewerOptions: { intervalMs: 60_000, decode: async () => log } },
+    )
+    const seen = []
+    await binder.watchRemote('sess-view', events => seen.push(...events.map(e => `${e.type}:${e.seq}`)))
+    assert.deepEqual(seen, ['user/message:0', 'assistant/message:2', 'turn/end:3'],
+      'streaming deltas and identity rows skipped; final reply present')
+    assert.equal(binder.isReadOnlyView(), true)
+    await binder.detach()
+    assert.equal(binder.isReadOnlyView(), false)
+  } finally {
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
