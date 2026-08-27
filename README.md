@@ -167,6 +167,11 @@ npm test         # build + node --test (173 pure-logic unit tests)
 
 ## Boundaries
 
+- Single-writer guard: the cold arm of `/resume` and `/new` compete for a
+  `writer.lock` beside the session dir before touching disk — when another
+  process is driving that session, takeover is refused with the holder's pid
+  instead of silently forking the log into interleaved seq numbers; same-process
+  attach (shared agent instance) bypasses the lock and behaves as before
 - v1 is DM-only; group chats and the approval flow (the card layer is already
   built) are on the roadmap
 - After attaching, session history is not replayed; counters start from attach

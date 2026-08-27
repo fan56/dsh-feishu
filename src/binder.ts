@@ -20,12 +20,57 @@
  * race the live agent) — the attach arm covers that case.
  */
 
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { sessionLogRoot } from './resume-table.ts'
+import { WriterLockedError, acquireWriterLock, releaseOwnedWriterLock, type WriterLockHolder } from './writer-lock.ts'
 
 /** How the current binding came to be. */
 export type BindMode = 'attached' | 'resumed' | 'created'
+
+/**
+ * The header-shaped metadata needed to locate a session's storage directory
+ * (the jsonl backend only reads `id` and `cwd` out of it).
+ */
+interface HeaderLike {
+  id: unknown
+  cwd?: string | undefined
+}
+
+/** The persistence surface this module needs (structural). */
+interface PersistenceSeam {
+  list(signal?: AbortSignal): Promise<HeaderLike[]>
+}
+
+/**
+ * Project-directory name under which the jsonl backend groups a cwd's
+ * sessions — byte-identical port of upstream `projectKey()` in
+ * @deepseek-ai/dsh-session-persistence-jsonl. ANY divergence makes the lock
+ * land beside some decoy path instead of the real log; update only in sync
+ * with upstream.
+ */
+function projectKeyFor(cwd: string): string {
+  if (cwd.length === 0) throw new Error('cannot encode an empty project path')
+  let readable = ''
+  let separatorRun = false
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-'
+      separatorRun = true
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch
+      separatorRun = false
+    } else {
+      readable += `~${code.toString(16).toUpperCase().padStart(4, '0')}`
+      separatorRun = false
+    }
+  }
+  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+}
 
 /** Result of a successful bind. */
 export interface BindResult {
@@ -59,8 +104,26 @@ export class SessionBinder {
   /** Session id of the current binding (live or ours). */
   private sessionId: string | undefined
   private binding: Promise<BindResult> | undefined
+  /** Kept for the persistence seam that resolves header metadata. */
+  private readonly ctx: Context
+  /**
+   * Session dirs whose cross-process writer lock WE hold. Deliberately not
+   * cleared on rebind/detach: the agent stays live (adoptable) in this
+   * process's registry, so dropping the lock would reopen the exact
+   * two-process race the guard kills.
+   *
+   * Lifecycle caveat: locks flush at binder.dispose(). That is correct for
+   * process teardown, but NOT for "plugin fiber disposed while the dsh
+   * process keeps running" (e.g. a plugin-only reload that leaves created/
+   * resumed agents live in the registry) — during such a window the session
+   * is live here yet unlocked, and another process may cold-resume it.
+   * Accepted until lock lifecycle can ride agent lifetime instead of binder
+   * lifetime; never dispose this binder without the whole plugin/process.
+   */
+  private readonly heldLockDirs = new Set<string>()
 
   constructor(ctx: Context) {
+    this.ctx = ctx
     // ctx.agents is injected (plugin `inject`); the structural cast keeps
     // this module free of the full registry type.
     this.agents = (ctx as Context & { agents: AgentsRegistry }).agents
@@ -117,22 +180,34 @@ export class SessionBinder {
   private async createNewInner(cwd: string, selection?: ModelSelection): Promise<BindResult> {
     await this.releaseOwned()
     const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
-    const handle = await this.agents.create({
-      sessionId: SessionId(crypto.randomUUID()),
-      meta: { cwd },
-      // A bare create has NO route — the first request dies with "agent has
-      // no provider/model" (the TUI composes its default selection before
-      // creating; the bot inherits the previous session's route instead).
-      ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
-      setup: agentCtx => {
-        installModelSelection(agentCtx, selectionRef)
-      },
-    })
-    this.owned = handle
-    this.sessionId = String(handle.agent.session.id)
-    // The created session's model selection is bot-owned — handing the ref
-    // back lets the bot live-switch the route later (/model).
-    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
+    // Single-writer guard BEFORE agents.create: minting the UUID here (not
+    // inside agents.create) lets the header handed to the locator carry the
+    // exact id + cwd that create is about to persist (locate reads only
+    // those), making the pre-create acquisition race-free by construction.
+    const sessionId = crypto.randomUUID()
+    const restore = await this.acquireLockGuard({ id: sessionId, cwd })
+    try {
+      const handle = await this.agents.create({
+        sessionId: SessionId(sessionId),
+        meta: { cwd },
+        // A bare create has NO route — the first request dies with "agent has
+        // no provider/model" (the TUI composes its default selection before
+        // creating; the bot inherits the previous session's route instead).
+        ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
+        setup: agentCtx => {
+          installModelSelection(agentCtx, selectionRef)
+        },
+      })
+      this.owned = handle
+      this.sessionId = String(handle.agent.session.id)
+      // The created session's model selection is bot-owned — handing the ref
+      // back lets the bot live-switch the route later (/model).
+      return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
+    } catch (error) {
+      // Nothing was bound — do not keep a guard for a session we never made.
+      await this.discardAcquiredLock(restore)
+      throw error
+    }
   }
 
   /** Bind one session id (attach when live, else resume). */
@@ -171,15 +246,72 @@ export class SessionBinder {
     // A cold resume with no agentOptions can revive a route-less agent
     // (sessions created before the route fix have no request/header in
     // their log) — the caller resolves the route, we pass it through.
-    const handle = await this.agents.resume({
-      resumeSessionId: SessionId(id),
-      ...(agentOptions !== undefined ? { agentOptions } : {}),
-    })
-    // No dispose of `previous` (same multi-surface rule as releaseOwned):
-    // the old agent stays live and adoptable by other surfaces.
-    this.owned = handle
-    this.sessionId = id
-    return { sessionId: id, mode: 'resumed', agent: handle.agent }
+    // Single-writer guard FIRST: a registry miss does not mean the session
+    // is free — another process may be driving it right now, and resuming
+    // here would fork the log (interleaved seq numbers). Refuse loudly
+    // instead; adopt/attach flows above intentionally touch no lock.
+    const restore = await this.acquireLockGuard({ id })
+    try {
+      const handle = await this.agents.resume({
+        resumeSessionId: SessionId(id),
+        ...(agentOptions !== undefined ? { agentOptions } : {}),
+      })
+      // No dispose of `previous` (same multi-surface rule as releaseOwned):
+      // the old agent stays live and adoptable by other surfaces.
+      this.owned = handle
+      this.sessionId = id
+      return { sessionId: id, mode: 'resumed', agent: handle.agent }
+    } catch (error) {
+      // The resume failed — release just THIS acquisition so a transient
+      // failure cannot pin the session for the remaining process lifetime.
+      // Longer-held guards (previous bindings) are untouched here.
+      await this.discardAcquiredLock(restore)
+      throw error
+    }
+  }
+
+  /**
+   * Resolve the directory the jsonl backend owns for a session
+   * (`<sessionRoot>/<projectKey(cwd)>/<id>`) and acquire its cross-process
+   * writer lock. The lock must sit beside the persisted log so every process
+   * that could write that log competes on the same file. Without a known cwd
+   * (caller gave none, none persisted) the derivation would produce a decoy
+   * path the real writer never touches — skip rather than guard nothing
+   * (fail-open; the underlying resume/create would proceed unprotected,
+   * exactly as before this guard existed).
+   */
+  private async acquireLockGuard(meta: HeaderLike): Promise<{ dir: string } | undefined> {
+    const id = String(meta.id)
+    let cwd = typeof meta.cwd === 'string' && meta.cwd !== '' ? meta.cwd : undefined
+    if (cwd === undefined) {
+      // Every access below is best-effort by design: a host without this
+      // service (or an oddly-shaped mock) must degrade to "unguarded bind",
+      // never turn the guard itself into a resume breaker.
+      try {
+        const persistence = (this.ctx as Context & { get?(key: string): unknown }).get?.('sessionPersistence') as
+          | PersistenceSeam
+          | undefined
+        const stored = (await persistence?.list().catch(() => [])) ?? []
+        const header = stored.find(candidate => String(candidate.id) === id)
+        cwd = typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
+      } catch {
+        return undefined
+      }
+    }
+    if (cwd === undefined) return undefined
+
+    const dir = join(sessionLogRoot(), projectKeyFor(cwd), id)
+    const result = await acquireWriterLock(dir)
+    if (!result.ok) throw new WriterLockedError(result.holder)
+    this.heldLockDirs.add(dir)
+    return { dir }
+  }
+
+  /** Undo one guard that did NOT end up owning a binding. */
+  private async discardAcquiredLock(guard: { dir: string } | undefined): Promise<void> {
+    if (guard === undefined) return
+    this.heldLockDirs.delete(guard.dir)
+    await releaseOwnedWriterLock(guard.dir)
   }
 
   /** Drop the binding (detach). Only OUR handle is disposed — never an attached one. */
@@ -202,5 +334,12 @@ export class SessionBinder {
   /** Dispose everything we own (plugin teardown). */
   async dispose(): Promise<void> {
     await this.detach()
+    // Plugin teardown: release every writer lock this binder ESTABLISHED.
+    // Locks intentionally survive detach/rebind while their agent stays live
+    // in this process's registry (see heldLockDirs) — only shutdown drops them.
+    for (const dir of [...this.heldLockDirs]) {
+      this.heldLockDirs.delete(dir)
+      await releaseOwnedWriterLock(dir)
+    }
   }
 }

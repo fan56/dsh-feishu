@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { SessionBinder } from '../lib/binder.js'
 
@@ -40,6 +44,7 @@ function makeRegistry() {
         calls.create += 1
         calls.createMeta = options.meta
         calls.createOptions = options
+        if (calls.createShouldFail) throw new Error('boom')
         const agent = {
           id: String(options.sessionId),
           session: { id: String(options.sessionId) },
@@ -187,4 +192,109 @@ test('createNew inherits cwd into meta and keeps the previous handle alive', asy
   assert.equal(reg.calls.createMeta.cwd, '/tmp/work')
   // Handles stay live (adoptable) — nothing is ever disposed on rebind.
   assert.equal(reg.handles.filter(h => h.agent.disposed).length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Single-writer guard: cold arms compete on <sessionRoot>/<projectKey>/<id>/writer.lock.
+// Every test here points DSH_SESSION_ROOT at a temp dir — the guard must
+// never mkdir under the real ~/.dsh during tests.
+
+function makeGuardContext({ headers = [], registry }) {
+  return {
+    agents: registry.agents,
+    get(key) {
+      if (key !== 'sessionPersistence') return undefined
+      return { list: async () => headers }
+    },
+  }
+}
+
+test('cold resume is refused when another live process holds the session writer-lock', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-guard-'))
+  process.env.DSH_SESSION_ROOT = root
+  const foreign = spawn('sleep', ['30'], { stdio: 'ignore' })
+  try {
+    const sessDir = join(root, '--proj-x--', 'sess-locked')
+    mkdirSync(sessDir, { recursive: true })
+    writeFileSync(join(sessDir, 'writer.lock'), JSON.stringify({ pid: foreign.pid, createdAt: '2026-08-27T00:00:00Z', holder: 'tui' }))
+    const reg = makeRegistry()
+    const binder = new SessionBinder(makeGuardContext({
+      headers: [{ id: 'sess-locked', cwd: '/proj/x' }],
+      registry: reg,
+    }))
+    await assert.rejects(() => binder.bind('sess-locked'), /locked by a live process/)
+    // Refusal happens BEFORE any resume attempt — no second writer can exist.
+    assert.deepEqual(reg.calls.resume, [])
+  } finally {
+    foreign.kill('SIGKILL')
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cold resume acquires and holds the lock; binder dispose releases it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-guard-'))
+  process.env.DSH_SESSION_ROOT = root
+  try {
+    const reg = makeRegistry()
+    const binder = new SessionBinder(makeGuardContext({
+      headers: [{ id: 'sess-free', cwd: '/proj/y' }],
+      registry: reg,
+    }))
+    const result = await binder.bind('sess-free')
+    assert.equal(result.mode, 'resumed')
+    const lockedDir = join(root, '--proj-y--', 'sess-free')
+    assert.equal(existsSync(join(lockedDir, 'writer.lock')), true)
+    assert.equal(JSON.parse(readFileSync(join(lockedDir, 'writer.lock'), 'utf8')).pid, process.pid)
+    await binder.dispose()
+    assert.equal(existsSync(join(lockedDir, 'writer.lock')), false)
+  } finally {
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the attach arm never touches locks (shared-handle mode must stay frictionless)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-guard-'))
+  process.env.DSH_SESSION_ROOT = root
+  const foreign = spawn('sleep', ['30'], { stdio: 'ignore' })
+  try {
+    const liveSessDir = join(root, '--proj-z--', 'sess-live')
+    mkdirSync(liveSessDir, { recursive: true })
+    writeFileSync(
+      join(liveSessDir, 'writer.lock'),
+      JSON.stringify({ pid: foreign.pid, createdAt: '', holder: 'feishu' }),
+    )
+    const reg = makeRegistry()
+    reg.addLive('sess-live')
+    const binder = new SessionBinder(makeGuardContext({ registry: reg }))
+    const result = await binder.bind('sess-live')
+    assert.equal(result.mode, 'attached')
+    // The foreign lock file is untouched by the attach.
+    assert.equal(JSON.parse(readFileSync(join(root, '--proj-z--', 'sess-live', 'writer.lock'), 'utf8')).pid, foreign.pid)
+  } finally {
+    foreign.kill('SIGKILL')
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('createNew guards the freshly minted session dir before create; failure releases the guard', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-guard-'))
+  process.env.DSH_SESSION_ROOT = root
+  try {
+    const reg = makeRegistry()
+    reg.calls.createShouldFail = true
+    const binder = new SessionBinder({ agents: reg.agents })
+    await assert.rejects(() => binder.createNew('/proj/new'), /boom/)
+    // Create failed → the guard for that never-made session was discarded
+    // immediately: no lock residue, no log — a retry starts clean.
+    const sessionDirs = readdirSync(join(root, '--proj-new--'))
+    assert.equal(sessionDirs.includes('writer.lock'), false)
+    assert.equal(sessionDirs.includes('session.jsonl'), false)
+    reg.calls.createShouldFail = false
+  } finally {
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
 })
