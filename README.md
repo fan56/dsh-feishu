@@ -12,6 +12,10 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 - **Interactive ask-user cards**: when the agent calls `ask_user_question`, your phone gets an **interactive card** (dropdown / multi-select / text input + submit); the answer flows straight back. Pair it with [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) for **both desktop and phone prompting — first answer wins**
 - **Interactive /model**: pick a model on the phone, grouped by provider —
   bot-created sessions switch live
+- **Interactive pickers for the desktop selectors**: `/think` (reasoning
+  effort), `/permission` (permission preset), `/select-skill` (skill
+  activation) and `/profile-switch` (model profiles) render as one-tap
+  selection cards on the phone
 - **Interactive /resume**: pick a session from the card (dropdown + enter), or just reply `/resume N`
 - **`/new` starts a fresh session** that inherits the previous one's working directory, model and reasoning effort
 - **Phone dispatch**: messages sent mid-turn default to **steer** (they join the running turn — course corrections land immediately)
@@ -121,8 +125,12 @@ text to dispatch work.
 | `/status` | Binding and run status |
 | `/sub N` | Inspect the Nth subagent |
 | `/model` | **Interactive model picker** (two steps: pick a provider → pick one of its models); live-switches bot-created sessions, otherwise saved as the phone default (applies to /new) |
+| `/think` | **Interactive reasoning-effort picker** for the current model (adapter-provided efforts + provider default); live-switches bot-created sessions, otherwise saved as the phone default |
+| `/permission` | **Interactive permission-preset picker**; the pick is replayed as `/permission <name>` through the dsh command registry |
+| `/select-skill` | **Interactive skill picker** (user-invocable skills of the bound workspace); activation rides dsh's native `/name` skill gesture |
+| `/profile-switch` | **Interactive model-profile switcher** over `$DSH_HOME/model-profiles.json`; applies the profile's provider/model/effort (agent frontmatter updates remain desktop-only) |
 | `/feishu-plugin think on\|off` | Toggle the reasoning tail in the activity section (default on) |
-| `/goal` `/dcp` `/export` `/agents` `/subagents` | Not adapted for the phone yet (interactive desktop panels) — replies point to the desktop |
+| `/preset` `/skills` `/goal` `/dcp` `/export` `/agents` `/subagents` | Not adapted for the phone yet (interactive desktop panels) — replies point to the desktop |
 | Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |
 
 Typical flow:
@@ -162,7 +170,7 @@ vars > the credentials service.
 
 ```bash
 npm run check    # tsc --noEmit
-npm test         # build + node --test (173 pure-logic unit tests)
+npm test         # build + node --test (230+ pure-logic unit tests)
 ```
 
 ## Boundaries

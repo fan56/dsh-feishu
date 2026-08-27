@@ -16,6 +16,9 @@
   答完即回传；配 [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) 可与
   桌面 TUI **双端同弹、先答先得**
 - **交互式 /model**：手机上按 provider 分类选模型，bot 建的会话实时切换
+- **桌面选择器上手机**：`/think`（思考档位）、`/permission`（权限 preset）、
+  `/select-skill`（技能激活）、`/profile-switch`（模型 profile）——桌面端的选择器
+  在手机上变成一键点选卡
 - **交互式 /resume**：会话列表卡片上直接**下拉选择 → 点进入**，也可以回复 `/resume N`
 - **`/new` 开新会话**：自动继承旧会话的工作目录、模型和推理档位
 - **手机派活**：turn 进行中发消息默认 **steer**（并入当前 turn，纠偏即时生效）
@@ -120,8 +123,13 @@ dsh --profile <你的 profile>
 | `/stop` | 停止当前 turn（排队消息保留） |
 | `/status` | 绑定与运行状态 |
 | `/sub N` | 查看第 N 个子代理近况 |
+| `/model` | **交互式模型选择**（两步：选 provider → 选该 provider 下的模型）；bot 建的会话实时切换，否则存为手机默认（/new 生效） |
+| `/think` | **交互式思考档位选择**（当前模型的推理档位 + provider 默认）；bot 建的会话实时切换，否则存为手机默认 |
+| `/permission` | **交互式权限 preset 选择**；选中后以 `/permission <name>` 走 dsh 命令注册表执行 |
+| `/select-skill` | **交互式技能选择**（当前工作区用户可调用的技能）；激活走 dsh 原生 `/name` 技能手势 |
+| `/profile-switch` | **交互式模型 profile 切换**（读 `$DSH_HOME/model-profiles.json`）；应用该 profile 的 provider/model/effort（agent frontmatter 更新仍在电脑端） |
 | `/feishu-plugin think on\|off` | 开关活动区的思考尾行（默认开） |
-| `/goal` `/dcp` `/export` `/agents` `/subagents` | 暂未适配手机（这些命令在桌面是交互面板）——回复会引导去电脑端 |
+| `/preset` `/skills` `/goal` `/dcp` `/export` `/agents` `/subagents` | 暂未适配手机（这些命令在桌面是交互面板）——回复会引导去电脑端 |
 | 其它任何文本 | 作为 prompt 注入当前会话（运行中则 steer 进当前 turn） |
 
 典型流程：
@@ -160,7 +168,7 @@ dsh --profile <你的 profile>
 
 ```bash
 npm run check    # tsc --noEmit
-npm test         # 构建 + node --test（173 个纯逻辑单测）
+npm test         # 构建 + node --test（230+ 个纯逻辑单测）
 ```
 
 ## 边界
