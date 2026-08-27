@@ -443,11 +443,18 @@ export class FeishuBot {
           const since = formatHolderSince(error.holder.createdAt)
           await this.binder.watchRemote(row.sessionId, async events => {
             for (const event of events) {
-              // Route through the normal firehose handler with a stub session
-              // header matching the bound id: turn cards, tool rows and todo
-              // updates all reuse the live pipeline verbatim.
+              // Stub session header matching the bound id — turn cards,
+              // tool rows and todo updates reuse the live pipeline verbatim.
               this.onSessionEvent({ id: row.sessionId } as Session, event as unknown as SessionEvent)
             }
+          })
+          // Queued follow-ups drive an automatic takeover at the next idle.
+          this.binder.setOnPromotable(async () => {
+            await this.store.update({ boundSessionId: row.sessionId })
+            this.resetRunView()
+            this.backfillRoute()
+            this.binder.drainOutboxIntoAgent()
+            await this.reply('已自动接管该会话，排队消息已发送；本轮起由此端驱动。')
           })
           await this.store.update({ boundSessionId: row.sessionId })
           await this.reply(

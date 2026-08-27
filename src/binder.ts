@@ -23,6 +23,7 @@
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionLogRoot } from './resume-table.ts'
 import { RemoteSessionTail } from './remote-tail.ts'
@@ -81,9 +82,22 @@ export class SessionBinder {
   /** Kept for the persistence seam that resolves header metadata. */
   private readonly ctx: Context
   /** Decoder/interval seam for the read-only remote view (tests inject). */
-  private readonly viewerOptions: { intervalMs?: number; decode?(file: string): Promise<string> }
+  private readonly viewerOptions: { intervalMs?: number; decode?(file: string): Promise<string>; promoteIntervalMs?: number }
+  private hook: ((id: string) => Promise<void>) | undefined
+  /** Registered by the host bot AFTER construction (needs its private UI). */
+  setOnPromotable(hook: (id: string) => Promise<void>): void {
+    this.hook = hook
+  }
   /** Active read-only view (another process drives the session). */
   private remoteTail: RemoteSessionTail | undefined
+  /** Id of the session watched right now. */
+  private remoteWatchId: string | undefined
+  /** Follow-ups typed while watching — sent once promotion wins the lock. */
+  private readonly outbox: string[] = []
+  private promotingRemote = false
+  private promoteTimer: ReturnType<typeof setInterval> | undefined
+  /** Writer lock taken for the CURRENTLY bound local agent. */
+  private driveLock: { dir: string } | undefined
   /**
    * Session dirs whose cross-process writer lock WE hold. Deliberately not
    * cleared on rebind/detach: the agent stays live (adoptable) in this
@@ -102,15 +116,101 @@ export class SessionBinder {
 
   constructor(ctx: Context, options: { viewerOptions?: { intervalMs?: number; decode?(file: string): Promise<string> } } = {}) {
     this.ctx = ctx
-    this.viewerOptions = options.viewerOptions ?? {}
+    this.viewerOptions = { promoteIntervalMs: 1000, ...(options.viewerOptions ?? {}) }
+    this.hook = (options as { onPromotable?: (id: string) => Promise<void> }).onPromotable
     // ctx.agents is injected (plugin `inject`); the structural cast keeps
     // this module free of the full registry type.
     this.agents = (ctx as Context & { agents: AgentsRegistry }).agents
   }
 
-  /** While a remote watch is active, the phone is a viewer, not a driver. */
+  /** While a remote watch is active the phone queues instead of driving. */
   isReadOnlyView(): boolean {
     return this.remoteTail !== undefined
+  }
+
+  queueRemoteFollowup(text: string): void {
+    this.outbox.push(text)
+  }
+
+  takeOutbox(): string[] {
+    return this.outbox.splice(0)
+  }
+
+  hasOutbox(): boolean {
+    return this.outbox.length > 0
+  }
+
+  /**
+   * Contract "idle releases the write": called by the bot when the bound
+   * driver's turn ends with nothing queued — drop our writer lock so the
+   * next inputting surface takes it. The next phone message re-takes the
+   * lock through its normal bind/drive path (or degrades to watching).
+   */
+  maybeReleaseIdleLock(): void {
+    if (this.hasOutbox() || this.remoteTail !== undefined) return
+    const lock = this.driveLock
+    if (lock === undefined) return
+    this.driveLock = undefined
+    this.heldLockDirs.delete(lock.dir)
+    void releaseOwnedWriterLock(lock.dir)
+  }
+
+  private opChain: Promise<void> = Promise.resolve()
+  private runExclusive<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.opChain.then(op, op)
+    this.opChain = next.then(() => undefined, () => undefined)
+    return next
+  }
+
+  private startPromotePoll(watchId: string): void {
+    if (this.promoteTimer !== undefined) return
+    this.promoteTimer = setInterval(() => void this.runExclusive(async () => {
+      await this.maybePromoteRemoteInner(watchId)
+    }), this.viewerOptions.promoteIntervalMs ?? 1000)
+  }
+
+  private stopPromotePoll(): void {
+    if (this.promoteTimer === undefined) return
+    clearInterval(this.promoteTimer)
+    this.promoteTimer = undefined
+  }
+
+  /** Queue non-empty + lock winnable ⇒ take over via registered hook. */
+  private async maybePromoteRemoteInner(watchId: string): Promise<void> {
+    if (this.promotingRemote || !this.hasOutbox()) return
+    const hook = this.hook
+    if (hook === undefined) return
+    this.promotingRemote = true
+    try {
+      // Stop spectating FIRST so bot-side folds during binding stay sane.
+      await this.stopWatchRemote()
+      await this.acquireColdGuardFor(watchId) // throws while another holder lives
+      this.driveLock = undefined // rebound below re-establishes it
+      const bound = await this.bind(watchId)
+      this.driveLock = bound.mode === 'attached' ? undefined : this.driveLock
+    } catch {
+      this.promotingRemote = false
+      try { await this.watchRemoteInner(watchId, () => {}) } catch { /* log gone */ }
+      return
+    }
+    this.promotingRemote = false
+  }
+
+  /** Send the drained follow-ups into the freshly bound local agent. */
+  drainOutboxIntoAgent(): void {
+    const agent = this.getAgent()
+    if (agent === undefined) return
+    for (const text of this.takeOutbox()) {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'user' },
+      }))
+    }
+  }
+
+  private async acquireColdGuardFor(sessionId: string): Promise<void> {
+    const guard = await this.acquireLockGuard({ id: sessionId })
+    this.driveLock = guard ?? this.driveLock
   }
 
   /**
@@ -119,7 +219,14 @@ export class SessionBinder {
    * from its persisted log instead. Durable rows only — every turn's final
    * assistant message arrives (poll-delayed, streaming detail omitted).
    */
-  async watchRemote(
+  watchRemote(
+    sessionId: string,
+    onEvents: (events: Array<Record<string, unknown>>) => void,
+  ): Promise<void> {
+    return this.runExclusive(() => this.watchRemoteInner(sessionId, onEvents))
+  }
+
+  private async watchRemoteInner(
     sessionId: string,
     onEvents: (events: Array<Record<string, unknown>>) => void,
   ): Promise<void> {
@@ -137,9 +244,12 @@ export class SessionBinder {
     this.remoteTail = tail
     await tail.tickOnce() // deterministic backfill of stored history
     tail.start()
+    if (this.hasOutbox()) this.startPromotePoll(sessionId)
   }
 
   private async stopWatchRemote(): Promise<void> {
+    this.stopPromotePoll()
+    this.remoteWatchId = undefined
     if (this.remoteTail === undefined) return
     this.remoteTail.stop()
     this.remoteTail = undefined
@@ -227,6 +337,7 @@ export class SessionBinder {
         },
       })
       this.owned = handle
+      this.driveLock = restore
       this.sessionId = String(handle.agent.session.id)
       // The created session's model selection is bot-owned — handing the ref
       // back lets the bot live-switch the route later (/model).
@@ -287,6 +398,7 @@ export class SessionBinder {
       // No dispose of `previous` (same multi-surface rule as releaseOwned):
       // the old agent stays live and adoptable by other surfaces.
       this.owned = handle
+      this.driveLock = restore
       this.sessionId = id
       return { sessionId: id, mode: 'resumed', agent: handle.agent }
     } catch (error) {
