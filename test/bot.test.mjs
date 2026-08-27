@@ -667,6 +667,51 @@ test('/new route resolution: previous log wins; settings default is the fallback
   assert.equal(createCalls[2], undefined)
 })
 
+test('/new honors the stored phone default (phoneModel) between the log and the settings default', async () => {
+  const createCalls = []
+  const mkBot = (phoneModel, events) => {
+    const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined, phoneModel }
+    return new FeishuBot({
+      ctx: {
+        logger: { info() {}, warn() {}, error() {} },
+        get: key => key === 'sessions'
+          ? { get: () => ({ events }) }
+          : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined,
+      },
+      config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+      lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+      binder: {
+        getSessionId: () => 'old-1',
+        getAgent: () => undefined,
+        detach: async () => {},
+        async createNew(cwd, route) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+      },
+      store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+      allowlist: new Set(['ou_op']),
+      now: () => 1000,
+    })
+  }
+  const noRouteLog = []
+
+  // 1) No previous route + a stored phone default → it wins over the
+  //    settings default, effort included (the /model, /think and
+  //    /profile-switch promise "used by /new" is now real).
+  const withPhone = mkBot({ provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' }, noRouteLog)
+  await withPhone.handleNew()
+  assert.deepEqual(createCalls[0], { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
+
+  // 2) No phoneModel → the settings default kicks in as before.
+  const withoutPhone = mkBot(undefined, noRouteLog)
+  await withoutPhone.handleNew()
+  assert.deepEqual(createCalls[1], { provider: 'fallback', model: 'default-m' })
+
+  // 3) Continuity still wins: a routed previous log beats the phone default.
+  const routedLog = [{ type: 'request/header', data: { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha' } } }, time: 1, seq: 1 }]
+  const logWins = mkBot({ provider: 'zhipu', model: 'glm-4.7' }, routedLog)
+  await logWins.handleNew()
+  assert.deepEqual(createCalls[2], { provider: 'openrouter', model: 'stealth/ox-alpha' })
+})
+
 // ------------------------------------------- cold-resume route resolution --
 
 test('cold resume passes the target session log route; default model is the fallback', async () => {
@@ -764,7 +809,9 @@ function modelBot(llm, selectionRef, bound = 'fresh-1') {
       async createNew() { throw new Error('not used') },
     },
     store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
-    allowlist: new Set(),
+    // Card callbacks gate on the operator allowlist — the fixture's submits
+    // ride ou_op (non-operator silence is covered by its own test below).
+    allowlist: new Set(['ou_op']),
     now: () => 1000,
   })
   bot.selectionRefs.set(bound, selectionRef)
@@ -842,4 +889,61 @@ test('/model without an llm service replies with a pointer', async () => {
   const bot = askBot({ async sendCard(_c, card) { sends.push(card); return 'm1' } })
   await bot.handleModel()
   assert.match(JSON.stringify(sends[0]), /没有 llm 服务/)
+})
+
+test('model card callbacks from non-operators are silent no-ops', async () => {
+  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
+  const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
+  const { bot, sends, patches, state } = modelBot(llm, ref)
+  await bot.handleModel() // step 1 out: provider list (1 send)
+  const flowId = bot.modelFlow.id
+
+  // 1) A stranger taps the provider list → stage 2 never opens for them.
+  bot.onCardAction({
+    operator: { open_id: 'ou_stranger' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_model_provider', flow_id: flowId }, form_value: { provider: 'zhipu' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  assert.equal(bot.modelFlow.provider, undefined)
+  assert.equal(sends.length, 1)
+
+  // 2) The operator picks the provider; a stranger taps the model submit →
+  //    the flow stays armed, nothing settles, nothing is stored.
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId })
+  const sendsAfterPick = sends.length
+  const patchesBefore = patches.length
+  bot.onCardAction({
+    operator: { open_id: 'ou_stranger' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_model_submit', flow_id: flowId, provider: 'zhipu' }, form_value: { model: 'glm-4.7' } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  assert.notEqual(bot.modelFlow, undefined) // handleModelSubmitted would have cleared it
+  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.6' })
+  assert.equal(state.phoneModel, undefined)
+  assert.equal(patches.length, patchesBefore)
+  assert.equal(sends.length, sendsAfterPick)
+})
+
+test('resume picker submit from a non-operator is a silent no-op', async () => {
+  const sends = []
+  const patches = []
+  const bot = askBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard(id, card) { patches.push({ id, card }); return true },
+  })
+  bot.pendingPicker = {
+    id: 'p1',
+    rows: [{ index: 1, sessionId: 'resume-target', preview: 'work session', updatedAt: 1, mine: true }],
+    expiresAt: 10 ** 12,
+  }
+  bot.onCardAction({
+    operator: { open_id: 'ou_stranger' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_resume', picker_id: 'p1' }, form_value: { session: 1 } },
+  })
+  await new Promise(r => setTimeout(r, 5))
+  // Nothing settled: the picker survives untouched, no bind attempt, no reply.
+  assert.equal(bot.pendingPicker.id, 'p1')
+  assert.equal(bot.binder.getSessionId(), 's1') // binding unchanged
+  assert.equal(sends.length, 0)
+  assert.equal(patches.length, 0)
 })

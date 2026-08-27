@@ -123,6 +123,12 @@ function isDuplicateProviderError(error: unknown): boolean {
   return (error as { code?: string }).code === 'DUPLICATE_PROVIDER'
 }
 
+/** The operator open_id a card.action payload carries, when well-formed. */
+function cardOperatorOf(data: unknown): string | undefined {
+  const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
+  return typeof operator === 'string' ? operator : undefined
+}
+
 /** Localize the lock holder's timestamp for the phone card; empty stays empty. */
 function formatHolderSince(iso: string): string {
   if (iso === '') return ''
@@ -540,7 +546,10 @@ export class FeishuBot {
     // provider/model", Round 0 ❌ in live use). Resolution order:
     // 1. the previous session's own selection incl. reasoning effort
     //    (continuity: same model + effort, fresh context) from its log;
-    // 2. the settings' default model via ctx.agentDefaultModel — the same
+    // 2. the phone's own stored default (provider/model/effort saved by
+    //    /model, /think or /profile-switch on the phone) — the operator's
+    //    explicit pick beats the settings default;
+    // 3. the settings' default model via ctx.agentDefaultModel — the same
     //    fallback the TUI seeds from before creating.
     let selection: ModelSelection | undefined
     if (previousId !== undefined) {
@@ -556,6 +565,16 @@ export class FeishuBot {
             model: backfill.model,
             ...(backfill.reasoningEffort === undefined ? {} : { reasoningEffort: backfill.reasoningEffort as ModelSelection['reasoningEffort'] }),
           }
+        }
+      }
+    }
+    if (selection === undefined) {
+      const phone = this.store.get().phoneModel
+      if (phone?.provider !== undefined && phone?.model !== undefined) {
+        selection = {
+          provider: phone.provider,
+          model: phone.model,
+          ...(phone.reasoningEffort === undefined ? {} : { reasoningEffort: phone.reasoningEffort as ModelSelection['reasoningEffort'] }),
         }
       }
     }
@@ -1306,18 +1325,25 @@ export class FeishuBot {
    * operators may answer.
    */
   onCardAction(data: unknown): void {
+    // Resume / model callbacks gate on the operator allowlist too — same
+    // contract as the ask and selector branches below: non-operators (and
+    // payloads without an operator) are silent no-ops, never errors.
+    const operator = cardOperatorOf(data)
     const resume = parseResumeAction(data)
     if (resume !== undefined) {
+      if (!isOperator(operator, this.allowlist)) return
       void this.chain(() => this.handleResumeAction(resume))
       return
     }
     const modelProvider = parseModelProviderAction(data)
     if (modelProvider !== undefined) {
+      if (!isOperator(operator, this.allowlist)) return
       void this.chain(() => this.handleModelProviderPicked(modelProvider))
       return
     }
     const modelSubmit = parseModelSubmitAction(data)
     if (modelSubmit !== undefined) {
+      if (!isOperator(operator, this.allowlist)) return
       void this.chain(() => this.handleModelSubmitted(modelSubmit))
       return
     }
@@ -1328,14 +1354,12 @@ export class FeishuBot {
       // branch is only reachable for payloads none of them claimed.
       const selector = parseSelectorAction(data)
       if (selector === undefined) return
-      const selectorOperator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
-      this.selectors.handleAction(selector, typeof selectorOperator === 'string' ? selectorOperator : undefined)
+      this.selectors.handleAction(selector, operator)
       return
     }
     const entry = this.pendingAsks.get(parsed.questionId)
     if (entry === undefined) return
-    const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
-    if (typeof operator !== 'string' || !isOperator(operator, this.allowlist)) return
+    if (!isOperator(operator, this.allowlist)) return
     const result = parseAskFormValue(entry.questions, parsed.formValue)
     if (result.kind === 'missing') {
       void this.reply(`还有未回答的问题：${result.missing.join('、')}`)
@@ -1354,9 +1378,14 @@ export class FeishuBot {
 
   /**
    * Present a generic selection card in a chat and resolve with the
-   * operator's outcome (picked / cancelled / expired). The adapter layer
-   * (next phase) calls this; submits arrive via onCardAction →
-   * SelectorManager, and resetRunView cancels flows pending on a rebind.
+   * operator's outcome (picked / cancelled / expired). Submits arrive via
+   * onCardAction → SelectorManager, and resetRunView cancels flows pending
+   * on a rebind.
+   *
+   * INVARIANT: never call from inside a card-chain task (a chain(() => …)
+   * callback) — sendCard enqueues a NEW task on that same chain, so awaiting
+   * the outcome from within the chain dead-locks. Callers must run at the
+   * top level (command dispatch) or on their own async context.
    */
   presentSelection(chatId: string, spec: SelectorSpec): Promise<SelectorOutcome> {
     return this.selectors.present(chatId, spec)

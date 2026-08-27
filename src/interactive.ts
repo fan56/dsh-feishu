@@ -203,7 +203,7 @@ export async function runPermissionCommand(host: InteractiveHost): Promise<void>
 // -------------------------------------------------------- /select-skill --
 
 /** select_static option cap — past it the card truncates (selector FW). */
-const SKILL_OPTION_CAP = 50
+const SELECTOR_OPTION_CAP = 50
 
 /**
  * /select-skill — pick a user-invocable skill and activate it by injecting
@@ -247,13 +247,13 @@ export async function runSelectSkillCommand(host: InteractiveHost): Promise<void
     await host.reply('当前工作区没有可供调用的技能。')
     return
   }
-  const truncated = invocable.length > SKILL_OPTION_CAP
+  const truncated = invocable.length > SELECTOR_OPTION_CAP
   const outcome = await host.presentSelection(chatId, {
     title: '选择技能',
-    description: truncated ? `共 ${invocable.length} 个技能，仅显示前 ${SKILL_OPTION_CAP} 个。` : undefined,
+    description: truncated ? `共 ${invocable.length} 个技能，仅显示前 ${SELECTOR_OPTION_CAP} 个。` : undefined,
     mode: 'select',
     submitLabel: '激活',
-    options: invocable.slice(0, SKILL_OPTION_CAP).map(skill => ({
+    options: invocable.slice(0, SELECTOR_OPTION_CAP).map(skill => ({
       value: skill.name,
       label: `/${skill.name}`,
       ...(skill.description === undefined ? {} : { description: skill.description }),
@@ -374,11 +374,18 @@ export async function runProfileSwitchCommand(host: InteractiveHost, path: strin
     await host.reply('profile 都没有配置默认模型，无可切换项（可在电脑端 /profile-cfg 配置）。')
     return
   }
+  // Same truncation note as /select-skill: past the select_static cap the
+  // selector card silently cuts options — say so instead.
+  const truncated = options.length > SELECTOR_OPTION_CAP
+  const notes = [
+    ...(doc.current === undefined ? [] : [`当前：${doc.current}`]),
+    ...(truncated ? [`共 ${options.length} 个 profile，仅显示前 ${SELECTOR_OPTION_CAP} 个。`] : []),
+  ]
   const outcome = await host.presentSelection(chatId, {
     title: '切换模型 Profile',
-    ...(doc.current === undefined ? {} : { description: `当前：${doc.current}` }),
+    ...(notes.length === 0 ? {} : { description: notes.join(' · ') }),
     mode: 'select',
-    options,
+    options: options.slice(0, SELECTOR_OPTION_CAP),
   })
   if (outcome.status !== 'picked') return
   const picked = doc.profiles.find(profile => profile.name === outcome.value)

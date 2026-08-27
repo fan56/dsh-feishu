@@ -89,6 +89,11 @@ export class SelectorManager {
    * Send a selector card and resolve with the operator's outcome. Rejects
    * only when the card cannot be delivered (the flow is removed then); a
    * pick, a cancel or the TTL expiry all resolve normally.
+   *
+   * INVARIANT: never call from inside the caller's own card-op chain (if it
+   * serializes on the same sendCard/patchCard gateway) — sendCard enqueues a
+   * new task there, so awaiting this promise from within that chain
+   * dead-locks.
    */
   present(chatId: string, spec: SelectorSpec): Promise<SelectorOutcome> {
     return new Promise<SelectorOutcome>((resolve, reject) => {
