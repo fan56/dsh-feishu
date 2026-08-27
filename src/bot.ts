@@ -46,6 +46,8 @@ import {
   type ModelProviderInfo,
 } from './model-card.ts'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { SelectorManager, type SelectorOutcome } from './selector.ts'
+import { parseSelectorAction, type SelectorSpec } from './selector-card.ts'
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
@@ -170,6 +172,8 @@ export class FeishuBot {
     providerCardMessageId: string | undefined
     cardMessageId: string | undefined
   } | undefined
+  /** Generic selection-card flows (selector FW; driven via presentSelection). */
+  private readonly selectors: SelectorManager
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -187,6 +191,14 @@ export class FeishuBot {
     this.store = deps.store
     this.allowlist = deps.allowlist
     this.now = deps.now ?? Date.now
+    this.selectors = new SelectorManager({
+      // Card ops ride the same serial chain as every other card lifecycle
+      // step so selector sends/patches never interleave with a settle.
+      sendCard: (chatId, card) => this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)),
+      patchCard: (messageId, card) => this.chain(() => this.lark.patchCard(messageId, card as Schema2Card)),
+      allowlisted: openId => isOperator(openId, this.allowlist),
+      logger: this.ctx.logger,
+    })
   }
 
   /** Wire subscriptions, start the beat, open the Lark connection. */
@@ -962,6 +974,9 @@ export class FeishuBot {
     this.modelFlow = undefined
     this.turnOriginMessageId = undefined
     this.routeBackfilledFor = undefined
+    // Pending selection cards die with the old view — the new binding must
+    // not inherit submits meant for it.
+    this.selectors.cancelAll('run view reset')
   }
 
   // ------------------------------------------------------------- /model --
@@ -1163,8 +1178,9 @@ export class FeishuBot {
   }
 
   /**
-   * card.action.trigger entry (ask-card submits). Unknown actions and
-   * foreign cards are ignored; only allowlisted operators may answer.
+   * card.action.trigger entry (ask-card submits, selector FW submits).
+   * Unknown actions and foreign cards are ignored; only allowlisted
+   * operators may answer.
    */
   onCardAction(data: unknown): void {
     const resume = parseResumeAction(data)
@@ -1183,7 +1199,16 @@ export class FeishuBot {
       return
     }
     const parsed = parseAskAction(data)
-    if (parsed === undefined) return
+    if (parsed === undefined) {
+      // Selector FW submits ride LAST in the parser chain — the marker is
+      // mutually exclusive with every parser above (ask included), so this
+      // branch is only reachable for payloads none of them claimed.
+      const selector = parseSelectorAction(data)
+      if (selector === undefined) return
+      const selectorOperator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
+      this.selectors.handleAction(selector, typeof selectorOperator === 'string' ? selectorOperator : undefined)
+      return
+    }
     const entry = this.pendingAsks.get(parsed.questionId)
     if (entry === undefined) return
     const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
@@ -1200,6 +1225,18 @@ export class FeishuBot {
       }
       entry.resolve({ answers: result.answers })
     })
+  }
+
+  // ---------------------------------------------------- selector framework --
+
+  /**
+   * Present a generic selection card in a chat and resolve with the
+   * operator's outcome (picked / cancelled / expired). The adapter layer
+   * (next phase) calls this; submits arrive via onCardAction →
+   * SelectorManager, and resetRunView cancels flows pending on a rebind.
+   */
+  presentSelection(chatId: string, spec: SelectorSpec): Promise<SelectorOutcome> {
+    return this.selectors.present(chatId, spec)
   }
 
   // --------------------------------------------------------------- /status --
