@@ -267,6 +267,18 @@ export class SessionBinder {
     }
   }
 
+  /**
+   * Resolve the directory the jsonl backend owns for a session id — the same
+   * derivation the lock guard and the remote view use (`<sessionRoot>/
+   * <projectKey(cwd)>/<id>`); undefined when the session's cwd is unknown
+   * (a derived path would be a decoy the real writer never touches).
+   */
+  async sessionDirOf(sessionId: string): Promise<string | undefined> {
+    const cwd = await this.headerCwdOf(sessionId)
+    if (cwd === undefined) return undefined
+    return join(sessionLogRoot(), projectKeyFor(cwd), sessionId)
+  }
+
   /** The bound session id, when bound. */
   getSessionId(): string | undefined {
     return this.sessionId
