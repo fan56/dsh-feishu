@@ -25,6 +25,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { isOperator } from './allowlist.ts'
 import {
@@ -34,7 +35,8 @@ import {
   parseAskAction,
   parseAskFormValue,
 } from './ask-card.ts'
-import { WriterLockedError } from './writer-lock.ts'
+import { acquireWriterLock, releaseOwnedWriterLock, WriterLockedError, type WriterLockAcquisition } from './writer-lock.ts'
+import { defaultRepairBackend, type RepairBackend } from './log-repair.ts'
 import {
   buildModelPickCard,
   buildModelProviderCard,
@@ -76,7 +78,7 @@ import {
   type RunState,
   subagentRows,
 } from './run-state.ts'
-import type { SessionBinder } from './binder.ts'
+import type { BindResult, SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
 import { clipLine, segmentText } from './text.ts'
 
@@ -153,6 +155,8 @@ export interface BotDeps {
   readonly allowlist: ReadonlySet<string>
   /** Clock seam for deterministic tests. */
   readonly now?: () => number
+  /** Corrupt-log repair seam (tests inject a fake; default spawns the tool). */
+  readonly repair?: RepairBackend
 }
 
 export class FeishuBot {
@@ -163,6 +167,7 @@ export class FeishuBot {
   private readonly store: StateStore
   private readonly allowlist: ReadonlySet<string>
   private readonly now: () => number
+  private readonly repair: RepairBackend
 
   private readonly runState: RunState = initialRunState()
   /** Serializes card operations (open/patch/settle/finalize) in event order. */
@@ -189,6 +194,8 @@ export class FeishuBot {
   } | undefined
   /** Generic selection-card flows (selector FW; driven via presentSelection). */
   private readonly selectors: SelectorManager
+  /** Session ids with a corrupt-repair confirmation card currently out. */
+  private readonly repairFlows = new Set<string>()
   /** Bot-side surfaces the interactive adapters drive (selector-FW commands). */
   private readonly host: InteractiveHost
   /** Inbound message that triggered the current turn (for the done reaction). */
@@ -208,6 +215,7 @@ export class FeishuBot {
     this.store = deps.store
     this.allowlist = deps.allowlist
     this.now = deps.now ?? Date.now
+    this.repair = deps.repair ?? defaultRepairBackend
     this.selectors = new SelectorManager({
       // Card ops ride the same serial chain as every other card lifecycle
       // step so selector sends/patches never interleave with a settle.
@@ -460,23 +468,7 @@ export class FeishuBot {
       return
     }
     try {
-      const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
-      await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
-      this.pendingPicker = undefined
-      this.resetRunView()
-      this.backfillRoute()
-      await this.reply(
-        `已进入会话：${row.preview}\n`
-        + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
-        + '直接发消息即可派活；/help 查看全部命令。',
-      )
-      // Settle the interactive picker card (best-effort; absent after restart).
-      if (this.resumeCardMessageId !== undefined) {
-        const cardId = this.resumeCardMessageId
-        this.resumeCardMessageId = undefined
-        void this.chain(() => this.lark.patchCard(cardId, buildResumePickedCard(row)))
-      }
-      this.maybeOpenCardForRunningAgent()
+      await this.bindAndAnnounce(row)
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
       if (error instanceof WriterLockedError) {
@@ -521,13 +513,156 @@ export class FeishuBot {
       const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
       if (/corrupt .*(session|zstandard) log/i.test(reason)) {
         // Torn record inside a complete zstd frame — historical double-writer
-        // damage. No phone-side fix exists: point at the desktop repair tool.
-        await this.reply(
-          '该会话日志已损坏（多为历史双写者写入所致），无法从这里进入。\n'
-          + '修复要在电脑端做：关闭使用该会话的 dsh 进程后，运行 dsh-tui-pi 的\n'
-          + 'scripts/repair-session-log.mjs <session.jsonl.zstd> --apply，\n'
-          + '按提示把 *.repaired 换回原位，再重试 /resume。',
-        )
+        // damage. The phone can repair it in place (vendored tool + backup);
+        // without a locatable log dir, keep pointing at the desktop tool.
+        await this.offerCorruptRepair(row)
+        return
+      }
+      await this.reply(`进入会话失败：${reason === '' ? '未知错误' : reason}`)
+    }
+  }
+
+  /**
+   * The bind + first-reply + picker-settle half of a successful /resume —
+   * shared by the picker path and the post-repair re-entry (whose picker is
+   * long gone; the row alone is enough).
+   */
+  private async bindAndAnnounce(row: ResumeRow): Promise<BindResult> {
+    const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
+    await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
+    this.pendingPicker = undefined
+    this.resetRunView()
+    this.backfillRoute()
+    await this.reply(
+      `已进入会话：${row.preview}\n`
+      + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
+      + '直接发消息即可派活；/help 查看全部命令。',
+    )
+    // Settle the interactive picker card (best-effort; absent after restart).
+    if (this.resumeCardMessageId !== undefined) {
+      const cardId = this.resumeCardMessageId
+      this.resumeCardMessageId = undefined
+      void this.chain(() => this.lark.patchCard(cardId, buildResumePickedCard(row)))
+    }
+    this.maybeOpenCardForRunningAgent()
+    return bound
+  }
+
+  // -------------------------------------------------------- corrupt repair --
+
+  /**
+   * A /resume died on a corrupt log: resolve the session's storage dir and
+   * put up a repair confirmation card. The interactive part runs DETACHED —
+   * resumePickCore can be executing inside a card-chain task (card submit
+   * path), and presentSelection dead-locks when awaited from that chain
+   * (its sends enqueue on the very same chain).
+   */
+  private async offerCorruptRepair(row: ResumeRow): Promise<void> {
+    const dir = await this.binder.sessionDirOf(row.sessionId)
+    const chatId = this.store.get().lastChatId
+    if (dir === undefined || chatId === undefined) {
+      await this.reply(this.corruptPointerText())
+      return
+    }
+    if (this.repairFlows.has(row.sessionId)) {
+      await this.reply('修复确认卡已在上面，请在原卡片上操作。')
+      return
+    }
+    this.repairFlows.add(row.sessionId)
+    void this.repairFlow(row, dir, chatId).finally(() => {
+      this.repairFlows.delete(row.sessionId)
+    })
+  }
+
+  /** The desktop-tool pointer (degrade path when no log dir is resolvable). */
+  private corruptPointerText(): string {
+    return '该会话日志已损坏（多为历史双写者写入所致），无法从这里进入。\n'
+      + '修复要在电脑端做：关闭使用该会话的 dsh 进程后，运行 dsh-tui-pi 的\n'
+      + 'scripts/repair-session-log.mjs <session.jsonl.zstd> --apply，\n'
+      + '按提示把 *.repaired 换回原位，再重试 /resume。'
+  }
+
+  /** Confirmation card → one-shot repair → re-enter the session. */
+  private async repairFlow(row: ResumeRow, dir: string, chatId: string): Promise<void> {
+    let outcome: SelectorOutcome
+    try {
+      outcome = await this.presentSelection(chatId, {
+        title: '会话日志已损坏',
+        description: '（多为历史双写者写入所致）修复会重建日志并保留备份，原文件不会删除。',
+        options: [
+          { value: 'repair', label: '🛠 修复并进入' },
+          { value: 'skip', label: '先不修' },
+        ],
+        mode: 'buttons',
+      })
+    } catch (error) {
+      // The card never went out — degrade to the desktop-tool pointer.
+      this.ctx.logger.warn('dsh-feishu: repair card for %s failed: %o', row.sessionId, error)
+      await this.reply(this.corruptPointerText())
+      return
+    }
+    // Expired stays silent: the framework already patched the card grey, and
+    // the operator who left it to expire should not get pinged afterwards.
+    if (outcome.status === 'expired') return
+    if (outcome.status !== 'picked' || outcome.value !== 'repair') {
+      await this.reply('好的，未做修改。')
+      return
+    }
+    await this.repairAndEnter(row, dir)
+  }
+
+  /**
+   * The guarded repair: hold the session's single-writer lock from BEFORE the
+   * rebuild until the swap lands (no process can start driving the session
+   * mid-way — TOCTOU), verify the rebuilt log actually loads, then swap and
+   * re-enter. Every failure path releases the lock and leaves the original
+   * byte-identical.
+   */
+  private async repairAndEnter(row: ResumeRow, dir: string): Promise<void> {
+    const logPath = join(dir, 'session.jsonl.zstd')
+    let claim: WriterLockAcquisition
+    try {
+      claim = await acquireWriterLock(dir)
+    } catch (error) {
+      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      await this.reply(`修复失败：${reason === '' ? '无法确认会话写者状态' : reason}，原文件未动。`)
+      return
+    }
+    if (!claim.ok) {
+      await this.reply(`会话正被 pid ${claim.holder.pid} 驱动，不能修；先在桌面关闭该会话后再试。`)
+      return
+    }
+    try {
+      const applied = await this.repair.runRepair(logPath, { apply: true })
+      if (applied.status === 'failed') {
+        await this.reply(`修复失败：${applied.detail ?? '未知原因'}，原文件未动。`)
+        return
+      }
+      if (applied.status !== 'repaired' || applied.repairedPath === undefined) {
+        // The tool found no seq violations — the bind failure had another
+        // shape; touching nothing is the only safe answer.
+        await this.reply('修复检查未发现可修的损坏，原文件未动；请重新 /resume 看具体报错。')
+        return
+      }
+      if (!(await this.repair.verifyClean(applied.repairedPath))) {
+        await this.reply('修复失败：重建的日志未通过完整性校验，未换入，原文件未动。')
+        return
+      }
+      await this.repair.swapRepaired(logPath, applied.repairedPath)
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: repair %s failed: %o', logPath, error)
+      await this.reply(`修复失败：${clipLine(String(error instanceof Error ? error.message : error), 200) || '未知原因'}，原文件未动。`)
+      return
+    } finally {
+      await releaseOwnedWriterLock(dir)
+    }
+    await this.reply('✅ 已修复并换入（原件备份为 .corrupt-bak），正在进入…')
+    try {
+      await this.bindAndAnnounce(row)
+    } catch (error) {
+      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      if (/corrupt .*(session|zstandard) log/i.test(reason)) {
+        await this.reply(`换入后仍报日志损坏（${reason}）——请改用电脑端工具核查。`)
         return
       }
       await this.reply(`进入会话失败：${reason === '' ? '未知错误' : reason}`)

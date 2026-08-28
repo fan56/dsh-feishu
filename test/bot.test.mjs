@@ -968,6 +968,9 @@ test('resume into a corrupt session log answers with the repair pointer', async 
       getSessionId: () => undefined,
       getAgent: () => undefined,
       detach: async () => {},
+      // No resolvable log dir → the repair card is impossible; the desktop
+      // pointer is the degrade path under test here.
+      sessionDirOf: async () => undefined,
       async bind() { throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record') },
       async createNew() { throw new Error('not used') },
     },

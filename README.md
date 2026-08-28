@@ -17,6 +17,7 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
   activation) and `/profile-switch` (model profiles) render as one-tap
   selection cards on the phone
 - **Interactive /resume**: pick a session from the card (dropdown + enter), or just reply `/resume N`
+- **One-tap corrupt-log repair**: if /resume hits a damaged session log (historical double-writer writes), the bot offers a repair card — it rebuilds the log in place (the original is kept as a backup) and re-enters the session
 - **`/new` starts a fresh session** that inherits the previous one's working directory, model and reasoning effort
 - **Phone dispatch**: messages sent mid-turn default to **steer** (they join the running turn — course corrections land immediately)
 - **Remote stop**: `/stop` aborts anytime; non-allowlisted users are completely invisible to the bot
