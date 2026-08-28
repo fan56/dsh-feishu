@@ -130,7 +130,9 @@ text to dispatch work.
 | `/select-skill` | **Interactive skill picker** (user-invocable skills of the bound workspace); activation rides dsh's native `/name` skill gesture |
 | `/profile-switch` | **Interactive model-profile switcher** over `$DSH_HOME/model-profiles.json`; applies the profile's provider/model/effort (agent frontmatter updates remain desktop-only) |
 | `/feishu-plugin think on\|off` | Toggle the reasoning tail in the activity section (default on) |
-| `/preset` `/skills` `/goal` `/dcp` `/export` `/agents` `/subagents` | Not adapted for the phone yet (interactive desktop panels) — replies point to the desktop |
+| `/settings` `/preset` `/theme` `/reload` `/hotkeys` `/model-sync` `/export` `/agents` `/subagents` `/profile-cfg` `/login` `/logout` `/skills` | Provided by the desktop **dsh-tui-pi** plugin (interactive panels) — the phone refuses them with a desktop pointer (and a phone-side stand-in hint where one exists, e.g. `/skills` → `/select-skill`) |
+| `/goal` `/dcp` | Exist in the dsh runtime but not yet adapted — refused with a desktop pointer |
+| `/session` | Mirrored to `/status` |
 | Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |
 
 Typical flow:

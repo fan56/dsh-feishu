@@ -12,8 +12,9 @@
  *   former entries are interactive on the desktop and are answered with the
  *   "use the desktop" notice via REJECTED_COMMANDS); the /permission adapter
  *   hands its explicit `/permission <name>` form here directly;
- * - rejected: config-class + not-yet-adapted commands answered with
- *   "operate on the desktop".
+ * - rejected: two refuse tiers answered with a desktop pointer —
+ *   TUI_PI_COMMANDS (owned by the desktop dsh-tui-pi plugin) and
+ *   UNADAPTED_COMMANDS (exist in the runtime, no phone UI yet).
  *
  * Anything else — including syntactically-valid but unregistered slash names —
  * falls through as a prompt, matching dsh's own "unknown command goes to the
@@ -49,37 +50,55 @@ export type Intent =
 export const PASSTHROUGH_COMMANDS: readonly string[] = []
 
 /**
- * Commands the bot refuses with a "use the desktop" pointer: config-class
- * commands (design §4 不做表) plus the former passthrough entries that turn
- * out to need a desktop UI. /session is NOT here: its mirror is /status.
+ * Commands owned by the desktop dsh-tui-pi plugin. Without that plugin they
+ * do not exist in the runtime at all; with it they open desktop-only UI.
+ * Either way the phone refuses them with a pointer to the desktop instead of
+ * letting them fall through to the model as a prompt.
  */
-export const REJECTED_COMMANDS: readonly string[] = [
+export const TUI_PI_COMMANDS: readonly string[] = [
   'settings',
   'preset',
   'theme',
   'reload',
   'hotkeys',
   'model-sync',
-  'goal',
-  'dcp',
   'export',
   'agents',
   'subagents',
-]
-
-/**
- * Commands that exist but are deferred: selector semantics the phone cannot
- * render yet (v1 answers "use the desktop"). /think and /select-skill have
- * since left this table (interactive adapters); the /skills PANEL itself
- * (dsh's skill browser) is still desktop-only.
- */
-export const DEFERRED_COMMANDS: readonly string[] = [
+  'profile-cfg',
+  'login',
+  'logout',
   'skills',
 ]
 
+/**
+ * Commands that exist in the dsh runtime (core or other plugins) but have no
+ * phone adaptation yet — refused with a plain desktop pointer. Distinct tier
+ * from TUI_PI_COMMANDS: these are not dsh-tui-pi's, so the reply must not
+ * claim they are.
+ */
+export const UNADAPTED_COMMANDS: readonly string[] = [
+  'goal',
+  'dcp',
+]
+
+/** Union of both refuse tiers (classification treats them the same). */
+export const REJECTED_COMMANDS: readonly string[] = [...TUI_PI_COMMANDS, ...UNADAPTED_COMMANDS]
+
+/** Near-miss pointers for refused dsh-tui-pi commands with a phone-side stand-in. */
+const TUI_PI_HINTS: Readonly<Record<string, string>> = {
+  skills: '技能激活可直接用 /select-skill。',
+  'profile-cfg': '切换已有 profile 可用 /profile-switch。',
+}
+
 /** The reply text for refused commands. */
 export function refusedReply(name: string): string {
-  return `「/${name}」需要在电脑端操作（手机端暂未适配）。`
+  if ((TUI_PI_COMMANDS as readonly string[]).includes(name)) {
+    const hint = TUI_PI_HINTS[name]
+    const base = `「/${name}」由桌面端 dsh-tui-pi 插件提供，手机端未适配，请在电脑端使用。`
+    return hint === undefined ? base : `${base}提示：${hint}`
+  }
+  return `「/${name}」手机端暂未适配，请在电脑端操作。`
 }
 
 /** dsh's command-name charset: [a-z][a-z0-9_-]*. */
@@ -148,7 +167,7 @@ export function classifyInbound(text: string): Intent {
     }
     default:
       if (PASSTHROUGH_COMMANDS.includes(name)) return { kind: 'passthrough', name, line: trimmed }
-      if (REJECTED_COMMANDS.includes(name) || DEFERRED_COMMANDS.includes(name)) {
+      if (REJECTED_COMMANDS.includes(name)) {
         return { kind: 'rejected', name }
       }
       // Unknown command token → prompt (dsh fall-through semantics).
@@ -184,7 +203,7 @@ export function helpText(bound: boolean): string {
     '· /help — 显示本说明',
     '',
     '其余以 / 开头的内容会作为 prompt 发给模型；',
-    '/goal /dcp /agents /skills /settings /preset /theme 等暂未适配手机，请电脑端操作。',
+    '/settings /preset /theme /agents /skills /login 等由桌面端 dsh-tui-pi 提供，/goal /dcp 暂未适配——均请电脑端操作。',
   ]
   return lines.join('\n')
 }

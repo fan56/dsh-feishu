@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { classifyInbound, helpText,
-  PASSTHROUGH_COMMANDS,
+import { classifyInbound, helpText, refusedReply,
+  PASSTHROUGH_COMMANDS, TUI_PI_COMMANDS, UNADAPTED_COMMANDS,
 } from '../lib/commands.js'
 
 test('plain text is a prompt (trimmed)', () => {
@@ -40,6 +40,32 @@ test('/model is now bot-owned; config-class and deferred commands are rejected',
   for (const name of ['settings', 'preset', 'theme', 'reload', 'hotkeys', 'model-sync', 'skills']) {
     assert.deepEqual(classifyInbound(`/${name}`), { kind: 'rejected', name })
   }
+})
+
+test('every dsh-tui-pi command rejects instead of falling through as a prompt', () => {
+  for (const name of TUI_PI_COMMANDS) {
+    assert.deepEqual(classifyInbound(`/${name}`), { kind: 'rejected', name })
+    assert.match(refusedReply(name), /dsh-tui-pi/)
+  }
+  // /login used to leak to the model as a prompt — pinned so it never returns.
+  assert.match(refusedReply('login'), /电脑端/)
+  // /session is adapted as an alias of /status, not refused.
+  assert.deepEqual(classifyInbound('/session'), { kind: 'status' })
+})
+
+test('unadapted runtime commands refuse without claiming dsh-tui-pi ownership', () => {
+  for (const name of UNADAPTED_COMMANDS) {
+    assert.deepEqual(classifyInbound(`/${name}`), { kind: 'rejected', name })
+    const reply = refusedReply(name)
+    assert.match(reply, /电脑端/)
+    assert.doesNotMatch(reply, /dsh-tui-pi/)
+  }
+})
+
+test('refused dsh-tui-pi commands with a phone stand-in carry the hint', () => {
+  assert.match(refusedReply('skills'), /\/select-skill/)
+  assert.match(refusedReply('profile-cfg'), /\/profile-switch/)
+  assert.doesNotMatch(refusedReply('theme'), /提示/) // no stand-in → no hint
 })
 
 test('interactive adapter commands route to their own intents', () => {

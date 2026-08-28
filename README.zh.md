@@ -129,7 +129,9 @@ dsh --profile <你的 profile>
 | `/select-skill` | **交互式技能选择**（当前工作区用户可调用的技能）；激活走 dsh 原生 `/name` 技能手势 |
 | `/profile-switch` | **交互式模型 profile 切换**（读 `$DSH_HOME/model-profiles.json`）；应用该 profile 的 provider/model/effort（agent frontmatter 更新仍在电脑端） |
 | `/feishu-plugin think on\|off` | 开关活动区的思考尾行（默认开） |
-| `/preset` `/skills` `/goal` `/dcp` `/export` `/agents` `/subagents` | 暂未适配手机（这些命令在桌面是交互面板）——回复会引导去电脑端 |
+| `/settings` `/preset` `/theme` `/reload` `/hotkeys` `/model-sync` `/export` `/agents` `/subagents` `/profile-cfg` `/login` `/logout` `/skills` | 桌面端 **dsh-tui-pi** 插件提供（交互面板）——手机端会拒绝并引导去电脑端（有手机侧替代的附提示，如 `/skills` → `/select-skill`） |
+| `/goal` `/dcp` | dsh 运行时存在但暂未适配——拒绝并引导去电脑端 |
+| `/session` | 镜像为 `/status` |
 | 其它任何文本 | 作为 prompt 注入当前会话（运行中则 steer 进当前 turn） |
 
 典型流程：
