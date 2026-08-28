@@ -5,6 +5,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FeishuBot } from '../lib/bot.js'
+import { locateSessionLog, repairedPathFor } from '../lib/log-repair.js'
+import { WriterLockedError } from '../lib/writer-lock.js'
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 5))
 
@@ -22,13 +24,19 @@ const CORRUPT_ERROR = () => new Error('corrupt Zstandard session log: complete f
 
 /** Fake repair backend: records every call; runRepair notes the lock state. */
 function fakeRepair(overrides = {}) {
-  const calls = { run: [], verify: [], swap: [] }
+  const calls = { locate: [], run: [], verify: [], swap: [] }
   return {
     calls,
+    // Delegate to the REAL locator so dir-probing behavior is under test.
+    async locateSessionLog(dir) {
+      const found = await locateSessionLog(dir)
+      calls.locate.push({ dir, found })
+      return found
+    },
     async runRepair(logPath, options) {
       const lockHeld = existsSync(join(logPath, '..', 'writer.lock'))
       calls.run.push({ logPath, options, lockHeld })
-      return { status: 'repaired', repairedPath: `${logPath.slice(0, -'.jsonl.zstd'.length)}.repaired.jsonl.zstd` }
+      return { status: 'repaired', repairedPath: repairedPathFor(logPath) }
     },
     async verifyClean(logPath) {
       calls.verify.push(logPath)
@@ -45,18 +53,35 @@ function fakeRepair(overrides = {}) {
  * Bot wired for the corrupt-repair flow: the picker targets one corrupt
  * session, the binder locates it in a REAL tmp dir (the writer lock runs
  * for real), and the first `corruptFails` binds throw the corrupt error
- * (later binds follow `bindImpl`).
+ * (later binds follow `bindImpl`). The dir holds a session log file (raw
+ * when `rawOnly`, else zstd) for the real locator to find; the first
+ * `sendFailures` lark sends reject to exercise failure containment.
  */
-function repairBot({ bindImpl, repair, corruptFails = 1 }) {
+function repairBot({ bindImpl, repair, corruptFails = 1, rawOnly = false, sendFailures = 0 }) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-feishu-repair-'))
+  writeFileSync(join(dir, rawOnly ? 'session.jsonl' : 'session.jsonl.zstd'), '')
   const state = { lastChatId: 'oc_test', displayThink: false, boundSessionId: undefined, picker: undefined }
   const bindCalls = []
+  const watchCalls = []
+  const warnCalls = []
   const sends = []
+  let sendAttempts = 0
   const bot = new FeishuBot({
-    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    ctx: {
+      logger: {
+        info() {},
+        warn: (...args) => warnCalls.push(args),
+        error() {},
+      },
+      get: () => undefined,
+    },
     config: { statusIntervalMs: 30000, bodySegmentChars: 3500 },
     lark: {
-      async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+      async sendCard(_c, card) {
+        if (sendAttempts++ < sendFailures) throw new Error('lark send failed')
+        sends.push(card)
+        return `m${sends.length}`
+      },
       async patchCard() { return true },
     },
     binder: {
@@ -65,6 +90,9 @@ function repairBot({ bindImpl, repair, corruptFails = 1 }) {
       isReadOnlyView: () => false,
       detach: async () => {},
       sessionDirOf: async () => dir,
+      watchRemote: async sessionId => { watchCalls.push(sessionId) },
+      setOnPromotable() {},
+      drainOutboxIntoAgent() {},
       async bind(id, options) {
         bindCalls.push({ id, options })
         if (bindCalls.length <= corruptFails) throw CORRUPT_ERROR()
@@ -82,7 +110,7 @@ function repairBot({ bindImpl, repair, corruptFails = 1 }) {
     expiresAt: 999_999,
   }
   const cleanup = () => rmSync(dir, { recursive: true, force: true })
-  return { bot, dir, sends, bindCalls, state, cleanup }
+  return { bot, dir, sends, bindCalls, watchCalls, warnCalls, state, cleanup }
 }
 
 /** The flow id carried by a buttons-mode selector card's buttons. */
@@ -266,11 +294,83 @@ test('a re-entry bind failure after a successful swap keeps the ordinary failure
     pick(bot, sends[0], 'repair')
 
     await until(() => bindCalls.length >= 2)
-    await until(() => sends.length >= 3)
+    await until(() => sends.length >= 2)
     const text = sends.at(-1).body.elements[0].content
     assert.match(text, /进入会话失败：registry closed/)
     // The swap itself DID happen — only the re-entry failed.
     assert.equal(repair.calls.swap.length, 1)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a failing Lark send inside the repair flow is contained, not a crash', async () => {
+  const repair = fakeRepair()
+  // Send #1 (the confirmation card) and #2 (the pointer degrade reply) both
+  // reject — the detached repairFlow rejects, and the outer catch must
+  // swallow it (log + ONE best-effort reply) instead of crashing the bot.
+  const { bot, sends, warnCalls, cleanup } = repairBot({ repair, sendFailures: 2 })
+  try {
+    await bot.resumePickCore(1)
+    assert.ok(
+      await until(() => warnCalls.length >= 2),
+      `both failures were logged (${warnCalls.length} warns)`,
+    )
+    // Settle the best-effort reply (send #3) before asserting.
+    await until(() => sends.length >= 1)
+    assert.equal(sends.length, 1, 'exactly the containment reply went out')
+    assert.ok(sends[0].body.elements[0].content.includes('修复流程异常中断'), sends[0].body.elements[0].content)
+    assert.equal(repair.calls.run.length, 0, 'the flow never reached the rebuild')
+  } finally {
+    cleanup()
+  }
+})
+
+test('a raw (uncompressed) session log is repaired at its own path', async () => {
+  const repair = fakeRepair()
+  const { bot, dir, sends, cleanup } = repairBot({ repair, rawOnly: true })
+  try {
+    await bot.resumePickCore(1)
+    await until(() => sends.length === 1)
+    pick(bot, sends[0], 'repair')
+
+    await until(() => repair.calls.run.length >= 1)
+    assert.equal(repair.calls.run[0].logPath, join(dir, 'session.jsonl'), 'the RAW log is the repair target')
+    assert.deepEqual(repair.calls.swap, [{
+      logPath: join(dir, 'session.jsonl'),
+      repairedPath: join(dir, 'session.repaired.jsonl'),
+    }])
+    await until(() => !existsSync(join(dir, 'writer.lock')))
+  } finally {
+    cleanup()
+  }
+})
+
+test('a lock stolen before the re-entry degrades to the read-only watch', async () => {
+  const repair = fakeRepair()
+  const { bot, dir, sends, bindCalls, watchCalls, cleanup } = repairBot({
+    repair,
+    // The post-repair bind loses the race: another process holds the lock.
+    bindImpl() {
+      throw new WriterLockedError({ pid: 4242, createdAt: new Date().toISOString(), holder: 'tui' })
+    },
+  })
+  try {
+    await bot.resumePickCore(1)
+    await until(() => sends.length === 1)
+    pick(bot, sends[0], 'repair')
+
+    await until(() => watchCalls.length >= 1)
+    assert.equal(bindCalls.length, 2, 'the re-entry bind was attempted')
+    const texts = sends.map(c => c.body?.elements?.[0]?.content ?? '')
+    assert.ok(texts.some(t => t.includes('已进入只读旁观')), JSON.stringify(texts))
+    assert.ok(texts.some(t => t.includes('4242')), JSON.stringify(texts))
+    // The swap DID land (the repair itself was not wasted)…
+    assert.equal(repair.calls.swap.length, 1)
+    // …and no success announcement preceded the degraded watch reply.
+    assert.ok(!texts.some(t => t.includes('已修复并换入')), JSON.stringify(texts))
+    await until(() => !existsSync(join(dir, 'writer.lock')))
+    assert.ok(!existsSync(join(dir, 'writer.lock')), 'the repair lock was still released')
   } finally {
     cleanup()
   }

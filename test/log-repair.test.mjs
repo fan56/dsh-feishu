@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { repairedPathFor, runRepair, swapRepaired, verifyClean } from '../lib/log-repair.js'
+import { locateSessionLog, repairedPathFor, runRepair, swapRepaired, verifyClean } from '../lib/log-repair.js'
 
 function scratch() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-feishu-logrepair-'))
@@ -73,6 +73,44 @@ test('apply on an already-clean log reports clean without writing anything', asy
     assert.equal(applied.status, 'clean')
     assert.equal(applied.repairedPath, undefined)
     assert.ok(!existsSync(join(dir, 'clean.repaired.jsonl')))
+  } finally {
+    cleanup()
+  }
+})
+
+test('a stale repaired artifact from an earlier run is never swapped in', async () => {
+  const { dir, cleanup } = scratch()
+  try {
+    const log = join(dir, 'session.jsonl')
+    writeFileSync(log, CLEAN_LOG)
+    // Leftover output of an earlier repair — since-rendered obsolete. The
+    // CLEAN verdict alone must classify this run; the pre-apply unlink is
+    // the second belt so the artifact cannot even linger.
+    const stale = join(dir, 'session.repaired.jsonl')
+    writeFileSync(stale, 'stale bytes\n')
+
+    const applied = await runRepair(log, { apply: true })
+    assert.equal(applied.status, 'clean', 'verdict CLEAN wins over any file on disk')
+    assert.equal(applied.repairedPath, undefined)
+    assert.ok(!existsSync(stale), 'the stale artifact was cleared before the run')
+    assert.equal(readFileSync(log, 'utf8'), CLEAN_LOG, 'the intact log was not touched')
+  } finally {
+    cleanup()
+  }
+})
+
+test('locateSessionLog prefers the zstd log and falls back to the raw jsonl', async () => {
+  const { dir, cleanup } = scratch()
+  try {
+    assert.equal(await locateSessionLog(dir), undefined)
+
+    const raw = join(dir, 'session.jsonl')
+    writeFileSync(raw, CLEAN_LOG)
+    assert.equal(await locateSessionLog(dir), raw)
+
+    const packed = join(dir, 'session.jsonl.zstd')
+    writeFileSync(packed, 'packed')
+    assert.equal(await locateSessionLog(dir), packed)
   } finally {
     cleanup()
   }

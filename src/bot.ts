@@ -25,7 +25,6 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { isOperator } from './allowlist.ts'
 import {
@@ -472,41 +471,8 @@ export class FeishuBot {
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
       if (error instanceof WriterLockedError) {
-        // Single-writer guard fired: another process drives this session.
-        // Degrade to a READ-ONLY view over its persisted log instead of a
-        // dead end — the same fold pipeline paints round cards, so every
-        // turn's final reply still lands on the phone (poll-delayed).
-        try {
-          const since = formatHolderSince(error.holder.createdAt)
-          await this.binder.watchRemote(row.sessionId, async events => {
-            for (const event of events) {
-              // Stub session header matching the bound id — turn cards,
-              // tool rows and todo updates reuse the live pipeline verbatim.
-              this.onSessionEvent({ id: row.sessionId } as Session, event as unknown as SessionEvent)
-            }
-          })
-          // Queued follow-ups drive an automatic takeover at the next idle.
-          this.binder.setOnPromotable(async () => {
-            await this.store.update({ boundSessionId: row.sessionId })
-            this.resetRunView()
-            this.backfillRoute()
-            this.binder.drainOutboxIntoAgent()
-            await this.reply('已自动接管该会话，排队消息已发送；本轮起由此端驱动。')
-          })
-          await this.store.update({ boundSessionId: row.sessionId })
-          await this.reply(
-            `已进入只读旁观：${row.preview}\n`
-            + `该会话正由另一进程驱动（pid ${error.holder.pid}${since}），为避免日志分叉不能从这里派活；\n`
-            + '对面的最终回复会同步到这里。/resume 或 /new 可切换。',
-          )
-          return
-        } catch (watchError: unknown) {
-          this.ctx.logger.warn('dsh-feishu: watch remote %s failed: %o', row.sessionId, watchError)
-          // Fall through to the plain refusal below — watching is best-effort.
-          const reason2 = clipLine(String(watchError instanceof Error ? watchError.message : watchError), 200)
-          await this.reply(`只读旁观失败：${reason2 === '' ? '未知错误' : reason2}`)
-          return
-        }
+        await this.degradeToRemoteWatch(row, error)
+        return
       }
       // The reason rides along (clipped): a bare "failed" on the phone gave
       // nothing to debug from — the whole /resume investigation stalled on it.
@@ -523,18 +489,60 @@ export class FeishuBot {
   }
 
   /**
+   * The single-writer guard fired on a bind: another live process drives the
+   * session. Degrade to a READ-ONLY view over its persisted log instead of a
+   * dead end — the same fold pipeline paints round cards, so every turn's
+   * final reply still lands on the phone (poll-delayed). Shared by the
+   * /resume failure path and the post-repair re-entry (a racer can steal the
+   * session in the gap between the repair lock release and the bind).
+   */
+  private async degradeToRemoteWatch(row: ResumeRow, error: WriterLockedError): Promise<void> {
+    try {
+      const since = formatHolderSince(error.holder.createdAt)
+      await this.binder.watchRemote(row.sessionId, async events => {
+        for (const event of events) {
+          // Stub session header matching the bound id — turn cards,
+          // tool rows and todo updates reuse the live pipeline verbatim.
+          this.onSessionEvent({ id: row.sessionId } as Session, event as unknown as SessionEvent)
+        }
+      })
+      // Queued follow-ups drive an automatic takeover at the next idle.
+      this.binder.setOnPromotable(async () => {
+        await this.store.update({ boundSessionId: row.sessionId })
+        this.resetRunView()
+        this.backfillRoute()
+        this.binder.drainOutboxIntoAgent()
+        await this.reply('已自动接管该会话，排队消息已发送；本轮起由此端驱动。')
+      })
+      await this.store.update({ boundSessionId: row.sessionId })
+      await this.reply(
+        `已进入只读旁观：${row.preview}\n`
+        + `该会话正由另一进程驱动（pid ${error.holder.pid}${since}），为避免日志分叉不能从这里派活；\n`
+        + '对面的最终回复会同步到这里。/resume 或 /new 可切换。',
+      )
+    } catch (watchError: unknown) {
+      this.ctx.logger.warn('dsh-feishu: watch remote %s failed: %o', row.sessionId, watchError)
+      // Watching is best-effort — its own failure gets a plain refusal.
+      const reason = clipLine(String(watchError instanceof Error ? watchError.message : watchError), 200)
+      await this.reply(`只读旁观失败：${reason === '' ? '未知错误' : reason}`)
+    }
+  }
+
+  /**
    * The bind + first-reply + picker-settle half of a successful /resume —
    * shared by the picker path and the post-repair re-entry (whose picker is
-   * long gone; the row alone is enough).
+   * long gone; the row alone is enough). `notice`, when given, prefixes the
+   * announcement so a repair lands as ONE message after the bind succeeded.
    */
-  private async bindAndAnnounce(row: ResumeRow): Promise<BindResult> {
+  private async bindAndAnnounce(row: ResumeRow, notice?: string): Promise<BindResult> {
     const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
     await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
     this.pendingPicker = undefined
     this.resetRunView()
     this.backfillRoute()
     await this.reply(
-      `已进入会话：${row.preview}\n`
+      (notice === undefined ? '' : `${notice}\n`)
+      + `已进入会话：${row.preview}\n`
       + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
       + '直接发消息即可派活；/help 查看全部命令。',
     )
@@ -569,9 +577,18 @@ export class FeishuBot {
       return
     }
     this.repairFlows.add(row.sessionId)
-    void this.repairFlow(row, dir, chatId).finally(() => {
-      this.repairFlows.delete(row.sessionId)
-    })
+    // Detached — see the invariant above. The catch mirrors the interactive
+    // command wrapper: log, then ONE best-effort reply (itself allowed to
+    // fail), so a flaky Lark send never surfaces as an unhandled rejection
+    // in this long-lived process.
+    void this.repairFlow(row, dir, chatId)
+      .catch(async error => {
+        this.ctx.logger.warn('dsh-feishu: repair flow for %s failed: %o', row.sessionId, error)
+        await this.reply('修复流程异常中断，原文件未动。').catch(() => undefined)
+      })
+      .finally(() => {
+        this.repairFlows.delete(row.sessionId)
+      })
   }
 
   /** The desktop-tool pointer (degrade path when no log dir is resolvable). */
@@ -616,10 +633,17 @@ export class FeishuBot {
    * rebuild until the swap lands (no process can start driving the session
    * mid-way — TOCTOU), verify the rebuilt log actually loads, then swap and
    * re-enter. Every failure path releases the lock and leaves the original
-   * byte-identical.
+   * byte-identical. The lock is dropped BEFORE the re-entry bind — a racer
+   * that steals the session in that window degrades to the same read-only
+   * watch a refused /resume gets.
    */
   private async repairAndEnter(row: ResumeRow, dir: string): Promise<void> {
-    const logPath = join(dir, 'session.jsonl.zstd')
+    // Compressed or raw — sessions written without zstd exist on disk.
+    const logPath = await this.repair.locateSessionLog(dir)
+    if (logPath === undefined) {
+      await this.reply('修复失败：会话目录下没有日志文件，原文件未动。')
+      return
+    }
     let claim: WriterLockAcquisition
     try {
       claim = await acquireWriterLock(dir)
@@ -656,10 +680,16 @@ export class FeishuBot {
     } finally {
       await releaseOwnedWriterLock(dir)
     }
-    await this.reply('✅ 已修复并换入（原件备份为 .corrupt-bak），正在进入…')
+    // Bind FIRST, announce after: replying (a network round-trip) between
+    // the lock release and the bind would widen the steal window for no
+    // gain — and the bind's own WriterLockedError now has a degrade path.
     try {
-      await this.bindAndAnnounce(row)
+      await this.bindAndAnnounce(row, '✅ 已修复并换入（原件备份为 .corrupt-bak）。')
     } catch (error) {
+      if (error instanceof WriterLockedError) {
+        await this.degradeToRemoteWatch(row, error)
+        return
+      }
       const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
       if (/corrupt .*(session|zstandard) log/i.test(reason)) {
         await this.reply(`换入后仍报日志损坏（${reason}）——请改用电脑端工具核查。`)

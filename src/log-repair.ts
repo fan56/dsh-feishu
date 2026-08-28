@@ -16,7 +16,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { chmod, rename, stat } from 'node:fs/promises'
+import { chmod, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,6 +37,8 @@ export interface RepairResult {
  * process-spawning implementation for a fake.
  */
 export interface RepairBackend {
+  /** Probe the session dir for its log file (zstd first, raw fallback). */
+  locateSessionLog(dir: string): Promise<string | undefined>
   runRepair(logPath: string, options: { apply: boolean }): Promise<RepairResult>
   verifyClean(logPath: string): Promise<boolean>
   swapRepaired(logPath: string, repairedPath: string): Promise<void>
@@ -52,6 +54,24 @@ export function repairedPathFor(logPath: string): string {
   return join(dirname(logPath), `${stem}.repaired.jsonl${zstd ? '.zstd' : ''}`)
 }
 
+/**
+ * The log file of a session dir: compressed when present, the raw jsonl
+ * otherwise (sessions written by tooling without zstd exist on disk). The
+ * script itself accepts both spellings — this only picks WHICH path to fix.
+ */
+export async function locateSessionLog(dir: string): Promise<string | undefined> {
+  for (const name of ['session.jsonl.zstd', 'session.jsonl']) {
+    const candidate = join(dir, name)
+    try {
+      await stat(candidate)
+      return candidate
+    } catch {
+      // Keep probing.
+    }
+  }
+  return undefined
+}
+
 /** First ~n chars of the given stream text, whitespace-trimmed. */
 function snippet(text: string | undefined, max = 300): string {
   const flat = (text ?? '').replace(/\s+/g, ' ').trim()
@@ -60,6 +80,11 @@ function snippet(text: string | undefined, max = 300): string {
 
 /** Run the vendored script once and map its exit onto a RepairResult. */
 export async function runRepair(logPath: string, options: { apply: boolean }): Promise<RepairResult> {
+  if (options.apply) {
+    // A leftover *.repaired from an earlier run must never be mistaken for
+    // THIS run's output — clear the name before the script gets a chance.
+    await unlink(repairedPathFor(logPath)).catch(() => undefined)
+  }
   const args = [fileURLToPath(SCRIPT_PATH), logPath, ...(options.apply ? ['--apply'] : [])]
   let proc: ReturnType<typeof spawnSync>
   try {
@@ -76,17 +101,20 @@ export async function runRepair(logPath: string, options: { apply: boolean }): P
         : proc.error.message
     return { status: 'failed', detail }
   }
-  const output = snippet(proc.stderr?.toString('utf8')) || snippet(proc.stdout?.toString('utf8'))
+  const stdout = proc.stdout?.toString('utf8') ?? ''
+  const output = snippet(proc.stderr?.toString('utf8')) || snippet(stdout)
   if (proc.status === 0) {
     if (!options.apply) return { status: 'clean' }
-    // Apply ran to completion: 'repaired' only when the script actually
-    // wrote its output file — a bare exit 0 without one is "verdict: CLEAN".
+    // Exit 0 is ambiguous by contract (CLEAN vs. repaired+written); the
+    // CLEAN verdict line disambiguates WITHOUT looking at files — a stale
+    // artifact from an earlier run must never pass for this run's output.
+    if (stdout.includes('verdict: CLEAN')) return { status: 'clean' }
     const candidate = repairedPathFor(logPath)
     try {
       await stat(candidate)
       return { status: 'repaired', repairedPath: candidate }
     } catch {
-      return { status: 'clean' }
+      return { status: 'failed', detail: 'repair tool exited 0 but wrote no repaired artifact beside the log' }
     }
   }
   // Exit 3 (dry-run diagnosis: still corrupt), 2 (usage/torn lines), or an
@@ -127,4 +155,4 @@ export async function swapRepaired(logPath: string, repairedPath: string): Promi
 }
 
 /** The real, process-spawning backend (the bot's default). */
-export const defaultRepairBackend: RepairBackend = { runRepair, verifyClean, swapRepaired }
+export const defaultRepairBackend: RepairBackend = { locateSessionLog, runRepair, verifyClean, swapRepaired }
