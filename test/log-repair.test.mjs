@@ -178,3 +178,31 @@ test('the zstd path writes session.repaired.jsonl.zstd (skipped without a zstd b
     cleanup()
   }
 })
+
+test('the vendored script re-encodes multi-frame: frame 1 is the header line alone', async () => {
+  // dsh's jsonl loader requires the FIRST frame to hold exactly one header
+  // line; a single-frame rewrite is rejected with "first frame is not exactly
+  // one header line" and bricks /resume listing for the whole workspace.
+  const { dir, cleanup } = scratch()
+  try {
+    const log = join(dir, 'session.jsonl.zstd')
+    const raw = spawnSync('zstd', ['-19'], { input: Buffer.from(CORRUPT_LOG), maxBuffer: 1 << 20 })
+    assert.equal(raw.status, 0)
+    writeFileSync(log, raw.stdout)
+    const result = await runRepair(log, { apply: true })
+    assert.equal(result.status, 'repaired', JSON.stringify(result))
+
+    const out = readFileSync(repairedPathFor(log))
+    const magics = []
+    for (let i = 0; i <= out.length - 4; i++) {
+      if (out[i] === 0x28 && out[i + 1] === 0xB5 && out[i + 2] === 0x2F && out[i + 3] === 0xFD) magics.push(i)
+    }
+    assert.ok(magics.length >= 2, `expected multiple frames, got ${magics.length}`)
+    const firstBack = spawnSync('zstd', ['-dc'], { input: out.subarray(magics[0], magics[1]), maxBuffer: 1 << 20 })
+    assert.equal(firstBack.status, 0)
+    const firstLines = firstBack.stdout.toString('utf8').trim().split('\n')
+    assert.equal(firstLines.length, 1, 'frame 1 must be the header line alone')
+  } finally {
+    cleanup()
+  }
+})
