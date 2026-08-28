@@ -947,3 +947,70 @@ test('resume picker submit from a non-operator is a silent no-op', async () => {
   assert.equal(sends.length, 0)
   assert.equal(patches.length, 0)
 })
+
+// ------------------------------------------------- corrupt-log resume --
+
+test('resume into a corrupt session log answers with the repair pointer', async () => {
+  const sends = []
+  const state = {
+    lastChatId: 'oc_test', displayThink: true, boundSessionId: undefined,
+    picker: {
+      id: 'p1',
+      rows: [{ index: 1, sessionId: 'torn-log', dir: 'repo', createdAt: 1, lastTime: undefined, preview: 'x' }],
+      expiresAt: 999_999,
+    },
+  }
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async bind() { throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record') },
+      async createNew() { throw new Error('not used') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.pendingPicker = state.picker
+  await bot.resumePickCore(1)
+  const text = sends.at(-1).body.elements[0].content
+  assert.match(text, /日志已损坏/)
+  assert.match(text, /repair-session-log/)
+  assert.doesNotMatch(text, /进入会话失败/)
+})
+
+test('ordinary resume failures keep the raw reason reply', async () => {
+  const sends = []
+  const state = {
+    lastChatId: 'oc_test', displayThink: true, boundSessionId: undefined,
+    picker: {
+      id: 'p1',
+      rows: [{ index: 1, sessionId: 'boom', dir: 'repo', createdAt: 1, lastTime: undefined, preview: 'x' }],
+      expiresAt: 999_999,
+    },
+  }
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async bind() { throw new Error('session directory vanished') },
+      async createNew() { throw new Error('not used') },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  bot.pendingPicker = state.picker
+  await bot.resumePickCore(1)
+  const text = sends.at(-1).body.elements[0].content
+  assert.match(text, /进入会话失败：session directory vanished/)
+  assert.doesNotMatch(text, /repair-session-log/)
+})

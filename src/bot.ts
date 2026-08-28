@@ -519,6 +519,17 @@ export class FeishuBot {
       // The reason rides along (clipped): a bare "failed" on the phone gave
       // nothing to debug from — the whole /resume investigation stalled on it.
       const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      if (/corrupt .*(session|zstandard) log/i.test(reason)) {
+        // Torn record inside a complete zstd frame — historical double-writer
+        // damage. No phone-side fix exists: point at the desktop repair tool.
+        await this.reply(
+          '该会话日志已损坏（多为历史双写者写入所致），无法从这里进入。\n'
+          + '修复要在电脑端做：关闭使用该会话的 dsh 进程后，运行 dsh-tui-pi 的\n'
+          + 'scripts/repair-session-log.mjs <session.jsonl.zstd> --apply，\n'
+          + '按提示把 *.repaired 换回原位，再重试 /resume。',
+        )
+        return
+      }
       await this.reply(`进入会话失败：${reason === '' ? '未知错误' : reason}`)
     }
   }
