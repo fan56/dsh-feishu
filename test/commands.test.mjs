@@ -67,11 +67,21 @@ test('help text adapts to the binding state', () => {
   assert.match(unbound, /当前未绑定会话/)
   for (const text of [bound, unbound]) {
     assert.match(text, /\/resume/)
+    assert.match(text, /\/resume N/)
+    assert.match(text, /\/new/)
+    assert.match(text, /\/status/)
     assert.match(text, /\/stop/)
+    assert.match(text, /\/sub N/)
+    assert.match(text, /\/model/)
     assert.match(text, /\/feishu-plugin think/)
     assert.match(text, /\/think/)
     assert.match(text, /\/permission/)
     assert.match(text, /\/select-skill/)
     assert.match(text, /\/profile-switch/)
+    assert.match(text, /\/help/)
+    // group headers render as markdown bold
+    assert.match(text, /\*\*会话\*\*/)
+    assert.match(text, /\*\*模型与权限\*\*/)
+    assert.match(text, /\*\*技能\*\*/)
   }
 })
