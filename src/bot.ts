@@ -1400,8 +1400,10 @@ export class FeishuBot {
   /**
    * Register the phone as an ask-user surface. With dsh-ask-router present
    * this registers as one surface among several (first answer wins across
-   * surfaces); without it, the provider slot is taken directly and a
-   * DUPLICATE_PROVIDER error yields gracefully to a native UI (TUI/web).
+   * surfaces). Without it: on rc-era hosts the provider slot is taken
+   * directly (a DUPLICATE_PROVIDER error yields gracefully to a native UI);
+   * on alpha-era hosts (no slot) a claim-scoped 'user-questions/request'
+   * waterfall answerer is registered, delegating unclaimed asks via next().
    */
   private registerAskSurface(): void {
     const ask = (request: AskRequestLike): Promise<AskUserQuestionAnswer> => this.askViaCard(request)
@@ -1419,16 +1421,30 @@ export class FeishuBot {
     const userQuestions = this.ctx.get('userQuestions') as
       | { registerProvider(provider: { ask(request: AskRequestLike): Promise<AskUserQuestionAnswer> }): () => void }
       | undefined
-    if (userQuestions === undefined || typeof userQuestions.registerProvider !== 'function') return
-    try {
-      this.cleanupFns.push(userQuestions.registerProvider({ ask }))
-    } catch (error) {
-      if (isDuplicateProviderError(error)) {
-        this.ctx.logger.info('dsh-feishu: ask-user provider slot owned by another UI — yielding')
-        return
+    if (userQuestions !== undefined && typeof userQuestions.registerProvider === 'function') {
+      try {
+        this.cleanupFns.push(userQuestions.registerProvider({ ask }))
+      } catch (error) {
+        if (isDuplicateProviderError(error)) {
+          this.ctx.logger.info('dsh-feishu: ask-user provider slot owned by another UI — yielding')
+          return
+        }
+        this.ctx.logger.warn('dsh-feishu: ask provider registration failed: %o', error)
       }
-      this.ctx.logger.warn('dsh-feishu: ask provider registration failed: %o', error)
+      return
     }
+    if (userQuestions === undefined) return
+    // alpha-era host: the provider slot is gone; answerers compose on the
+    // scoped 'user-questions/request' cordis waterfall (answer by returning,
+    // delegate with next()). The event is not part of the rc-era type
+    // surface, hence the structural cast.
+    const registerWaterfall = (this.ctx.on as unknown as (
+      event: 'user-questions/request',
+      listener: (request: AskRequestLike, next: () => Promise<AskUserQuestionAnswer>) => Promise<AskUserQuestionAnswer>,
+    ) => () => boolean)
+    this.cleanupFns.push(registerWaterfall('user-questions/request', (request, next) => (
+      this.claimsAskSession(request) ? ask(request) : next()
+    )))
   }
 
   /** Whether the bound session is the one asking (claim routing). */

@@ -626,6 +626,57 @@ test('registerAskSurface: no router → direct provider; DUPLICATE yields withou
   duplicate.registerAskSurface() // yields — must not throw
 })
 
+test('registerAskSurface: alpha-era host (no provider slot) — unclaimed ask delegates via next()', async () => {
+  let eventName
+  let listener
+  const bot = askBot({}, {
+    get: key => key === 'userQuestions' ? {} : undefined,
+    on(event, fn) {
+      eventName = event
+      listener = fn
+      return () => {}
+    },
+  }, { getSessionId: () => undefined }) // no bound session → never claims
+  bot.registerAskSurface()
+  assert.equal(eventName, 'user-questions/request')
+  assert.equal(typeof listener, 'function')
+  let nextCalls = 0
+  const answer = await listener(
+    { questions: [{ id: 'q1' }], agent: { session: { id: 'other' } } },
+    async () => {
+      nextCalls += 1
+      return { answers: [{ id: 'q1', selected: ['x'] }] }
+    },
+  )
+  assert.equal(nextCalls, 1, 'unclaimed ask delegates')
+  assert.deepEqual(answer.answers[0].selected, ['x'])
+})
+
+test('registerAskSurface: alpha-era host — claimed ask sends the card instead of delegating', async () => {
+  let listener
+  const cards = []
+  const bot = askBot({ sendCard: async (chatId, card) => { cards.push(card); return 'msg-1' } }, {
+    get: key => key === 'userQuestions' ? {} : undefined,
+    on(event, fn) {
+      listener = fn
+      return () => {}
+    },
+  }) // default binder 's1' + store lastChatId 'oc_test'
+  bot.registerAskSurface()
+  let nextCalls = 0
+  const pending = listener(
+    { questions: [{ id: 'q1' }], agent: { session: { id: 's1' } } },
+    async () => {
+      nextCalls += 1
+      return { answers: [{ id: 'q1', selected: ['x'] }] }
+    },
+  )
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(nextCalls, 0, 'claimed ask answers via the card')
+  assert.equal(cards.length, 1)
+  assert.equal(typeof pending.then, 'function')
+})
+
 test('/new route resolution: previous log wins; settings default is the fallback', async () => {
   const createCalls = []
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
