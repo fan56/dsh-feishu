@@ -43,13 +43,11 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-- name: Install global dsh closure
+      - name: Install global dsh closure
         run: npm install -g @deepseek-ai/dsh
 
       - name: Link dsh closure types
         run: node scripts/link-dsh-closure.mjs
-
-      
 
       - name: Build & Check & Test
         run: npm run build --if-present && npm run check --if-present && npm test
