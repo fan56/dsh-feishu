@@ -37,6 +37,7 @@ export type Intent =
   | { kind: 'select-skill' }
   | { kind: 'profile-switch' }
   | { kind: 'display'; target: 'think'; value: 'on' | 'off' }
+  | { kind: 'btw'; line: string }
   | { kind: 'passthrough'; name: string; line: string }
   | { kind: 'rejected'; name: string }
 
@@ -155,6 +156,7 @@ export function classifyInbound(text: string): Intent {
         : { kind: 'passthrough', name, line: trimmed }
     case 'select-skill': return { kind: 'select-skill' }
     case 'profile-switch': return { kind: 'profile-switch' }
+    case 'btw': return { kind: 'btw', line: rest ?? '' }
     case 'feishu-plugin': {
       // Named after the plugin itself: ownership of phone-side commands
       // must be self-evident (a bare /display read as a dsh/TUI command
@@ -187,6 +189,7 @@ export function helpText(bound: boolean): string {
     '· /new — 解绑当前会话（回到未绑定态）',
     '· /status — 绑定与运行状态',
     '· /stop — 停止当前正在运行的 turn',
+    '· /btw 问题 — 主线运行中顺带问一句（旁路回答，卡片呈现，不进会话；空参回看上一条）',
     '· /sub N — 查看第 N 个子代理近况',
     '',
     '**模型与权限**（弹出选择卡，点选后按场景生效）',

@@ -111,3 +111,16 @@ test('help text adapts to the binding state', () => {
     assert.match(text, /\*\*技能\*\*/)
   }
 })
+
+test('btw parses with and without a question', () => {
+  assert.deepEqual(classifyInbound('/btw 这个报错是什么'), { kind: 'btw', line: '这个报错是什么' })
+  assert.deepEqual(classifyInbound('/btw'), { kind: 'btw', line: '' })
+  assert.deepEqual(classifyInbound('/btw   '), { kind: 'btw', line: '' })
+  // multi-line questions ride the /s flag on COMMAND_RE
+  assert.deepEqual(classifyInbound('/btw 第一行\n第二行'), { kind: 'btw', line: '第一行\n第二行' })
+})
+
+test('help text mentions /btw', () => {
+  const text = helpText(true)
+  assert.match(text, /\/btw/)
+})

@@ -48,6 +48,12 @@ export interface Config {
    * fails; `table` / `list` force one renderer.
    */
   resumeListStyle?: 'auto' | 'table' | 'list'
+  /**
+   * Recent-conversation messages carried into a `/btw` side call
+   * (default 6, clamped to [0, 50]; 0 = no snapshot). Parity with
+   * dsh-tui-pi's DSH_TUI_BTW_CONTEXT_MESSAGES knob.
+   */
+  btwContextMessages?: number
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -62,6 +68,7 @@ export const Config = z.object({
   statusIntervalMs: z.number().min(5000).max(600000).step(1).default(5000),
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
   resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
+  btwContextMessages: z.number().min(0).max(50).step(1).default(6),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -76,11 +83,12 @@ export interface ResolvedConfig {
   readonly statusIntervalMs: number
   readonly bodySegmentChars: number
   readonly resumeListStyle: 'auto' | 'table' | 'list'
+  readonly btwContextMessages: number
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
-  'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle',
+  'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle', 'btwContextMessages',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -112,6 +120,10 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   if (resumeListStyle !== 'auto' && resumeListStyle !== 'table' && resumeListStyle !== 'list') {
     throw new Error('dsh-feishu: resumeListStyle must be one of "auto", "table", "list"')
   }
+  const btwConfigValue = config?.btwContextMessages
+  if (btwConfigValue !== undefined && (!Number.isSafeInteger(btwConfigValue) || btwConfigValue < 0 || btwConfigValue > 50)) {
+    throw new Error('dsh-feishu: btwContextMessages must be an integer in [0, 50]')
+  }
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   return Object.freeze({
@@ -127,5 +139,6 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     statusIntervalMs,
     bodySegmentChars,
     resumeListStyle,
+    btwContextMessages: btwConfigValue ?? 6,
   })
 }

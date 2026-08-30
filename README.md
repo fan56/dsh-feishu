@@ -21,6 +21,7 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 - **`/new` starts a fresh session** that inherits the previous one's working directory, model and reasoning effort
 - **Phone dispatch**: messages sent mid-turn default to **steer** (they join the running turn — course corrections land immediately)
 - **Remote stop**: `/stop` aborts anytime; non-allowlisted users are completely invisible to the bot
+- **By-the-way questions**: `/btw` fires a side question alongside the running task and streams the answer into its own card — the main line never notices (parity with dsh-tui-pi's `/btw`, duplicated not shared)
 
 ## 🎬 Demo
 
@@ -123,6 +124,7 @@ text to dispatch work.
 | `/resume` | Interactive session picker card (dropdown + enter; or reply `/resume N`), sorted by last update |
 | `/new` | Start a brand-new session and bind to it (inherits cwd, model and reasoning effort) |
 | `/stop` | Abort the running turn (queued messages survive) |
+| `/btw <question>` | **By-the-way side question** while the main task runs: one tool-less model call over a recent-conversation snapshot, streamed into its own card — the main line never notices. Not kept in the session; idle main line refuses; `--model provider/model` overrides the route; bare `/btw` re-sends the last exchange (`btwContextMessages` config sizes the snapshot) |
 | `/status` | Binding and run status |
 | `/sub N` | Inspect the Nth subagent |
 | `/model` | **Interactive model picker** (two steps: pick a provider → pick one of its models); live-switches bot-created sessions, otherwise saved as the phone default (applies to /new) |

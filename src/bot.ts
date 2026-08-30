@@ -21,7 +21,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type LlmRuntime, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
@@ -61,6 +61,8 @@ import {
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
+import { buildBtwSnapshot, type BtwStreamChunk } from './btw.ts'
+import { BtwManager } from './btw-bot.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
@@ -184,6 +186,8 @@ export class FeishuBot {
   private resumeCardMessageId: string | undefined
   /** Bot-created sessions' model selection refs (/model live-switch). */
   private readonly selectionRefs = new Map<string, ModelSelectionRef>()
+  /** /btw side-question manager (phone surface; per-surface by design). */
+  private readonly btw: BtwManager
   /** The in-flight /model two-step flow. */
   private modelFlow: {
     id: string
@@ -235,6 +239,60 @@ export class FeishuBot {
       currentSelection: () => this.currentModelSelection(),
       boundAgent: () => this.ensureBoundAgent(),
     }
+    // /btw — by-the-way side questions (phone copy of dsh-tui-pi's engine,
+    // docs/adr/0001-btw-duplicated-not-shared.md). Per-surface by design:
+    // this queue/slot/cancellation is independent of the TUI's overlay.
+    this.btw = new BtwManager({
+      stream: options => {
+        const llm = this.ctx.get('llm') as LlmRuntime | undefined
+        if (llm === undefined) throw new Error('LLM 服务不可用。')
+        return llm.stream({
+          provider: options.provider,
+          model: options.model,
+          ...(options.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: options.reasoningEffort as ReasoningEffortId }),
+          messages: options.messages,
+          system: options.system,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        }) as AsyncIterable<BtwStreamChunk>
+      },
+      sendCard: (chatId, card) => this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)),
+      patchCard: (messageId, card) => this.chain(() => this.lark.patchCard(messageId, card as Schema2Card)),
+      notify: text => { void this.reply(text).catch(() => undefined) },
+      resolveSelection: () => {
+        // Sync projection only: a running main line always has a live route
+        // (selectionRef / runState) — the persistence fallback is irrelevant
+        // for a btw, which requires the main line to be running.
+        const bound = this.binder.getSessionId()
+        const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)?.current
+        if (ref !== undefined && ref.provider !== undefined && ref.model !== undefined) {
+          return {
+            provider: ref.provider,
+            model: ref.model,
+            ...(ref.reasoningEffort === undefined ? {} : { reasoningEffort: ref.reasoningEffort }),
+          }
+        }
+        if (this.runState.provider !== undefined && this.runState.model !== undefined) {
+          return {
+            provider: this.runState.provider,
+            model: this.runState.model,
+            ...(this.runState.reasoningEffort === undefined ? {} : { reasoningEffort: this.runState.reasoningEffort }),
+          }
+        }
+        return undefined
+      },
+      buildSnapshot: () => {
+        const agent = this.binder.getAgent()
+        return agent === undefined
+          ? []
+          : buildBtwSnapshot(agent.session.events, this.config.btwContextMessages)
+      },
+      isMainRunning: () => this.binder.getAgent()?.status === 'running',
+      isReadOnlyView: () => this.binder.isReadOnlyView(),
+      beatMs: this.config.statusIntervalMs,
+      logger: this.ctx.logger,
+    })
   }
 
   /** Wire subscriptions, start the beat, open the Lark connection. */
@@ -290,6 +348,7 @@ export class FeishuBot {
       try { fn() } catch { /* contained */ }
     }
     if (this.ticker !== undefined) clearInterval(this.ticker)
+    this.btw.dispose()
     this.lark.close()
     await this.binder.dispose().catch(() => undefined)
   }
@@ -369,6 +428,7 @@ export class FeishuBot {
       case 'permission': await this.interactiveCommand(runPermissionCommand); break
       case 'select-skill': await this.interactiveCommand(runSelectSkillCommand); break
       case 'profile-switch': await this.interactiveCommand(runProfileSwitchCommand); break
+      case 'btw': await this.handleBtw(message, intent.line); break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
         await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
@@ -497,6 +557,9 @@ export class FeishuBot {
    * session in the gap between the repair lock release and the bind).
    */
   private async degradeToRemoteWatch(row: ResumeRow, error: WriterLockedError): Promise<void> {
+    // Read-only watching is not a live main line — btw has nothing to run
+    // alongside; cancel any in-flight side call on the switch.
+    this.btw.cancelAll()
     try {
       const since = formatHolderSince(error.holder.createdAt)
       await this.binder.watchRemote(row.sessionId, async events => {
@@ -535,6 +598,8 @@ export class FeishuBot {
    * announcement so a repair lands as ONE message after the bind succeeded.
    */
   private async bindAndAnnounce(row: ResumeRow, notice?: string): Promise<BindResult> {
+    // Switching sessions strands the btw context snapshot — cancel first.
+    this.btw.cancelAll()
     const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
     await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
     this.pendingPicker = undefined
@@ -707,7 +772,14 @@ export class FeishuBot {
    * record). The new session inherits the previous one's cwd when readable,
    * else the process cwd.
    */
+  private async handleBtw(message: InboundMessage, rawInput: string): Promise<void> {
+    const text = await this.btw.handleBtw(rawInput, message.chatId)
+    await this.reply(text)
+  }
+
   private async handleNew(): Promise<void> {
+    // A fresh session strands the btw context snapshot — cancel first.
+    this.btw.cancelAll()
     const previousId = this.binder.getSessionId() ?? this.store.get().boundSessionId
     let cwd = process.cwd()
     if (previousId !== undefined) {
@@ -803,6 +875,8 @@ export class FeishuBot {
   }
 
   private async handleStop(): Promise<void> {
+    // The stop gesture is the everything-stop: phone-side btw calls die too.
+    this.btw.cancelAll()
     const agent = this.binder.getAgent()
     if (agent === undefined) {
       await this.reply('当前未绑定会话。')

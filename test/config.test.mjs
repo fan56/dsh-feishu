@@ -65,3 +65,15 @@ test('unknown resumeListStyle value throws', () => {
   // The static schema rejects it at runtime via the unknown-value union.
   assert.throws(() => resolveConfig({ resumeListStyle: 'plain' }, {}), /resumeListStyle/)
 })
+
+test('btwContextMessages defaults to 6', () => {
+  assert.equal(resolveConfig({}, {}).btwContextMessages, 6)
+})
+
+test('btwContextMessages accepts 0..50 and rejects the rest', () => {
+  assert.equal(resolveConfig({ btwContextMessages: 0 }, {}).btwContextMessages, 0)
+  assert.equal(resolveConfig({ btwContextMessages: 50 }, {}).btwContextMessages, 50)
+  assert.throws(() => resolveConfig({ btwContextMessages: 51 }, {}), /btwContextMessages/)
+  assert.throws(() => resolveConfig({ btwContextMessages: -1 }, {}), /btwContextMessages/)
+  assert.throws(() => resolveConfig({ btwContextMessages: 1.5 }, {}), /btwContextMessages/)
+})
