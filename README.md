@@ -4,6 +4,8 @@
 
 Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSeek Harness) session from Feishu/Lark on your phone — dispatch work, watch progress live, answer questions, get the results. Outbound-only WebSocket: no open ports, no tunnels.
 
+**Requires dsh >= 0.1.2-alpha.3** — the plugin targets the 0.1.2-alpha host line only; the rc line is no longer supported.
+
 ---
 
 ## ✨ Highlights

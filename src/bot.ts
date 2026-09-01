@@ -119,13 +119,6 @@ interface PendingAsk {
   readonly reject: (error: Error) => void
 }
 
-/** Whether a userQuestions error says the slot is taken (name+code shape). */
-function isDuplicateProviderError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  if (error.name !== 'UserQuestionError') return false
-  return (error as { code?: string }).code === 'DUPLICATE_PROVIDER'
-}
-
 /** The operator open_id a card.action payload carries, when well-formed. */
 function cardOperatorOf(data: unknown): string | undefined {
   const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
@@ -923,7 +916,15 @@ export class FeishuBot {
       return
     }
     const commands = this.ctx.get('commands') as
-      | { execute: (...args: never[]) => unknown; find?: (agent: Agent, name: string) => unknown }
+      | {
+          execute(
+            agent: Agent,
+            line: string,
+            images: readonly unknown[],
+            signal: AbortSignal,
+          ): Promise<{ result?: { kind?: string; text?: string } } | undefined>
+          find?: (agent: Agent, name: string) => unknown
+        }
       | undefined
     if (commands === undefined) {
       await this.reply('当前 profile 没有命令服务，无法透传。')
@@ -934,12 +935,9 @@ export class FeishuBot {
       return
     }
     try {
-      // rc.7: execute(agent, line, signal) — rc.8 inserts an images array
-      // before the signal; probe the arity like dsh-tui-pi does.
-      const signal = AbortSignal.timeout(30_000)
-      const execution = (commands.execute as (...args: unknown[]) => unknown)(
-        ...commands.execute.length >= 4 ? [agent, line, [], signal] : [agent, line, signal],
-      ) as Promise<{ result?: { kind?: string; text?: string } } | undefined>
+      // alpha.3 signature: execute(agent, line, images, signal) — the images
+      // array is mandatory (pass empty for text-only passthrough).
+      const execution = commands.execute(agent, line, [], AbortSignal.timeout(30_000))
       const outcome = await execution
       const text = outcome?.result?.text
       if (outcome?.result?.kind === 'error') {
@@ -1474,10 +1472,11 @@ export class FeishuBot {
   /**
    * Register the phone as an ask-user surface. With dsh-ask-router present
    * this registers as one surface among several (first answer wins across
-   * surfaces). Without it: on rc-era hosts the provider slot is taken
-   * directly (a DUPLICATE_PROVIDER error yields gracefully to a native UI);
-   * on alpha-era hosts (no slot) a claim-scoped 'user-questions/request'
-   * waterfall answerer is registered, delegating unclaimed asks via next().
+   * surfaces). Without it: a claim-scoped 'user-questions/request' cordis
+   * waterfall answerer — answer by returning, delegate unclaimed asks via
+   * next(). (alpha.3 removed the rc-era registerProvider slot along with its
+   * DUPLICATE_PROVIDER yield protocol; the waterfall is the host's single
+   * dispatch.)
    */
   private registerAskSurface(): void {
     const ask = (request: AskRequestLike): Promise<AskUserQuestionAnswer> => this.askViaCard(request)
@@ -1492,26 +1491,10 @@ export class FeishuBot {
       this.cleanupFns.push(dispose)
       return
     }
-    const userQuestions = this.ctx.get('userQuestions') as
-      | { registerProvider(provider: { ask(request: AskRequestLike): Promise<AskUserQuestionAnswer> }): () => void }
-      | undefined
-    if (userQuestions !== undefined && typeof userQuestions.registerProvider === 'function') {
-      try {
-        this.cleanupFns.push(userQuestions.registerProvider({ ask }))
-      } catch (error) {
-        if (isDuplicateProviderError(error)) {
-          this.ctx.logger.info('dsh-feishu: ask-user provider slot owned by another UI — yielding')
-          return
-        }
-        this.ctx.logger.warn('dsh-feishu: ask provider registration failed: %o', error)
-      }
-      return
-    }
-    if (userQuestions === undefined) return
-    // alpha-era host: the provider slot is gone; answerers compose on the
-    // scoped 'user-questions/request' cordis waterfall (answer by returning,
-    // delegate with next()). The event is not part of the rc-era type
-    // surface, hence the structural cast.
+    // Standalone path: answerers compose on the Agent-scoped
+    // 'user-questions/request' cordis waterfall. The event is not part of the
+    // dsh-user-questions type surface this plugin imports, hence the
+    // structural cast.
     const registerWaterfall = (this.ctx.on as unknown as (
       event: 'user-questions/request',
       listener: (request: AskRequestLike, next: () => Promise<AskUserQuestionAnswer>) => Promise<AskUserQuestionAnswer>,

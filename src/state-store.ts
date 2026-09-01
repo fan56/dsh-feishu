@@ -9,7 +9,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
+// Type-only: alpha.3 removed the settingsNamespace() runtime helper this file
+// used to import; the namespace is a plain literal below (register()
+// brand-checks it at the type level and parse-checks it at runtime).
+import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import type { ResumeRow } from './resume-table.ts'
 
 /** A persisted /resume selection awaiting its index reply. */
@@ -94,7 +97,10 @@ function decodePhoneModel(raw: unknown): { provider: string; model: string; reas
   }
 }
 
-const STATE_NAMESPACE = settingsNamespace('dsh-feishu')
+// dsh-settings 0.1.2-alpha.3 removed the runtime settingsNamespace() helper:
+// a plain literal is the supported spelling (same adaptation as
+// dsh-model-sync / dsh-cron / dsh-vault).
+const STATE_NAMESPACE = 'dsh-feishu'
 
 const STATE_SCHEMA = z.object({
   boundSessionId: z.string().default(''),

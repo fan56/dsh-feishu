@@ -589,48 +589,30 @@ test('ask flow: abort dismisses the card and rejects with ASK_ABORTED', async ()
   assert.match(patches[0].header.title.content, /取消/)
 })
 
-test('registerAskSurface: router present → surface registered, provider slot untouched', () => {
+test('registerAskSurface: router present → surface registered, no waterfall slot taken', () => {
   let surface
-  let providerTouched = 0
+  let eventName
   const bot = askBot({}, {
     get: key => key === 'askSurfaces'
       ? { register(s) { surface = s; return () => {} } }
-      : key === 'userQuestions' ? { registerProvider() { providerTouched += 1; return () => {} } } : undefined,
+      : undefined,
+    on(event) {
+      eventName = event
+      return () => {}
+    },
   })
   bot.registerAskSurface()
   assert.ok(surface !== undefined)
   assert.equal(surface.name, 'feishu')
-  assert.equal(providerTouched, 0)
+  assert.equal(eventName, undefined, 'the router path never touches the waterfall')
   assert.equal(surface.claim({ agent: { session: { id: 's1' } } }), true)
   assert.equal(surface.claim({ agent: { session: { id: 'other' } } }), false)
 })
 
-test('registerAskSurface: no router → direct provider; DUPLICATE yields without throwing', () => {
-  let registered
-  const bot = askBot({}, { get: key => key === 'userQuestions' ? { registerProvider(p) { registered = p; return () => {} } } : undefined })
-  bot.registerAskSurface()
-  assert.ok(registered !== undefined)
-
-  const duplicate = askBot({}, {
-    get: key => key === 'userQuestions'
-      ? {
-        registerProvider() {
-          const err = new Error('a user-questions provider is already registered')
-          err.name = 'UserQuestionError'
-          err.code = 'DUPLICATE_PROVIDER'
-          throw err
-        },
-      }
-      : undefined,
-  })
-  duplicate.registerAskSurface() // yields — must not throw
-})
-
-test('registerAskSurface: alpha-era host (no provider slot) — unclaimed ask delegates via next()', async () => {
+test('registerAskSurface: no router — unclaimed ask delegates via next()', async () => {
   let eventName
   let listener
   const bot = askBot({}, {
-    get: key => key === 'userQuestions' ? {} : undefined,
     on(event, fn) {
       eventName = event
       listener = fn
@@ -652,11 +634,10 @@ test('registerAskSurface: alpha-era host (no provider slot) — unclaimed ask de
   assert.deepEqual(answer.answers[0].selected, ['x'])
 })
 
-test('registerAskSurface: alpha-era host — claimed ask sends the card instead of delegating', async () => {
+test('registerAskSurface: no router — claimed ask sends the card instead of delegating', async () => {
   let listener
   const cards = []
   const bot = askBot({ sendCard: async (chatId, card) => { cards.push(card); return 'msg-1' } }, {
-    get: key => key === 'userQuestions' ? {} : undefined,
     on(event, fn) {
       listener = fn
       return () => {}
