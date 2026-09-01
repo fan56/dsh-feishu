@@ -279,7 +279,7 @@ export class FeishuBot {
         const agent = this.binder.getAgent()
         return agent === undefined
           ? []
-          : buildBtwSnapshot(agent.session.events, this.config.btwContextMessages)
+          : buildBtwSnapshot(agent.session.snapshotEvents(), this.config.btwContextMessages)
       },
       isMainRunning: () => this.binder.getAgent()?.status === 'running',
       isReadOnlyView: () => this.binder.isReadOnlyView(),
