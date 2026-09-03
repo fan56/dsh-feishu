@@ -28,6 +28,10 @@ export interface LarkGateway {
   sendCard(chatId: string, card: AnyCard): Promise<string | undefined>
   patchCard(messageId: string, card: AnyCard): Promise<boolean>
   react(messageId: string, emojiType: string): Promise<void>
+  /** Download one image resource; undefined on failure (best-effort). */
+  downloadImage(messageId: string, imageKey: string): Promise<Uint8Array | undefined>
+  /** The bot's own open_id (mention routing); undefined when unresolvable. */
+  fetchBotOpenId(): Promise<string | undefined>
 }
 
 /** Best-effort error sink (`what` names the failed operation). */
@@ -378,6 +382,45 @@ export class LarkClient implements LarkGateway {
       )
     } catch {
       // Reactions are a low-noise extra channel; never report their failure.
+    }
+  }
+
+  async downloadImage(messageId: string, imageKey: string): Promise<Uint8Array | undefined> {
+    try {
+      const response = await requestFeishu(
+        () => this.client.im.messageResource.get({
+          params: { type: 'image' },
+          path: { message_id: messageId, file_key: imageKey },
+        }),
+        { sleep: this.sleep },
+      )
+      const stream = response?.getReadableStream?.()
+      if (stream === undefined) return undefined
+      const chunks: Buffer[] = []
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array))
+      }
+      return new Uint8Array(Buffer.concat(chunks))
+    } catch (error) {
+      this.onError('download-image', error)
+      return undefined
+    }
+  }
+
+  async fetchBotOpenId(): Promise<string | undefined> {
+    try {
+      const response = await requestFeishu(
+        () => this.client.request<{ data?: { open_id?: unknown } }>({
+          url: '/open-apis/bot/v3/info',
+          method: 'GET',
+        }),
+        { sleep: this.sleep },
+      )
+      const openId = response?.data?.open_id
+      return typeof openId === 'string' && openId !== '' ? openId : undefined
+    } catch (error) {
+      this.onError('bot-info', error)
+      return undefined
     }
   }
 }

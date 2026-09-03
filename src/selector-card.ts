@@ -48,6 +48,12 @@ export interface SelectorSpec {
   readonly options: readonly SelectorOption[]
   readonly mode?: SelectorMode
   readonly submitLabel?: string
+  /**
+   * Cancellation lifetime (approval requests carry one): an abort settles the
+   * flow as cancelled and patches the terminal card, exactly like a TTL
+   * expiry — the awaiting caller sees `{ status: 'cancelled' }`.
+   */
+  readonly signal?: AbortSignal
 }
 
 /** Builder/parser flow reference: the manager's live flow, projected. */

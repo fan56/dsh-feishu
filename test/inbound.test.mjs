@@ -22,13 +22,57 @@ test('parses a p2p text message', () => {
   assert.equal(message.chatId, 'oc_1')
   assert.equal(message.chatType, 'p2p')
   assert.equal(message.messageId, 'om_1')
-  assert.equal(message.text, ' hello ')
+  // Text is trimmed at parse (mention stripping requires it anyway); the
+  // prompt channel always sent trimmed text, so p2p semantics are unchanged.
+  assert.equal(message.text, 'hello')
 })
 
 test('non-text messages parse with text undefined', () => {
   const message = parseReceiveEvent(payload({ message_type: 'image', content: '{}' }))
   assert.equal(message.messageType, 'image')
   assert.equal(message.text, undefined)
+})
+
+test('image messages parse their image_key', () => {
+  const message = parseReceiveEvent(payload({
+    message_type: 'image',
+    content: JSON.stringify({ image_key: 'img_v2_abc' }),
+  }))
+  assert.equal(message.imageKey, 'img_v2_abc')
+  assert.equal(message.text, undefined)
+})
+
+test('image messages without a usable key degrade to undefined', () => {
+  assert.equal(parseReceiveEvent(payload({ message_type: 'image', content: '{}' })).imageKey, undefined)
+  assert.equal(parseReceiveEvent(payload({ message_type: 'image', content: 'not-json' })).imageKey, undefined)
+})
+
+test('group text strips mention placeholders and collects mention ids', () => {
+  const message = parseReceiveEvent(payload({
+    chat_type: 'group',
+    content: JSON.stringify({ text: '@_user_1 帮我跑一下测试' }),
+    mentions: [
+      { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'dsh' },
+      { key: '@_user_2', id: { open_id: 'ou_peer' }, name: 'peer' },
+    ],
+  }))
+  assert.equal(message.text, '帮我跑一下测试')
+  assert.deepEqual(message.mentions.map(m => m.openId), ['ou_bot', 'ou_peer'])
+})
+
+test('group mention ids arrive as bare strings too (older payloads)', () => {
+  const message = parseReceiveEvent(payload({
+    chat_type: 'group',
+    content: JSON.stringify({ text: '@_user_1 hi' }),
+    mentions: [{ key: '@_user_1', id: 'ou_bot' }],
+  }))
+  assert.deepEqual(message.mentions.map(m => m.openId), ['ou_bot'])
+  assert.equal(message.text, 'hi')
+})
+
+test('p2p messages carry no mentions', () => {
+  const message = parseReceiveEvent(payload())
+  assert.deepEqual(message.mentions, [])
 })
 
 test('malformed JSON content degrades to the raw string', () => {

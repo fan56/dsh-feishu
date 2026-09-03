@@ -560,3 +560,72 @@ test('the in-flight message streams into the activity list as a ✍️ tail', ()
   assert.doesNotMatch(mdDone, /✍️/)
   assert.match(mdDone, /- 💬 _the fix is in_/)
 })
+
+// ------------------------------------------------------- quick actions --
+
+import { parseRoundCardAction, buildPushCard } from '../lib/card.js'
+
+test('running cards carry the stop button; ended cards the continue button', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  const live = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 1100, actions: { stop: true } }).card
+  const stopButton = live.body.elements.at(-1)
+  assert.equal(stopButton.tag, 'button')
+  assert.equal(stopButton.value.action, 'dsh_feishu_round')
+  assert.equal(stopButton.value.op, 'stop')
+  assert.equal(stopButton.name, 'dsh_feishu_round_stop')
+
+  foldBoundEvent(state, event('turn/end', { reason: { kind: 'completed' } }, 2000, 2))
+  const ended = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2100, actions: { continue: true } }).card
+  const continueButton = ended.body.elements.at(-1)
+  assert.equal(continueButton.value.op, 'continue')
+
+  // No actions context → no buttons (read-only views keep the card inert).
+  const plain = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2100 }).card
+  assert.equal(plain.body.elements.length, 1)
+})
+
+test('round action parser accepts value, name fallback, and rejects foreign payloads', () => {
+  const cardAction = op => ({ action: { value: { action: 'dsh_feishu_round', op }, name: `dsh_feishu_round_${op}` } })
+  assert.equal(parseRoundCardAction(cardAction('stop')), 'stop')
+  assert.equal(parseRoundCardAction(cardAction('continue')), 'continue')
+  // Name fallback when an SDK strips the value.
+  assert.equal(parseRoundCardAction({ action: { name: 'dsh_feishu_round_stop' } }), 'stop')
+  // Foreign markers never fall through to the name ladder.
+  assert.equal(parseRoundCardAction({ action: { value: { action: 'dsh_feishu_ask_submit' }, name: 'dsh_feishu_round_stop' } }), undefined)
+  assert.equal(parseRoundCardAction({ action: { value: { action: 'dsh_feishu_round', op: 'reset' } } }), undefined)
+  assert.equal(parseRoundCardAction({}), undefined)
+  assert.equal(parseRoundCardAction(null), undefined)
+})
+
+// -------------------------------------------------------- background push --
+
+test('push cards show cause + end state, session label and the last output line', () => {
+  const card = buildPushCard({
+    cause: '⏰ 定时任务',
+    reason: 'completed',
+    sessionLabel: 'ab12cd34',
+    lastAssistant: ' nightly backup finished, 12 files archived',
+    durationMs: 65_000,
+  })
+  assert.equal(card.header.title.content, '⏰ 定时任务 · ✅ 完成')
+  assert.equal(card.header.template, 'blue')
+  const body = card.body.elements[0].content
+  assert.match(body, /\*\*会话 ab12cd34\*\* · ✅ 完成 · 1m5s/)
+  assert.match(body, /nightly backup finished, 12 files archived/)
+  assert.match(body, /\/resume/)
+})
+
+test('push cards render errors red and omit an absent duration/assistant line', () => {
+  const card = buildPushCard({
+    cause: '🖥️ 桌面回合完成',
+    reason: 'error',
+    sessionLabel: 'ef901234',
+    lastAssistant: undefined,
+    durationMs: undefined,
+  })
+  assert.equal(card.header.template, 'red')
+  const body = card.body.elements[0].content
+  assert.doesNotMatch(body, /· \d/)
+  assert.doesNotMatch(body, /^> /m)
+})

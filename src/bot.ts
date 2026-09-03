@@ -21,7 +21,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type LlmRuntime, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock, type ImageBlock, type LlmRuntime, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
@@ -59,7 +60,7 @@ import {
   type ModelSelectionUpdate,
 } from './interactive.ts'
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
-import { buildBodyCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, type Schema2Card } from './card.ts'
+import { buildBodyCard, buildPushCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, parseRoundCardAction, type RoundActionOp, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
 import { buildBtwSnapshot, type BtwStreamChunk } from './btw.ts'
 import { BtwManager } from './btw-bot.ts'
@@ -82,6 +83,26 @@ import {
 import type { BindResult, SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
 import { clipLine, segmentText } from './text.ts'
+import { imageExtensionOf, sniffImageMediaType } from './image.ts'
+import { foldPushEvent, initialPushTrack, pushCauseLabel, shouldPush, type PushTrack } from './push.ts'
+
+/** Structural view of the host's attachment service (dsh-attachment ctx service). */
+interface AttachmentsLike {
+  readonly imageLimits?: { readonly maxImageBytes: number; readonly mediaTypes: readonly string[] }
+  saveImage(input: { data: Uint8Array; mediaType: string; name?: string }): Promise<unknown>
+}
+
+/** Structural view of the host's approval waterfall request (dsh-user-approval). */
+interface ApprovalRequestLike {
+  readonly agent?: { session?: { id?: unknown } }
+  readonly toolName: string
+  readonly callId?: string
+  readonly reason?: string
+  readonly signal?: AbortSignal
+}
+
+/** The closed approval outcome vocabulary (dsh-user-approval). */
+type ApprovalOutcomeLike = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
 /** A pending /resume table awaiting its index reply (5-minute lifetime). */
 interface PendingPicker {
@@ -196,6 +217,10 @@ export class FeishuBot {
   private readonly host: InteractiveHost
   /** Inbound message that triggered the current turn (for the done reaction). */
   private turnOriginMessageId: string | undefined
+  /** The bot's own open_id — group mention routing (resolved at start; optional). */
+  private botOpenId: string | undefined
+  /** Per-session background-push scratch (firehose fold; bounded). */
+  private readonly pushTracks = new Map<string, PushTrack>()
   private ticker: ReturnType<typeof setInterval> | undefined
   private disposed = false
 
@@ -309,7 +334,15 @@ export class FeishuBot {
     this.ticker = interval
     this.cleanupFns.push(offFirehose, () => clearInterval(interval))
     this.registerAskSurface()
+    this.registerApprovalSurface()
     await this.lark.start(data => this.enqueue(data))
+    // The bot's own open_id gates group mentions (only @bot dispatches).
+    // Best-effort: a failure only degrades the gate to "any mention counts",
+    // never blocks the p2p path.
+    this.botOpenId = await this.lark.fetchBotOpenId()
+    if (this.botOpenId === undefined) {
+      this.ctx.logger.warn('dsh-feishu: bot open_id unresolvable — group mention gate accepts any mention')
+    }
     // Restore the binding WITHOUT resuming: if the persisted session happens
     // to be live in this process, attach to it (no side effects). A stored
     // but cold id stays in the store only — the lazy resume happens on the
@@ -397,14 +430,43 @@ export class FeishuBot {
     }
   }
 
+  /**
+   * Group gate: only @-mentions of the bot are dispatched — group traffic
+   * delivers EVERY message to the bot, and replying to all of them would
+   * spam the chat. Without a resolvable bot open_id any mention counts (a
+   * gate that dropped everything forever would be worse than a loose one).
+   *
+   * Images are the one exception to the mention rule: an image message cannot
+   * carry @mentions, so a group image counts as addressed when THIS chat is
+   * the bot's current dispatch surface (the operator has been driving from
+   * here) and a session is bound. A group that never touched the bot never
+   * receives image injection.
+   */
+  private groupGate(message: InboundMessage): boolean {
+    if (message.mentions.length === 0) {
+      return message.messageType === 'image'
+        && this.store.get().lastChatId === message.chatId
+        && this.boundId() !== undefined
+    }
+    return this.botOpenId === undefined || message.mentions.some(mention => mention.openId === this.botOpenId)
+  }
+
   private async process(message: InboundMessage): Promise<void> {
     if (!isOperator(message.openId, this.allowlist)) return // silent — non-operator
-    if (message.chatType !== 'p2p') return // v1: private chat only
+    if (message.chatType === 'group' && !this.groupGate(message)) return
     if (this.store.get().lastChatId !== message.chatId) {
       await this.store.update({ lastChatId: message.chatId })
     }
-    if (message.messageType !== 'text' || message.text === undefined) {
-      await this.reply('目前仅支持文本消息。')
+    if (message.messageType === 'image') {
+      await this.handleImage(message)
+      return
+    }
+    if (message.messageType !== 'text' || message.text === undefined || message.text === '') {
+      // Silence policy: a bare @ in a group (the common empty mention) and a
+      // whitespace-only p2p text (parsed to '') were always no-ops — keep it
+      // that way; only a genuinely unsupported p2p TYPE earns the pointer.
+      if (message.chatType === 'group' || message.messageType === 'text') return
+      await this.reply('目前仅支持文本和图片消息。')
       return
     }
     const intent = classifyInbound(message.text)
@@ -888,6 +950,26 @@ export class FeishuBot {
     }
   }
 
+  /**
+   * Round-card quick action: ⛔ 停止 is exactly the /stop path (btw calls die
+   * too); ▶️ 继续 nudges the agent with the literal word — a turn that ended
+   * mid-work (or an unattended question in text) picks up from there. The
+   * injected prompt IS the feedback when it lands (the new turn opens its own
+   * card); only the refused paths need a reply.
+   */
+  private async handleRoundAction(op: RoundActionOp): Promise<void> {
+    if (op === 'stop') {
+      await this.handleStop()
+      return
+    }
+    const outcome = await this.injectPrompt('继续')
+    if (outcome === 'refused') {
+      await this.reply(this.binder.isReadOnlyView()
+        ? '当前为只读旁观（该会话正由另一进程驱动），无法从这里派活。'
+        : '尚未绑定会话。发 /resume 进入一个会话。')
+    }
+  }
+
   private async handleSub(n: number): Promise<void> {
     const rows = subagentRows(this.runState)
     if (rows.length === 0) {
@@ -958,14 +1040,15 @@ export class FeishuBot {
    * adapters' skill activation): running turns get steered (join the CURRENT
    * turn's next round), idle sessions open the next turn. 'refused' covers
    * the read-only view and the missing binding — callers word their replies.
+   * Content is a block array: text for prompts, text+image for pictures.
    */
-  private async injectPrompt(text: string): Promise<'steered' | 'opened' | 'refused'> {
-    if (text === '') return 'refused'
+  private async injectContent(content: readonly ContentBlock[]): Promise<'steered' | 'opened' | 'refused'> {
+    if (content.length === 0) return 'refused'
     if (this.binder.isReadOnlyView()) return 'refused'
     const agent = await this.ensureBoundAgent()
     if (agent === undefined) return 'refused'
     const userMessage = createUserMessage({
-      content: [{ type: 'text', text }],
+      content: [...content],
       source: { kind: 'user' },
     })
     if (agent.status === 'running') {
@@ -977,6 +1060,11 @@ export class FeishuBot {
     }
     agent.followup(userMessage)
     return 'opened'
+  }
+
+  private async injectPrompt(text: string): Promise<'steered' | 'opened' | 'refused'> {
+    if (text === '') return 'refused'
+    return this.injectContent([{ type: 'text', text }])
   }
 
   private async handlePrompt(message: InboundMessage, text: string): Promise<void> {
@@ -994,6 +1082,67 @@ export class FeishuBot {
     if (outcome === 'opened') {
       // Tie the done-reaction to this message only when OUR prompt opens the
       // next turn; a steered message belongs to a turn we do not own.
+      this.turnOriginMessageId = message.messageId
+    }
+    await this.lark.react(message.messageId, EMOJI_SEEN)
+  }
+
+  /**
+   * An image message from an operator: download the resource bytes, sniff the
+   * media type (Feishu declares none), commit a durable attachment ref, and
+   * inject an image-block user message through the shared steer/followup
+   * channel. The model route must accept image input (inputModalities) —
+   * a route that does not fails the turn visibly, same as the desktop.
+   */
+  private async handleImage(message: InboundMessage): Promise<void> {
+    if (this.binder.isReadOnlyView()) {
+      await this.reply('当前为只读旁观（该会话正由另一进程驱动），图片无法注入；发 /resume 切换会话。')
+      return
+    }
+    if (message.imageKey === undefined) {
+      await this.reply('图片消息缺少可下载的资源，无法注入。')
+      return
+    }
+    const attachments = this.ctx.get('attachments') as AttachmentsLike | undefined
+    if (attachments === undefined || typeof attachments.saveImage !== 'function') {
+      await this.reply('当前 profile 没有附件服务，图片无法进会话。')
+      return
+    }
+    const bytes = await this.lark.downloadImage(message.messageId, message.imageKey)
+    if (bytes === undefined || bytes.length === 0) {
+      await this.reply('图片下载失败，请重发一次。')
+      return
+    }
+    const mediaType = sniffImageMediaType(bytes)
+    if (mediaType === undefined) {
+      await this.reply('不支持的图片格式（仅 png / jpeg / webp / gif 可进会话）。')
+      return
+    }
+    const limits = attachments.imageLimits
+    if (limits !== undefined && typeof limits.maxImageBytes === 'number' && bytes.length > limits.maxImageBytes) {
+      await this.reply(`图片超过大小上限（约 ${Math.max(1, Math.round(limits.maxImageBytes / 1024 / 1024))}MB），无法注入。`)
+      return
+    }
+    let ref: ImageAttachmentRef
+    try {
+      ref = await attachments.saveImage({
+        data: bytes,
+        mediaType,
+        name: `feishu-image.${imageExtensionOf(mediaType)}`,
+      }) as ImageAttachmentRef
+    } catch (error) {
+      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      await this.reply(`图片入库失败：${reason === '' ? '未知错误' : reason}`)
+      return
+    }
+    const block: ImageBlock = { type: 'image', attachment: ref }
+    const outcome = await this.injectContent([block])
+    if (outcome === 'refused') {
+      await this.reply('尚未绑定会话。发 /resume 进入一个会话后再发图。')
+      return
+    }
+    if (outcome === 'opened') {
+      // Same reaction tie-in as a text prompt: the picture opened the turn.
       this.turnOriginMessageId = message.messageId
     }
     await this.lark.react(message.messageId, EMOJI_SEEN)
@@ -1048,10 +1197,10 @@ export class FeishuBot {
   // ------------------------------------------------------------ firehose --
 
   private onSessionEvent(session: Session, event: SessionEvent): void {
-    const boundId = this.binder.getSessionId()
-    if (boundId === undefined || this.disposed) return
+    if (this.disposed) return
     const sessionId = String(session.id)
-    if (sessionId === boundId) {
+    const boundId = this.binder.getSessionId()
+    if (boundId !== undefined && sessionId === boundId) {
       foldBoundEvent(this.runState, event)
       if (event.type === 'turn/start') {
         void this.chain(() => this.openCard())
@@ -1066,13 +1215,57 @@ export class FeishuBot {
       | { parentSession?: string; origin?: string; delegationDepth?: number }
       | undefined
     if (
-      header?.parentSession !== undefined && String(header.parentSession) === boundId
+      boundId !== undefined
+      && header?.parentSession !== undefined && String(header.parentSession) === boundId
       && (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0)
     ) {
       const known = this.runState.subagents.has(sessionId)
       foldChildEvent(this.runState, sessionId, event)
       if (!known) this.backfillChild(sessionId)
+      return
     }
+    // Every other session in the process is background-push territory (the
+    // profile-level firehose delivers them all).
+    this.trackBackgroundPush(session, sessionId, event)
+  }
+
+  /**
+   * Background completion push: fold non-bound ROOT sessions' events into a
+   * per-session scratch and, at turn/end, push a compact card when the config
+   * mode covers the cause. Bound sessions never double-push (their live round
+   * cards already flow); subagent children are skipped (their settlement
+   * reaches the parent as a subagent-settled notice, which IS pushed).
+   */
+  private trackBackgroundPush(session: Session, sessionId: string, event: SessionEvent): void {
+    if (this.config.backgroundPush === 'off') return
+    const header = session.header as { parentSession?: unknown } | undefined
+    if (header?.parentSession !== undefined) return
+    let track = this.pushTracks.get(sessionId)
+    if (track === undefined) {
+      track = initialPushTrack()
+      this.pushTracks.set(sessionId, track)
+      // Bound the scratch: drop the oldest id in insertion order.
+      if (this.pushTracks.size > 64) {
+        const oldest = this.pushTracks.keys().next().value
+        if (oldest !== undefined) this.pushTracks.delete(oldest)
+      }
+    }
+    const cause = foldPushEvent(track, event)
+    if (cause === undefined || !shouldPush(this.config.backgroundPush, cause)) return
+    const chatId = this.store.get().lastChatId
+    this.pushTracks.delete(sessionId)
+    if (chatId === undefined) return
+    const durationMs = track.turnStartedAt !== undefined && typeof event.time === 'number'
+      ? Math.max(0, event.time - track.turnStartedAt)
+      : undefined
+    const card = buildPushCard({
+      cause: pushCauseLabel(cause),
+      reason: track.endReason,
+      sessionLabel: sessionId.slice(0, 8),
+      lastAssistant: track.lastAssistant,
+      durationMs,
+    })
+    void this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)).catch(() => undefined)
   }
 
   /**
@@ -1142,6 +1335,7 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
+      actions: { stop: !this.binder.isReadOnlyView() },
     })
     const messageId = await this.lark.sendCard(chatId, card)
     if (messageId !== undefined) {
@@ -1178,6 +1372,7 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
+      actions: { stop: !this.binder.isReadOnlyView() },
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
@@ -1200,6 +1395,7 @@ export class FeishuBot {
         displayThink: this.store.get().displayThink,
         now: this.now(),
         settledRoundMs: this.runState.lastRoundDurationMs,
+        actions: { stop: !this.binder.isReadOnlyView() },
       })
       if (this.cardMessageId !== undefined) {
         const ok = await this.lark.patchCard(this.cardMessageId, card)
@@ -1232,6 +1428,7 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
+      actions: { continue: !this.binder.isReadOnlyView() },
     })
     if (this.cardMessageId !== undefined) {
       const ok = await this.lark.patchCard(this.cardMessageId, card)
@@ -1504,8 +1701,10 @@ export class FeishuBot {
     )))
   }
 
-  /** Whether the bound session is the one asking (claim routing). */
-  private claimsAskSession(request: AskRequestLike): boolean {
+  /** Whether the bound session is the one asking (claim routing). The read
+   * is structural on purpose — ask requests and approval requests share the
+   * `agent.session.id` identity but nothing else. */
+  private claimsAskSession(request: { readonly agent?: { readonly session?: { readonly id?: unknown } } }): boolean {
     const bound = this.binder.getSessionId()
     if (bound === undefined) return false
     const asking = request.agent?.session?.id
@@ -1568,6 +1767,62 @@ export class FeishuBot {
     void this.chain(() => this.lark.patchCard(entry.messageId!, card))
   }
 
+  // ------------------------------------------------------- approval surface --
+
+  /**
+   * Register the phone as an approval answerer on the host's
+   * 'approval/request' cordis waterfall — the same dispatch shape as the ask
+   * waterfall (dsh-acp is the host's own reference answerer; the TUI plugin
+   * registers none, so the phone is the sole interactive approver). Claiming
+   * means the requesting session is the bound one and a delivery chat exists;
+   * anything else delegates via next(), which the host treats as
+   * 'unavailable' (fail-closed) when no other answerer takes it.
+   */
+  private registerApprovalSurface(): void {
+    const registerWaterfall = (this.ctx.on as unknown as (
+      event: 'approval/request',
+      listener: (request: ApprovalRequestLike, next: () => Promise<ApprovalOutcomeLike>) => Promise<ApprovalOutcomeLike>,
+    ) => () => boolean)
+    this.cleanupFns.push(registerWaterfall('approval/request', async (request, next) => {
+      const chatId = this.store.get().lastChatId
+      if (chatId === undefined || !this.claimsAskSession(request)) return next()
+      return this.approvalViaCard(chatId, request)
+    }))
+  }
+
+  /**
+   * Send the approval card and resolve with the operator's decision. The
+   * request's own abort signal cancels the card mid-wait (turn aborted →
+   * 'cancelled'); the selector's standard 10-minute TTL bounds an ignored
+   * card, whose expiry fails closed as 'unavailable' — never an implicit
+   * allow.
+   */
+  private async approvalViaCard(chatId: string, request: ApprovalRequestLike): Promise<ApprovalOutcomeLike> {
+    const detail = request.reason === undefined || request.reason === ''
+      ? ''
+      : `：${clipLine(request.reason, 200)}`
+    try {
+      const outcome = await this.presentSelection(chatId, {
+        title: '🔐 权限审批',
+        description: `工具 \`${request.toolName}\`${detail}`,
+        mode: 'buttons',
+        ...(request.signal !== undefined ? { signal: request.signal } : {}),
+        options: [
+          { value: 'allow', label: '✅ 允许一次' },
+          { value: 'deny', label: '❌ 拒绝' },
+        ],
+      })
+      if (outcome.status === 'picked' && outcome.value === 'allow') return 'allowed-once'
+      if (outcome.status === 'picked') return 'rejected'
+      if (outcome.status === 'cancelled') return 'cancelled'
+      return 'unavailable' // expired — fail closed, never an implicit allow
+    } catch {
+      // The card never went out (send rejected) — a hung turn would be worse
+      // than a denied escalation; the host's own audit logs record it.
+      return 'unavailable'
+    }
+  }
+
   /**
    * card.action.trigger entry (ask-card submits, selector FW submits).
    * Unknown actions and foreign cards are ignored; only allowlisted
@@ -1594,6 +1849,15 @@ export class FeishuBot {
     if (modelSubmit !== undefined) {
       if (!isOperator(operator, this.allowlist)) return
       void this.chain(() => this.handleModelSubmitted(modelSubmit))
+      return
+    }
+    // Round-card quick actions (⛔ 停止 / ▶️ 继续) — same allowlist gate as
+    // every interactive surface; taps on stale cards degrade to the /stop
+    // path's own "no running turn" reply.
+    const roundOp = parseRoundCardAction(data)
+    if (roundOp !== undefined) {
+      if (!isOperator(operator, this.allowlist)) return
+      void this.handleRoundAction(roundOp).catch(() => undefined)
       return
     }
     const parsed = parseAskAction(data)

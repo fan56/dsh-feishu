@@ -54,6 +54,14 @@ export interface Config {
    * dsh-tui-pi's DSH_TUI_BTW_CONTEXT_MESSAGES knob.
    */
   btwContextMessages?: number
+  /**
+   * Background completion push for sessions the phone is NOT bound to
+   * (default `off` — the bot never messages unprompted unless told to):
+   * `cron` pushes turns that carried a cron delivery or a subagent-settled
+   * notice; `all` pushes every completed turn. Delivered to the last active
+   * chat. Override: DSH_FEISHU_BACKGROUND_PUSH.
+   */
+  backgroundPush?: 'off' | 'cron' | 'all'
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -69,6 +77,7 @@ export const Config = z.object({
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
   resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
   btwContextMessages: z.number().min(0).max(50).step(1).default(6),
+  backgroundPush: z.union([z.const('off'), z.const('cron'), z.const('all')]).default('off'),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -84,11 +93,13 @@ export interface ResolvedConfig {
   readonly bodySegmentChars: number
   readonly resumeListStyle: 'auto' | 'table' | 'list'
   readonly btwContextMessages: number
+  readonly backgroundPush: 'off' | 'cron' | 'all'
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
   'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle', 'btwContextMessages',
+  'backgroundPush',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -124,6 +135,9 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   if (btwConfigValue !== undefined && (!Number.isSafeInteger(btwConfigValue) || btwConfigValue < 0 || btwConfigValue > 50)) {
     throw new Error('dsh-feishu: btwContextMessages must be an integer in [0, 50]')
   }
+  const envPush = envString(env, 'DSH_FEISHU_BACKGROUND_PUSH')
+  const pushValue = config?.backgroundPush ?? (envPush === 'cron' || envPush === 'all' ? envPush : undefined)
+  const backgroundPush = pushValue === 'cron' || pushValue === 'all' ? pushValue : 'off'
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   return Object.freeze({
@@ -140,5 +154,6 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     bodySegmentChars,
     resumeListStyle,
     btwContextMessages: btwConfigValue ?? 6,
+    backgroundPush,
   })
 }

@@ -11,7 +11,12 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 ## ✨ Highlights
 
 - **Live round cards**: one card per LLM round-trip — current state (🤔 thinking / 🔧 tool / ⏳ subagent), tool calls, and a growing tail of the in-flight message, refreshed every **5 seconds** (pseudo-streaming)
+- **Quick actions on the round card**: ⛔ 停止 while a turn runs, ▶️ 继续 once it ends — one tap instead of typing
+- **Approval cards**: when the host's approval waterfall asks for a sandbox escalation, the phone gets a **✅ 允许一次 / ❌ 拒绝** card — an unattended run no longer stalls at the desk (the session's approval policy must be `ask`; expiry fails closed)
 - **Interactive ask-user cards**: when the agent calls `ask_user_question`, your phone gets an **interactive card** (dropdown / multi-select / text input + submit); the answer flows straight back. Pair it with [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) for **both desktop and phone prompting — first answer wins**
+- **Group chats**: pull the bot into a Feishu group — @-mention it to dispatch work or run commands (allowlisted members only, silent to everyone else); in the group the bot is actively driving, images flow **without** a mention
+- **Image dispatch**: send a picture in DM — it is downloaded, media-type sniffed, committed as a durable attachment and injected into the session as an image block (the session's model route must accept image input)
+- **Background push** (`backgroundPush`): completion cards for sessions the phone is *not* bound to — cron deliveries and subagent settlements (mode `cron`), or every finished turn (mode `all`); off by default, the bot never messages unprompted unless told to
 - **Interactive /model**: pick a model on the phone, grouped by provider —
   bot-created sessions switch live
 - **Interactive pickers for the desktop selectors**: `/think` (reasoning
@@ -47,6 +52,8 @@ Sign in at [open.feishu.cn](https://open.feishu.cn) → create a **Custom App** 
    `im.message.receive_v1` (messages) and `card.action.trigger` (card
    interactions — required by the ask cards and the /resume picker)
 4. Permissions: `im:message:send_as_bot`, `im:message.p2p_msg:readonly`,
+   `im:message.group_msg:readonly` (group dispatch),
+   `im:message.resources:readonly` (image download),
    `im:message.reactions:write`
 5. Availability: add yourself → **create a version and publish** (events don't
    flow until you publish — the most common stumbling block)
@@ -138,7 +145,10 @@ text to dispatch work.
 | `/settings` `/preset` `/theme` `/reload` `/hotkeys` `/model-sync` `/export` `/agents` `/subagents` `/profile-cfg` `/login` `/logout` `/skills` | Provided by the desktop **dsh-tui-pi** plugin (interactive panels) — the phone refuses them with a desktop pointer (and a phone-side stand-in hint where one exists, e.g. `/skills` → `/select-skill`) |
 | `/goal` `/dcp` | Exist in the dsh runtime but not yet adapted — refused with a desktop pointer |
 | `/session` | Mirrored to `/status` |
+| Any image message | Downloaded and injected into the bound session as an image block (DM: directly; group: only while that group is the active dispatch surface). Requires the model route to accept image input |
 | Any other text | Injected as a prompt into the bound session (steered into the running turn when one is live) |
+
+**Group usage**: add the bot to a Feishu group, then @-mention it — `@dsh 帮我跑一下测试` dispatches exactly like a DM; commands (`/resume`, `/stop`, …) work the same way after a mention. Only allowlisted members ever trigger the bot; everyone else is invisible. Cards land in the group while the dispatches keep coming from there; the binding itself stays the bot's single global one (one session at a time, whichever chat drove it last).
 
 Typical flow:
 
@@ -157,6 +167,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 | `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
 | `bodySegmentChars` | `3500` | long-body segmentation threshold |
 | `resumeListStyle` | `"auto"` | `/resume` list: `auto`/`table`/`list` |
+| `backgroundPush` | `"off"` | Completion push for sessions the phone is not bound to, into the last active chat: `off` / `cron` (turns carrying a cron delivery or a subagent-settled notice) / `all` (every finished turn). Env override: `DSH_FEISHU_BACKGROUND_PUSH` |
 | `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref names |
 
 Credential resolution order: plaintext in patch > `DSH_FEISHU_APP_ID/SECRET` env
@@ -187,8 +198,13 @@ npm test         # build + node --test (230+ pure-logic unit tests)
   process is driving that session, takeover is refused with the holder's pid
   instead of silently forking the log into interleaved seq numbers; same-process
   attach (shared agent instance) bypasses the lock and behaves as before; a refused `/resume` degrades into a READ-ONLY watch over the persisted log — the phone still receives every turn's final reply (poll-delayed, no streaming detail)
-- v1 is DM-only; group chats and the approval flow (the card layer is already
-  built) are on the roadmap
+- Group chats are mention-gated and share the bot's single global binding:
+  one bound session at a time, whichever chat dispatched last receives the
+  cards. A group image is accepted only from the chat that is currently the
+  active dispatch surface
+- Approval cards ride the host's `approval/request` waterfall with the
+  standard selector TTL (10 min); an expired or undeliverable approval fails
+  closed as `unavailable` — never an implicit allow
 - After attaching, session history is not replayed; counters start from attach
   time when a turn is already running
 - Never install ask-router into a **web** profile (the upstream apiproxy does

@@ -214,3 +214,15 @@ test('marker sanity: the selector marker does not collide with the other cards',
     assert.notEqual(SELECTOR_ACTION, foreign)
   }
 })
+
+test('an aborted spec signal settles the flow as cancelled and patches the grey card', async () => {
+  const { manager, patches } = makeManager()
+  const controller = new AbortController()
+  const pending = manager.present('oc_1', { ...SPEC, signal: controller.signal })
+  await tick()
+  controller.abort()
+  const outcome = await pending
+  assert.deepEqual(outcome, { status: 'cancelled' })
+  assert.match(patches.at(-1).card.header.title.content, /已取消/)
+  assert.equal(manager.pendingCount, 0)
+})

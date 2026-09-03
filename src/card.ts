@@ -60,6 +60,13 @@ export interface CardContext {
    * phase. The round count itself comes from the state (already incremented).
    */
   settledRoundMs?: number
+  /**
+   * Quick actions rendered as buttons under the body (taps arrive via
+   * card.action.trigger → parseRoundCardAction). The running card carries the
+   * stop gesture; the ended card offers a continue nudge. Absent = no buttons
+   * (read-only views keep the card inert).
+   */
+  actions?: { readonly stop?: boolean; readonly continue?: boolean }
 }
 
 /** Tail-line clip for the think tail inside the activity list. */
@@ -376,7 +383,7 @@ function withStatsFooter(markdown: string, footer: string): string {
  * tail growth, todo tick) triggers the 30s-beat patch.
  */
 export function buildStatusCard(state: RunState, context: CardContext): { card: Schema2Card; hash: string } {
-  const { sessionLabel, displayThink, now, settledRoundMs } = context
+  const { sessionLabel, displayThink, now, settledRoundMs, actions } = context
   const title = turnHeaderTitle(state, now, settledRoundMs)
   const template = turnTemplate(state)
 
@@ -402,6 +409,12 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
 
   const footer = buildFooter(footerFieldsOf(state, now))
 
+  const elements: Array<Record<string, unknown>> = [
+    { tag: 'markdown', content: withStatsFooter(markdown, footer) },
+  ]
+  if (actions?.stop === true) elements.push(roundActionButton('stop'))
+  if (actions?.continue === true) elements.push(roundActionButton('continue'))
+
   const card: Schema2Card = {
     schema: '2.0',
     config: { width_mode: 'fill' },
@@ -410,11 +423,60 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
       subtitle: { tag: 'plain_text', content: `dsh · ${sessionLabel}` },
       template,
     },
-    body: {
-      elements: [{ tag: 'markdown', content: withStatsFooter(markdown, footer) }],
-    },
+    body: { elements },
   }
-  return { card, hash: JSON.stringify([template, title, sessionLabel, markdown, footer]) }
+  return { card, hash: JSON.stringify([template, title, sessionLabel, markdown, footer, elements.length]) }
+}
+
+// ------------------------------------------------------------ quick actions --
+
+/** Marker written into every round-card action button's `value.action`. */
+export const ROUND_ACTION = 'dsh_feishu_round'
+
+/** Button name prefix; the operation rides after it (SDK value-strip fallback). */
+const ROUND_NAME_PREFIX = 'dsh_feishu_round_'
+
+/** Which quick action a round-card button performs. */
+export type RoundActionOp = 'stop' | 'continue'
+
+/** One round-card action button (value carries the op; the name is the fallback). */
+function roundActionButton(op: RoundActionOp): Record<string, unknown> {
+  return {
+    tag: 'button',
+    name: `${ROUND_NAME_PREFIX}${op}`,
+    // value MUST exist: value-less interactive components are rejected
+    // client-side with 200340 and the callback is never delivered.
+    value: { action: ROUND_ACTION, op },
+    text: { tag: 'plain_text', content: op === 'stop' ? '⛔ 停止' : '▶️ 继续' },
+    type: op === 'stop' ? 'danger' : 'primary',
+  }
+}
+
+/**
+ * Recognize OUR round-card action in a `card.action.trigger` payload;
+ * undefined for anything else. Value first, then the name-prefix fallback
+ * (SDK versions may strip values from submits) — the same ladder every
+ * interactive card here uses.
+ */
+export function parseRoundCardAction(data: unknown): RoundActionOp | undefined {
+  if (data === null || typeof data !== 'object') return undefined
+  const action = (data as { action?: unknown }).action
+  if (action === null || typeof action !== 'object') return undefined
+  const buttonValue = (action as { value?: unknown }).value
+  if (buttonValue !== null && typeof buttonValue === 'object') {
+    const marker = (buttonValue as { action?: unknown }).action
+    const op = (buttonValue as { op?: unknown }).op
+    if (marker === ROUND_ACTION && (op === 'stop' || op === 'continue')) return op
+    // A value carrying a DIFFERENT action means this is not our button —
+    // the name fallback below must not fire on foreign submits.
+    if (typeof marker === 'string') return undefined
+  }
+  const name = (action as { name?: unknown }).name
+  if (typeof name === 'string' && name.startsWith(ROUND_NAME_PREFIX)) {
+    const op = name.slice(ROUND_NAME_PREFIX.length)
+    if (op === 'stop' || op === 'continue') return op
+  }
+  return undefined
 }
 
 /**
@@ -431,6 +493,42 @@ export function buildBodyCard(body: string): Schema2Card {
     body: {
       elements: [{ tag: 'markdown', content: body }],
     },
+  }
+}
+
+// ---------------------------------------------------------- background push --
+
+/**
+ * The completion push card for a session the phone is not bound to (background
+ * mode): header = cause + end state, body = the turn's last visible output
+ * line. Deliberately compact — the full round-card pipeline only covers the
+ * bound session; this card's job is "something finished over there, here is
+ * the one-line gist".
+ */
+export function buildPushCard(input: {
+  readonly cause: string
+  readonly reason: string | undefined
+  readonly sessionLabel: string
+  readonly lastAssistant: string | undefined
+  readonly durationMs: number | undefined
+}): Schema2Card {
+  const icon = turnEndIcon(input.reason)
+  const word = input.reason === undefined ? '已结束' : turnEndWord(input.reason)
+  const duration = input.durationMs !== undefined ? ` · ${formatDuration(input.durationMs)}` : ''
+  const lines = [`**会话 ${input.sessionLabel}** · ${icon} ${word}${duration}`]
+  if (input.lastAssistant !== undefined && input.lastAssistant !== '') {
+    lines.push(`> ${clipLine(input.lastAssistant, 160)}`)
+  }
+  lines.push('_(后台会话的完成推送；/resume 进入该会话查看全貌)_')
+  return {
+    schema: '2.0',
+    config: { width_mode: 'fill' },
+    header: {
+      title: { tag: 'plain_text', content: `${input.cause} · ${icon} ${word}` },
+      subtitle: { tag: 'plain_text', content: `dsh · ${input.sessionLabel}` },
+      template: input.reason === 'error' ? 'red' : 'blue',
+    },
+    body: { elements: [{ tag: 'markdown', content: lines.join('\n\n') }] },
   }
 }
 

@@ -113,6 +113,14 @@ export class SelectorManager {
       }
       this.flows.set(id, flow)
       this.armTimer(flow, ttlMs)
+      if (flow.spec.signal !== undefined) {
+        // The requesting side cancelled (turn aborted) — settle immediately;
+        // a settle that raced the send is handled by sendFor's state guard.
+        flow.spec.signal.addEventListener('abort', () => {
+          if (flow.state !== 'pending' || this.flows.get(flow.id) !== flow) return
+          this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
+        }, { once: true })
+      }
       void this.sendFor(flow)
     })
   }

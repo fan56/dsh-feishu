@@ -77,3 +77,16 @@ test('btwContextMessages accepts 0..50 and rejects the rest', () => {
   assert.throws(() => resolveConfig({ btwContextMessages: -1 }, {}), /btwContextMessages/)
   assert.throws(() => resolveConfig({ btwContextMessages: 1.5 }, {}), /btwContextMessages/)
 })
+
+test('backgroundPush defaults to off and accepts the three modes', () => {
+  assert.equal(resolveConfig({}, {}).backgroundPush, 'off')
+  assert.equal(resolveConfig({ backgroundPush: 'cron' }, {}).backgroundPush, 'cron')
+  assert.equal(resolveConfig({ backgroundPush: 'all' }, {}).backgroundPush, 'all')
+})
+
+test('backgroundPush env override picks up cron/all and coerces junk to off', () => {
+  assert.equal(resolveConfig({}, { DSH_FEISHU_BACKGROUND_PUSH: 'cron' }).backgroundPush, 'cron')
+  assert.equal(resolveConfig({}, { DSH_FEISHU_BACKGROUND_PUSH: 'all' }).backgroundPush, 'all')
+  assert.equal(resolveConfig({}, { DSH_FEISHU_BACKGROUND_PUSH: 'loud' }).backgroundPush, 'off')
+  assert.equal(resolveConfig({ backgroundPush: 'cron' }, { DSH_FEISHU_BACKGROUND_PUSH: 'all' }).backgroundPush, 'cron')
+})
