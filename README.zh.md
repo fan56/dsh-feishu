@@ -6,7 +6,7 @@
 > 把**已存在的** dsh 会话接到手机上——派活、看进度、答问询、收回复。
 > 只出站 WebSocket，不开端口、不要内网穿透。
 
-**Requires dsh >= 0.1.2-alpha.4** —— 本插件只面向 0.1.2-alpha 宿主线，rc 线不再支持。
+**要求 dsh >= 0.1.2-rc.1** — 本插件只跟随 dsh RC/stable 线（CI 与发版在运行时解析 latest/next 中更新的 dist-tag）。**不再支持 alpha 线。**
 
 ---
 

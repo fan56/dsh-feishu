@@ -3,13 +3,15 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-03
 
 ### Changed
 
-- **BREAKING — dsh host floor `>= 0.1.2-alpha.3`, rc-line support dropped**: all rc/alpha dual paths and feature-detection are gone, single-target alpha only
+- **BREAKING — dsh host floor moves to `>= 0.1.2-rc.1` (supersedes the interim alpha.3 target below)**: all rc/alpha dual paths and feature-detection are gone — single-target on the rc.1 closure
   - ask-user answering registers on the `dsh-ask-router` surface registry when present, otherwise on the Agent-scoped `'user-questions/request'` cordis waterfall only — the rc-era `ctx.userQuestions.registerProvider` slot (and its `DUPLICATE_PROVIDER` yield, via `isDuplicateProviderError`) is deleted
   - `/命令` passthrough calls `commands.execute(agent, line, images, signal)` with the mandatory alpha images array — the `execute.length >= 4` arity probe for the rc.7 three-argument shape is deleted
+- **CI/release ride the rolling rc/stable line — the alpha dist-tag is retired**: CI and the release workflow resolve the newest of the `latest` (stable) and `next` (rc) dist-tags at runtime (plain semver compare), never hand-pinned and never `@alpha` — the closure floor moves to the dsh 0.1.2-rc.1 line
+- **README declares rc/stable-only support**: `dsh >= 0.1.2-rc.1`, the alpha line is no longer supported
 
 ### Added
 
