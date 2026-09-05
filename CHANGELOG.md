@@ -3,6 +3,15 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] - 2026-09-05
+
+### Fixed
+- **Plugin unload settles every pending phone-side flow** — `dispose()` now rejects unanswered ask questions (`ASK_ABORTED`) and cancels in-flight selector/approval flows, flushing their terminal card patches while the WebSocket is still open; previously the host-side callers hung until their own abort/turn end and the cards stayed submittable on the phone.
+- **Teardown no longer arms the bot after disposal** — the arm-after-credentials race (the seam wait is bounded, not instant) opened a WebSocket nothing would ever close and re-created the lock file the teardown had already released; a `tornDown` latch closes it.
+
+### Changed
+- Clean-uninstall documentation (Uninstall sections in both READMEs) and an uninstall leg in the boot smoke asserting `dsh plugin remove` reconciles the profile tree back to stock.
+
 ## [0.7.0] - 2026-09-03
 
 ### Changed

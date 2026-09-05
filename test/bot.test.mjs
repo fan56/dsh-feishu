@@ -1049,3 +1049,39 @@ test('ordinary resume failures keep the raw reason reply', async () => {
   assert.match(text, /进入会话失败：session directory vanished/)
   assert.doesNotMatch(text, /repair-session-log/)
 })
+
+// ------------------------------------------------ dispose settlement --
+
+test('dispose settles pending asks and cancels selector flows before closing the WS', async () => {
+  const patches = []
+  const closes = []
+  const bot = roundBot(
+    {
+      async sendCard() { return 'm1' },
+      async patchCard(id, card) { patches.push({ id, card }); return true },
+      close() { closes.push(true) },
+    },
+    { getSessionId: () => 's1', isReadOnlyView: () => false, dispose: async () => {} },
+  )
+  const rejections = []
+  bot.pendingAsks.set('q1', {
+    questions: [{ id: 'q1', prompt: 'pick one' }],
+    messageId: 'm1',
+    resolve: () => {},
+    reject: (error) => rejections.push(error),
+  })
+  const cancelReasons = []
+  bot.selectors = { cancelAll: (reason) => cancelReasons.push(reason) }
+
+  await bot.dispose()
+
+  assert.equal(bot.pendingAsks.size, 0)
+  assert.equal(rejections.length, 1)
+  assert.match(rejections[0].message, /unloading/)
+  assert.deepEqual(cancelReasons, ['dsh-feishu disposed'])
+  assert.equal(patches.length, 1) // the ask card got its terminal patch…
+  assert.deepEqual(closes, [true]) // …and the WS closed exactly once, after the settle
+
+  await bot.dispose() // idempotent: no double close
+  assert.equal(closes.length, 1)
+})

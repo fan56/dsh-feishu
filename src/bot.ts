@@ -375,6 +375,18 @@ export class FeishuBot {
     }
     if (this.ticker !== undefined) clearInterval(this.ticker)
     this.btw.dispose()
+    // Settle every phone-side interactive flow before the WS dies: the
+    // host-side callers fail fast (rejected, never left hanging) and the
+    // cards on the phone get a terminal patch instead of surviving as
+    // submittable zombies aimed at a disposed bot.
+    for (const [questionId, entry] of [...this.pendingAsks]) {
+      this.pendingAsks.delete(questionId)
+      this.patchAskCard(entry, buildAskDismissedCard(entry.questions, 'cancelled', ''))
+      entry.reject(new UserQuestionError('dsh-feishu is unloading — the ask was discarded', 'ASK_ABORTED'))
+    }
+    this.selectors.cancelAll('dsh-feishu disposed')
+    // Let the terminal card patches flush while the WS is still open.
+    await this.cardChain.catch(() => undefined)
     this.lark.close()
     await this.binder.dispose().catch(() => undefined)
   }

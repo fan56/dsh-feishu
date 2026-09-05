@@ -126,6 +126,24 @@ dsh --profile <your-profile>
 DM the bot `/help` → you get the command list; `/resume` lists sessions; send
 text to dispatch work.
 
+## 🗑️ Uninstall
+
+Remove the plugin from a profile:
+
+```sh
+dsh plugin --profile <name> remove @aiwayds/dsh-feishu
+```
+
+The host reconciles the profile automatically: the `dsh.profile.bundles` entry is spliced and the patch layer (the `dsh-feishu` insert with its config) is dropped.
+
+What stays on disk (kept on purpose — deleting data is destructive; a reinstall reuses it):
+
+- `~/.dsh/settings.yaml` `dsh-feishu:` section — bound session id, picker style, phone-model preference. Delete the section to reset the pairing.
+- Repair artifacts inside session dirs: `*.corrupt-bak*` is the only pre-repair copy of a damaged session log — keep it; `*.repaired.*` is the rewritten log the repair produced.
+- `/tmp/dsh-feishu-bot.lock` can linger after a SIGKILL; the stale-pid check steals it on the next start, so no manual step is needed.
+
+Plugin unload (reload, disable, process exit) settles pending phone-side flows: unanswered ask/approval/selection cards are patched to a terminal state and their host-side callers fail fast instead of hanging.
+
 ## 📱 Usage
 
 | Command | What it does |

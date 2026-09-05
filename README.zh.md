@@ -129,6 +129,24 @@ dsh --profile <你的 profile>
 
 私聊 bot 发 `/help` → 回命令清单；`/resume` 看会话列表；发文本即派活。
 
+## 🗑️ 卸载
+
+从 profile 移除插件：
+
+```sh
+dsh plugin --profile <name> remove @aiwayds/dsh-feishu
+```
+
+宿主会自动收敛：`dsh.profile.bundles` 条目被移除，patch 层（`dsh-feishu` 插入项及其配置）随包消失。
+
+以下内容有意保留在磁盘上（删除数据是破坏性的；重装后会继续复用）：
+
+- `~/.dsh/settings.yaml` 的 `dsh-feishu:` 段 —— 绑定的会话 id、picker 样式、手机端偏好；想重置配对就删掉这一段。
+- 会话目录里的修复产物：`*.corrupt-bak*` 是损坏日志修复前的唯一副本 —— 请保留；`*.repaired.*` 是修复后重写的日志。
+- `/tmp/dsh-feishu-bot.lock` 只在 SIGKILL 后可能残留；下次启动的 stale-pid 检查会自动接管，无需手动处理。
+
+插件卸载（reload、disable、进程退出）会结算手机端所有进行中的交互：未回答的提问/审批/选择卡片会被补丁到终态，宿主侧等待方快速失败而不是悬挂。
+
 ## 📱 使用
 
 | 命令 | 说明 |

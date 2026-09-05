@@ -176,8 +176,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   let bot: FeishuBot | undefined
+  let tornDown = false
   void (async () => {
     const creds = await resolveAppCredentials(ctx, policy)
+    // Teardown may land while credentials resolve (the seam wait is bounded,
+    // not instant): arming after disposal would open a WS nothing will ever
+    // close and re-create the lock file the effect already released.
+    if (tornDown) return
     if (creds === undefined) {
       releaseLock(lockFd)
       ctx.logger.warn(
@@ -219,6 +224,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })()
 
   ctx.effect(() => async () => {
+    tornDown = true
     await bot?.dispose().catch(() => undefined)
     releaseLock(lockFd)
   }, 'dsh-feishu: stop bot and release lock')
