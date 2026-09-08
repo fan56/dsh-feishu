@@ -15,9 +15,23 @@
  */
 
 import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
+// Types only (erased at emit). The runtime import is deliberately avoided:
+// the registry-published dsh-skill lib imports host-closure siblings
+// (@deepseek-ai/dsh-scope, dsh-llm — peers of it, but absent from a plugin
+// repo's own dependency graph), which dies under pnpm's isolated layout.
+// The host injects the real service at runtime; these types only shape the
+// provider object this plugin hands it.
+import type { SkillCandidate, SkillDefinition, SkillProvider } from '@deepseek-ai/dsh-skill'
+
+/** Mirrors dsh-skill's bundled-skill rank (a non-load-bearing ordering hint;
+ *  the constant is hardcoded there too). Local copy — see the type-import
+ *  note above for why dsh-skill is not loaded at runtime here. */
+const BUNDLED_SKILL_RANK = 600
 import { buildAllowlist } from './allowlist.ts'
 import { FeishuBot } from './bot.ts'
 import { SessionBinder } from './binder.ts'
@@ -26,7 +40,10 @@ import { LarkClient } from './lark-client.ts'
 import { StateStore } from './state-store.ts'
 
 export const name = 'dsh-feishu'
-export const inject = ['agents']
+
+/** Seams consumed: the agent service that drives sessions, plus the skill
+ *  registry that serves the bundled usage/config guide. */
+export const inject = ['agents', 'skills']
 
 export { Config, resolveConfig }
 export type { ResolvedConfig }
@@ -151,9 +168,86 @@ export async function resolveAppCredentials(
   }
 }
 
+// ----------------------------------------------------------- bundled skill --
+
+/** Provider name under `ctx.skills`; doubles as the skill name. */
+const SKILL_PROVIDER_NAME = 'dsh-feishu'
+
+/** Packaged skill body; `../skills/` resolves to the package root from both lib/ and src/. */
+const SKILL_BODY_URL = new URL('../skills/dsh-feishu/SKILL.md', import.meta.url)
+
+/** Resource base served with the skill so its relative links resolve. */
+const SKILL_RESOURCE_BASE = {
+  kind: 'directory',
+  path: fileURLToPath(new URL('../skills/dsh-feishu/', import.meta.url)),
+} as const
+
+const SKILL_INVOCATION = { modelInvocable: true, userInvocable: true } as const
+
+/** Routing description; must stay identical to the SKILL.md frontmatter (asserted in tests). */
+const SKILL_DESCRIPTION = 'dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置指南。凡涉及飞书/Lark 接入、机器人配对、手机端控制 dsh、卡片交互、后台推送，或要配置 feishu 时先读本指南：cordis.patch.yml 挂载块 config: 段 12 键（mode/domain/operators/appId/appSecret/凭据 refs/statusIntervalMs/bodySegmentChars/resumeListStyle/btwContextMessages/backgroundPush）、DSH_FEISHU_* 环境变量、ask_user_question 配置向导、operators 空则 bot 休眠、settings.yaml dsh-feishu: 段是运行态非配置。触发词：飞书、feishu、lark、机器人、operators、配对、绑定、backgroundPush。'
+
+const SKILL_CANDIDATE: SkillCandidate = {
+  name: SKILL_PROVIDER_NAME,
+  description: SKILL_DESCRIPTION,
+  invocation: SKILL_INVOCATION,
+  provider: SKILL_PROVIDER_NAME,
+  source: 'bundled',
+  resourceBase: SKILL_RESOURCE_BASE,
+  rank: BUNDLED_SKILL_RANK,
+  locator: SKILL_BODY_URL,
+}
+
+const skillProvider: SkillProvider = {
+  name: SKILL_PROVIDER_NAME,
+  list: () => Promise.resolve([SKILL_CANDIDATE]),
+  async get(_candidate): Promise<SkillDefinition> {
+    return {
+      name: SKILL_CANDIDATE.name,
+      description: SKILL_CANDIDATE.description,
+      invocation: SKILL_CANDIDATE.invocation,
+      provider: SKILL_CANDIDATE.provider,
+      source: SKILL_CANDIDATE.source,
+      resourceBase: SKILL_RESOURCE_BASE,
+      content: stripFrontmatter(await readFile(SKILL_BODY_URL, 'utf8')),
+    }
+  },
+}
+
+/**
+ * Strip a leading YAML frontmatter block (`---` / body / `---`) from a skill
+ * markdown file. `SkillDefinition.content` must be the instruction body after
+ * metadata removal — the same shape the filesystem provider serves — so the
+ * bundled SKILL.md, which keeps its frontmatter for the GitHub/manual install
+ * paths, has the block removed when served through {@link skillProvider.get}.
+ * Tolerant by design: input that does not open with a `---` line, or whose
+ * frontmatter block is never closed, is returned unchanged. Mirrors the
+ * delimiter semantics of the upstream skill-filesystem provider.
+ */
+export function stripFrontmatter(raw: string): string {
+  const firstLineEnd = raw.indexOf('\n')
+  if (firstLineEnd < 0 || raw.slice(0, firstLineEnd).replace(/\r$/, '') !== '---') return raw
+  let lineStart = firstLineEnd + 1
+  while (lineStart <= raw.length) {
+    const nextNewline = raw.indexOf('\n', lineStart)
+    const lineEnd = nextNewline < 0 ? raw.length : nextNewline
+    if (raw.slice(lineStart, lineEnd).replace(/\r$/, '') === '---') {
+      return raw.slice(nextNewline < 0 ? raw.length : nextNewline + 1).trim()
+    }
+    if (nextNewline < 0) return raw
+    lineStart = nextNewline + 1
+  }
+  return raw
+}
+
 // ------------------------------------------------------------------- apply --
 
 export function apply(ctx: Context, config: Config = {}): void {
+  // `inject = ['skills']` guarantees the service exists on every real host;
+  // register unconditionally (before the dormant early-returns below) so a
+  // missing service fails loud instead of silently dropping the bundled
+  // guide — which matters most exactly when the bot is not configured yet.
+  ctx.skills.registerProvider(() => skillProvider)
   let policy: ResolvedConfig
   try {
     policy = resolveConfig(config)

@@ -195,6 +195,14 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 
 凭证解析优先级：patch 明文 > 环境变量 `DSH_FEISHU_APP_ID/SECRET` > credentials 服务。
 
+## 🧩 内置技能
+
+插件随包内置了一个 skill（`dsh-feishu`）：直接让 agent「帮我配飞书机器人 / 配置
+feishu」，指南会自动加载——先核查前置条件（飞书应用、凭证），再用 ask_user_question
+逐项收集（operators 白名单、backgroundPush 档位），代写上面的 `config:` 段，并引导
+手机端配对。指南还覆盖 config 全键表、`DSH_FEISHU_*` 环境变量，以及运行态
+（`settings.yaml` 的 `dsh-feishu:` 段）与配置的区别。
+
 ## 🧯 故障排查
 
 | 现象 | 处理 |

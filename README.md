@@ -191,6 +191,16 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 Credential resolution order: plaintext in patch > `DSH_FEISHU_APP_ID/SECRET` env
 vars > the credentials service.
 
+## 🧩 Bundled skill
+
+The plugin ships a bundled skill (`dsh-feishu`): ask the agent to set up or
+configure the Feishu bot and the guide loads automatically — it checks the
+prerequisites (Feishu app, credentials), collects the operators allowlist and
+the `backgroundPush` mode via `ask_user_question`, writes the `config:` block
+above for you, and walks the phone-side pairing. It also documents the full
+config key table, the `DSH_FEISHU_*` env vars, and the runtime-state
+(`settings.yaml` `dsh-feishu:` section) vs config distinction.
+
 ## 🧯 Troubleshooting
 
 | Symptom | Fix |

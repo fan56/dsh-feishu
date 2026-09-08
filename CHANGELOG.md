@@ -3,6 +3,12 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-09-08
+
+### Added
+- **Bundled usage/config skill (`dsh-feishu`)** — the plugin now ships `skills/dsh-feishu/SKILL.md` and registers it through `ctx.skills.registerProvider` (`inject` gains the `skills` seam; registered unconditionally at the top of `apply()`, so the setup guide is served even while the bot is dormant): it documents the cordis.patch.yml `config:` block (all 12 keys with defaults and ranges), the `DSH_FEISHU_*` environment variables, the credentials priority (patch plaintext > env > credentials-service refs), the settings.yaml `dsh-feishu:` runtime-state vs config distinction, a curated phone command table, and troubleshooting — plus an interactive setup flow where the agent checks the Feishu app prerequisites, collects the operators allowlist and the `backgroundPush` mode via `ask_user_question`, and writes the patch `config:` block for the user.
+- README (en/zh) gains a "Bundled skill / 内置技能" section; the new `test/skill.test.mjs` guards the routing description against the packaged frontmatter (anti-drift) and the provider registration/get contract.
+
 ## [0.7.1] - 2026-09-05
 
 ### Fixed
