@@ -3,6 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-09-09
+
+### Changed
+- The bundled skill is renamed `dsh-feishu` → `dsh-feishu-config` (ecosystem-wide convention: config/usage-guide skills end with `-config`). Bundled skills are registered in-process with zero on-disk footprint — updating the package and restarting dsh migrates the name automatically; the old `/dsh-feishu` slash invocation stops resolving. README skill mention updated.
+
 ## [0.8.0] - 2026-09-08
 
 ### Added

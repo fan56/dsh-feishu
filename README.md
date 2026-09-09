@@ -193,7 +193,7 @@ vars > the credentials service.
 
 ## 🧩 Bundled skill
 
-The plugin ships a bundled skill (`dsh-feishu`): ask the agent to set up or
+The plugin ships a bundled skill (`dsh-feishu-config`): ask the agent to set up or
 configure the Feishu bot and the guide loads automatically — it checks the
 prerequisites (Feishu app, credentials), collects the operators allowlist and
 the `backgroundPush` mode via `ask_user_question`, writes the `config:` block
