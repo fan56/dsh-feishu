@@ -4,11 +4,15 @@
  * panels, O(1) per event) but renders nothing — the card builder projects
  * this state, the publisher pushes it on a 30s beat.
  *
- * Two entry points:
- * - {@link foldBoundEvent}: events of the BOUND session (turns, tools, todo,
- *   reasoning, retries, workflow agent-start/end markers).
- * - {@link foldChildEvent}: events of a discovered subagent child session
- *   (header-discovered by the bot; keeps per-child rounds + content tail).
+ * Four entry points:
+ * - {@link foldBoundEvent}: firehose events of the BOUND session (turns,
+ *   tools, todo, retries, workflow agent-start/end markers).
+ * - {@link foldChildEvent}: firehose events of a discovered subagent child
+ *   session (header-discovered by the bot; keeps per-child rounds + tail).
+ * - {@link foldBoundStreamChunk} / {@link foldChildStreamChunk}: live
+ *   streaming chunks of the bound session / its children, delivered as
+ *   `agent/assistant-stream` frames (dsh 0.1.5-rc.1 moved the deltas off the
+ *   firehose; settlements still arrive on `session/event`).
  *
  * All payload reads go through `unknown` shapes and never throw — a malformed
  * event degrades to a no-op, never a crashed bridge.
@@ -320,31 +324,6 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       state.pendingChars = 0
       break
     }
-    case 'assistant/chunk': {
-      const chunk = chunkOf(event.data)
-      if (chunk?.type === 'reasoning-delta' && (chunk.text ?? '') !== '') {
-        state.thinkingSince ??= event.time
-        let buffer = state.reasoningBuffer + (chunk.text ?? '')
-        if (buffer.length > REASONING_CAP) buffer = buffer.slice(-Math.floor(REASONING_CAP / 2))
-        state.reasoningBuffer = buffer
-      }
-      // Text deltas also grow the in-flight message buffer — the streaming
-      // tail the activity list shows between beats (capped like reasoning).
-      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
-        let buffer = state.textBuffer + chunk.text
-        if (buffer.length > TEXT_CAP) buffer = buffer.slice(-Math.floor(TEXT_CAP / 2))
-        state.textBuffer = buffer
-      }
-      // Both text and reasoning deltas grow the next request's context —
-      // price them into the live estimate (~3 chars/token, CJK-lean).
-      if (
-        (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta')
-        && typeof chunk.text === 'string' && chunk.text !== ''
-      ) {
-        state.pendingChars += chunk.text.length
-      }
-      break
-    }
     case 'request/header': {
       const config = headerConfigOf(event.data)
       if (config === undefined) break
@@ -493,14 +472,6 @@ export function foldChildEvent(
       if (text !== '') row.tail = lastNonBlankLine(text)
       break
     }
-    case 'assistant/chunk': {
-      const delta = chunkOf(event.data)
-      if ((delta?.type === 'text-delta' || delta?.type === 'reasoning-delta') && (delta.text ?? '') !== '') {
-        const line = lastNonBlankLine(delta.text ?? '')
-        if (line !== undefined) row.tail = line
-      }
-      break
-    }
     case 'tool/call': {
       const name = rec(event.data).name
       if (name !== undefined && name !== '') row.lastTool = name
@@ -533,6 +504,70 @@ export function reasoningTail(state: RunState): string | undefined {
 /** Streaming text tail — last visible line of the round's in-flight message. */
 export function streamingTextTail(state: RunState): string | undefined {
   return state.textBuffer === '' ? undefined : lastNonBlankLine(state.textBuffer)
+}
+
+// ------------------------------------------------- live stream frames -----
+//
+// dsh 0.1.5-rc.1 removed `assistant/chunk` from the `session/event` firehose:
+// streaming settles as `assistant/message` / `assistant/attempt`, and the
+// incremental deltas moved to the `agent/assistant-stream` agent event
+// (start/chunk/end frames; the chunk frame carries the raw StreamChunk and
+// its original timestamp). These two folds are the chunk cases' successors,
+// called by the bot's stream-frame listener.
+
+/** One live stream chunk as delivered by an `agent/assistant-stream` frame. */
+export interface StreamChunkLike {
+  readonly type?: string
+  readonly text?: string
+}
+
+/**
+ * Fold one streaming chunk of the BOUND session into the live card state:
+ * the thinking marker, the in-flight text tail, and the pending-chars
+ * context estimate.
+ */
+export function foldBoundStreamChunk(state: RunState, chunk: StreamChunkLike | undefined, time: number): void {
+  if (chunk?.type === 'reasoning-delta' && (chunk.text ?? '') !== '') {
+    state.thinkingSince ??= time
+    let buffer = state.reasoningBuffer + (chunk.text ?? '')
+    if (buffer.length > REASONING_CAP) buffer = buffer.slice(-Math.floor(REASONING_CAP / 2))
+    state.reasoningBuffer = buffer
+  }
+  if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
+    let buffer = state.textBuffer + chunk.text
+    if (buffer.length > TEXT_CAP) buffer = buffer.slice(-Math.floor(TEXT_CAP / 2))
+    state.textBuffer = buffer
+  }
+  if (
+    (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta')
+    && typeof chunk.text === 'string' && chunk.text !== ''
+  ) {
+    state.pendingChars += chunk.text.length
+  }
+}
+
+/**
+ * Fold one streaming chunk of a CHILD session into its compact row (the
+ * live tail line between settlements). The row is created lazily when
+ * absent — frame discovery may race the child's first firehose event.
+ */
+export function foldChildStreamChunk(state: RunState, childId: string, chunk: StreamChunkLike | undefined): void {
+  let row = state.subagents.get(childId)
+  if (row === undefined) {
+    row = {
+      childId,
+      label: `subagent ${childId.slice(0, 8)}`,
+      rounds: 0,
+      tail: undefined,
+      lastTool: undefined,
+      outcome: undefined,
+    }
+    state.subagents.set(childId, row)
+  }
+  if ((chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta') && (chunk.text ?? '') !== '') {
+    const line = lastNonBlankLine(chunk.text ?? '')
+    if (line !== undefined) row.tail = line
+  }
 }
 
 /**

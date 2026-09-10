@@ -73,8 +73,14 @@ export function sessionLogRoot(): string {
   return join(home, 'sessions')
 }
 
-/** Physical log file names the jsonl backend writes (`logSuffix`). */
-const LOG_FILE_NAMES = ['session.jsonl', 'session.jsonl.zstd'] as const
+/**
+ * Physical log file names the jsonl backend writes, current generation
+ * first: the artifact name carries the format version since the V3 format
+ * (`session.v3.jsonl[.zstd]`), legacy sessions keep `session.jsonl[.zstd]`.
+ * The walk breaks on the first existing name, so the order IS the
+ * precedence (current generation, compressed over raw).
+ */
+const LOG_FILE_NAMES = ['session.v3.jsonl.zstd', 'session.v3.jsonl', 'session.jsonl.zstd', 'session.jsonl'] as const
 
 /**
  * Best-effort session-id → last-write time map from the jsonl store's file

@@ -20,6 +20,7 @@
  * race the live agent) — the attach arm covers that case.
  */
 
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -234,7 +235,23 @@ export class SessionBinder {
     const cwd = await this.headerCwdOf(sessionId)
     if (cwd === undefined) throw new Error(`cannot locate the log of ${sessionId} for read-only viewing`)
     this.sessionId = sessionId
-    const file = join(sessionLogRoot(), projectKeyFor(cwd), sessionId, 'session.jsonl.zstd')
+    const dir = join(sessionLogRoot(), projectKeyFor(cwd), sessionId)
+    // The artifact name carries the format generation since the V3 format
+    // (session.v3.jsonl[.zstd]); legacy sessions keep session.jsonl[.zstd].
+    // Prefer the current generation, compressed over raw; when nothing is
+    // on disk yet (cold view before the writer flushes) fall back to the
+    // legacy canonical name — the tail tolerates a not-yet-existing file.
+    let file = join(dir, 'session.jsonl.zstd')
+    for (const name of ['session.v3.jsonl.zstd', 'session.v3.jsonl', 'session.jsonl.zstd', 'session.jsonl']) {
+      const candidate = join(dir, name)
+      try {
+        await stat(candidate)
+        file = candidate
+        break
+      } catch {
+        // Not this name — try the next one.
+      }
+    }
     const tail = new RemoteSessionTail(file, {
       onEvents: list => {
         if (this.remoteTail !== tail) return

@@ -75,11 +75,27 @@ import {
   backfillRouteFromLog,
   beginRound,
   foldBoundEvent,
+  foldBoundStreamChunk,
   foldChildEvent,
+  foldChildStreamChunk,
   initialRunState,
   type RunState,
   subagentRows,
 } from './run-state.ts'
+
+/**
+ * Structural shape of one `agent/assistant-stream` frame — only chunk frames
+ * matter here (start/end are lifecycle markers the settlements already cover).
+ */
+interface StreamFrame {
+  readonly type: 'start' | 'chunk' | 'end'
+  /** Chunk-frame timestamp (epoch ms, same clock as firehose events). */
+  readonly time?: number
+  readonly chunk?: {
+    readonly type?: string
+    readonly text?: string
+  }
+}
 import type { BindResult, SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
 import { clipLine, segmentText } from './text.ts'
@@ -323,6 +339,17 @@ export class FeishuBot {
         this.ctx.logger.warn('dsh-feishu: firehose fold failed: %o', error)
       }
     })
+    // dsh 0.1.5-rc.1: incremental streaming left the `session/event` firehose
+    // (settlements only) and moved to per-agent `agent/assistant-stream`
+    // frames. Root-scope listening sees every agent; frames are routed by the
+    // agent's session id exactly like the firehose above.
+    const offStream = this.ctx.on('agent/assistant-stream', (payload: { agent: { readonly id: SessionId }; frame: StreamFrame }) => {
+      try {
+        this.onStreamFrame(payload.agent, payload.frame)
+      } catch (error) {
+        this.ctx.logger.warn('dsh-feishu: stream frame fold failed: %o', error)
+      }
+    })
     const interval = setInterval(() => {
       try {
         this.beat()
@@ -332,7 +359,7 @@ export class FeishuBot {
     }, this.config.statusIntervalMs)
     interval.unref?.()
     this.ticker = interval
-    this.cleanupFns.push(offFirehose, () => clearInterval(interval))
+    this.cleanupFns.push(offFirehose, offStream, () => clearInterval(interval))
     this.registerAskSurface()
     this.registerApprovalSurface()
     await this.lark.start(data => this.enqueue(data))
@@ -1207,6 +1234,24 @@ export class FeishuBot {
   }
 
   // ------------------------------------------------------------ firehose --
+
+  /** Route one live stream frame to the bound-session or child fold. */
+  private onStreamFrame(agent: { readonly id: SessionId }, frame: StreamFrame): void {
+    if (this.disposed || frame.type !== 'chunk') return
+    const sessionId = String(agent.id)
+    const boundId = this.binder.getSessionId()
+    if (boundId === undefined) return
+    if (sessionId === boundId) {
+      foldBoundStreamChunk(this.runState, frame.chunk, frame.time ?? 0)
+      return
+    }
+    // Children: frames only refine tails of rows the firehose already
+    // discovered; unknown ids would race the descriptor and are ignored —
+    // the settlement (`assistant/message`) builds the tail authoritatively.
+    if (this.runState.subagents.has(sessionId)) {
+      foldChildStreamChunk(this.runState, sessionId, frame.chunk)
+    }
+  }
 
   private onSessionEvent(session: Session, event: SessionEvent): void {
     if (this.disposed) return

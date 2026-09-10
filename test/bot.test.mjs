@@ -251,7 +251,7 @@ test('child discovery backfills the agent name from the child session log', asyn
   // the attach and never arrive on the firehose — only the log has them.
   bot.onSessionEvent(
     { id: 'child-1', header: { parentSession: 'parent-1', origin: 'subagent', delegationDepth: 1 } },
-    { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'still going' } }, time: 900, seq: 4 },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'still going' }] } }, time: 900, seq: 4 },
   )
 
   const row = bot.runState.subagents.get('child-1')
@@ -273,7 +273,7 @@ test('child discovery without a sessions service keeps the fallback label', () =
   })
   bot.onSessionEvent(
     { id: 'child-2', header: { parentSession: 'parent-1', origin: 'subagent' } },
-    { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'x' } }, time: 900, seq: 1 },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'x' }] } }, time: 900, seq: 1 },
   )
   const row = bot.runState.subagents.get('child-2')
   assert.ok(row !== undefined)

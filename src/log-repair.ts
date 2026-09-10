@@ -55,12 +55,15 @@ export function repairedPathFor(logPath: string): string {
 }
 
 /**
- * The log file of a session dir: compressed when present, the raw jsonl
- * otherwise (sessions written by tooling without zstd exist on disk). The
- * script itself accepts both spellings — this only picks WHICH path to fix.
+ * The log file of a session dir: the current generation first (the artifact
+ * name carries the format version since the V3 format —
+ * `session.v3.jsonl[.zstd]`), then the legacy `session.jsonl[.zstd]`;
+ * compressed when present, the raw jsonl otherwise (sessions written by
+ * tooling without zstd exist on disk). The script itself accepts both
+ * spellings — this only picks WHICH path to fix.
  */
 export async function locateSessionLog(dir: string): Promise<string | undefined> {
-  for (const name of ['session.jsonl.zstd', 'session.jsonl']) {
+  for (const name of ['session.v3.jsonl.zstd', 'session.v3.jsonl', 'session.jsonl.zstd', 'session.jsonl']) {
     const candidate = join(dir, name)
     try {
       await stat(candidate)

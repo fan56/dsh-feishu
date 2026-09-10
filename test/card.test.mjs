@@ -15,7 +15,7 @@ import {
   turnHeaderTitle,
   turnPhase,
 } from '../lib/card.js'
-import { foldBoundEvent, foldChildEvent, initialRunState } from '../lib/run-state.js'
+import { foldBoundEvent, foldBoundStreamChunk, foldChildEvent, initialRunState } from '../lib/run-state.js'
 
 function event(type, data, time, seq) {
   return { type, data, time, seq }
@@ -29,7 +29,7 @@ function md(card) {
 test('running turn opens a schema 2.0 card: Round header, thinking phase, activity section', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'pondering' } }, 1100, 2))
+  foldBoundStreamChunk(state, { type: 'reasoning-delta', text: 'pondering' }, 1100)
   const { card, hash } = buildStatusCard(state, { sessionLabel: 'repo · ab12cd34', displayThink: false, now: 2200 })
   assert.equal(card.schema, '2.0')
   assert.equal(card.header.template, 'blue')
@@ -142,7 +142,7 @@ test('todo section stays visible when everything is done', () => {
 test('think tail renders in the activity bullet only when displayThink is on', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'deep thought' } }, 1100, 2))
+  foldBoundStreamChunk(state, { type: 'reasoning-delta', text: 'deep thought' }, 1100)
   const off = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card)
   assert.doesNotMatch(off, /deep thought/)
   const on = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: true, now: 2000 }).card)
@@ -165,7 +165,7 @@ test('turnPhase: tool beats thinking beats subagents; processing is the fallback
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   assert.equal(turnPhase(state).kind, 'processing')
-  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'reasoning-delta', text: 'hmm' } }, 1100, 2))
+  foldBoundStreamChunk(state, { type: 'reasoning-delta', text: 'hmm' }, 1100)
   assert.equal(turnPhase(state).kind, 'thinking')
   foldBoundEvent(state, event('tool-workflow/agent-start', { runId: 'r', seq: 1, label: 'w', childId: 'c1' }, 1200, 3))
   assert.equal(turnPhase(state).kind, 'thinking') // thinking still wins
@@ -551,7 +551,7 @@ test('empty markdown session list reuses the shared empty notice', () => {
 test('the in-flight message streams into the activity list as a ✍️ tail', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'text-delta', text: 'the fix is in\nwriting tests now' } }, 1100, 2))
+  foldBoundStreamChunk(state, { type: 'text-delta', text: 'the fix is in\nwriting tests now' }, 1100)
   const mdText = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card.body.elements[0].content
   assert.match(mdText, /- ✍️ _writing tests now_/)
   // Landing the message replaces the streaming tail with the settled 💬 line.

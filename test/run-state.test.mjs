@@ -8,7 +8,9 @@ import {
   beginRound,
   contextTokensEstimate,
   foldBoundEvent,
+  foldBoundStreamChunk,
   foldChildEvent,
+  foldChildStreamChunk,
   initialRunState,
   reasoningTail,
   streamingTextTail,
@@ -28,7 +30,7 @@ function chunk(type, text) {
 test('a full turn folds into counters, body and final reason', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', 'thinking...\nabout it'), 1100, 2))
+  foldBoundStreamChunk(state, chunk('reasoning-delta', 'thinking...\nabout it').chunk, 1100)
   foldBoundEvent(state, event('tool/call', { callId: 'c1', name: 'bash', arguments: '{}' }, 1200, 3))
   foldBoundEvent(state, event('tool/result', { callId: 'c1', message: { content: [{ toolCallId: 'c1', isError: false, content: [] }] } }, 2400, 4))
   foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'first answer' }] } }, 2500, 5))
@@ -96,9 +98,9 @@ test('reasoning buffer is capped', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   const big = 'x'.repeat(6000)
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', big), 1100, 2))
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', big), 1200, 3))
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', big), 1300, 4))
+  foldBoundStreamChunk(state, chunk('reasoning-delta', big).chunk, 1100)
+  foldBoundStreamChunk(state, chunk('reasoning-delta', big).chunk, 1200)
+  foldBoundStreamChunk(state, chunk('reasoning-delta', big).chunk, 1300)
   assert.ok(state.reasoningBuffer.length <= 8192)
   assert.equal(reasoningTail(state), 'x'.repeat(4096).slice(0, 4096))
 })
@@ -120,7 +122,7 @@ test('workflow agent-start/end track children on the parent fold', () => {
 
 test('child fold counts rounds and keeps the content tail', () => {
   const state = initialRunState()
-  foldChildEvent(state, 'child1', event('assistant/chunk', chunk('text-delta', 'working\non it'), 1100, 2))
+  foldChildStreamChunk(state, 'child1', chunk('text-delta', 'working\non it').chunk)
   foldChildEvent(state, 'child1', event('assistant/message', { message: { content: [{ type: 'text', text: 'step done' }] } }, 1200, 3))
   foldChildEvent(state, 'child1', event('tool/call', { callId: 'c', name: 'grep', arguments: '' }, 1300, 4))
   const row = state.subagents.get('child1')
@@ -136,9 +138,9 @@ test('malformed events never throw', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('tool/result', { unexpected: true }, 1000, 1))
   foldBoundEvent(state, event('todo/write', { todos: 'not-an-array' }, 1100, 2))
-  foldBoundEvent(state, event('assistant/chunk', { nope: 1 }, 1200, 3))
+  foldBoundStreamChunk(state, undefined, 1200)
   foldBoundEvent(state, event('turn/end', {}, 1300, 4))
-  foldChildEvent(state, 'c', event('assistant/chunk', null, 1400, 5))
+  foldChildStreamChunk(state, 'c', undefined)
   assert.equal(state.turnEndReason, 'unknown')
 })
 
@@ -171,7 +173,7 @@ test('malformed chunk text (truthy non-string) is a no-op for the estimate', () 
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   // A truthy non-string text must not poison pendingChars with NaN.
-  foldBoundEvent(state, event('assistant/chunk', { chunk: { type: 'text-delta', text: 42 } }, 1100, 2))
+  foldBoundStreamChunk(state, { type: 'text-delta', text: 42 }, 1100)
   assert.equal(state.pendingChars, 0)
   assert.equal(contextTokensEstimate(state), undefined)
 })
@@ -181,7 +183,7 @@ test('usage snapshot prices the context; streamed deltas estimate the growth', (
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
   // No usage yet — undefined until a billed message or pending chars exist.
   assert.equal(contextTokensEstimate(state), undefined)
-  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'x'.repeat(300)), 1100, 2))
+  foldBoundStreamChunk(state, chunk('text-delta', 'x'.repeat(300)).chunk, 1100)
   assert.equal(contextTokensEstimate(state), Math.ceil(300 / 3))
   foldBoundEvent(state, event('assistant/message', {
     usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 500, cacheWriteTokens: 50 },
@@ -190,7 +192,7 @@ test('usage snapshot prices the context; streamed deltas estimate the growth', (
   // Billed snapshot replaces the pending estimate.
   assert.equal(state.lastUsageTokens, 1750)
   assert.equal(contextTokensEstimate(state), 1750)
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', 'y'.repeat(90)), 1300, 4))
+  foldBoundStreamChunk(state, chunk('reasoning-delta', 'y'.repeat(90)).chunk, 1300)
   assert.equal(contextTokensEstimate(state), 1750 + 30)
   // A usage-less message keeps the baseline but restarts pending.
   foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'no usage' }] } }, 1400, 5))
@@ -376,7 +378,7 @@ test('round boundaries track start time, duration and verbatim text', () => {
 test('beginRound clears the per-round story; turn-level state survives', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', chunk('reasoning-delta', 'pondering'), 1100, 2))
+  foldBoundStreamChunk(state, chunk('reasoning-delta', 'pondering').chunk, 1100)
   foldBoundEvent(state, event('tool/call', { callId: 'c1', name: 'bash', arguments: '{}' }, 1200, 3))
   foldBoundEvent(state, event('tool/result', { callId: 'c1', message: { content: [] } }, 2400, 4))
   foldBoundEvent(state, event('todo/write', { todos: [{ content: 't', status: 'pending' }] }, 2500, 5))
@@ -410,18 +412,18 @@ test('beginRound clears the per-round story; turn-level state survives', () => {
 test('text deltas accumulate a capped streaming buffer that drains on landing', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
-  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'hello '), 1100, 2))
-  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'world\nsecond line'), 1200, 3))
+  foldBoundStreamChunk(state, chunk('text-delta', 'hello ').chunk, 1100)
+  foldBoundStreamChunk(state, chunk('text-delta', 'world\nsecond line').chunk, 1200)
   assert.equal(streamingTextTail(state), 'second line')
   // The buffer caps instead of growing without bound.
-  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'x'.repeat(20_000)), 1300, 4))
+  foldBoundStreamChunk(state, chunk('text-delta', 'x'.repeat(20_000)).chunk, 1300)
   assert.ok(state.textBuffer.length <= 8192)
   // The message lands — the buffer drains into it.
   foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'hello world' }] } }, 1400, 5))
   assert.equal(state.textBuffer, '')
   assert.equal(streamingTextTail(state), undefined)
   // beginRound also clears (fresh story for the next card).
-  foldBoundEvent(state, event('assistant/chunk', chunk('text-delta', 'next round text'), 1500, 6))
+  foldBoundStreamChunk(state, chunk('text-delta', 'next round text').chunk, 1500)
   beginRound(state)
   assert.equal(state.textBuffer, '')
 })
