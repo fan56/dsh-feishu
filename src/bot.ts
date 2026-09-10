@@ -35,7 +35,7 @@ import {
   parseAskAction,
   parseAskFormValue,
 } from './ask-card.ts'
-import { acquireWriterLock, releaseOwnedWriterLock, WriterLockedError, type WriterLockAcquisition } from './writer-lock.ts'
+import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import { defaultRepairBackend, type RepairBackend } from './log-repair.ts'
 import {
   buildModelPickCard,
@@ -160,18 +160,6 @@ interface PendingAsk {
 function cardOperatorOf(data: unknown): string | undefined {
   const operator = (data as { operator?: { open_id?: unknown } }).operator?.open_id
   return typeof operator === 'string' ? operator : undefined
-}
-
-/** Localize the lock holder's timestamp for the phone card; empty stays empty. */
-function formatHolderSince(iso: string): string {
-  if (iso === '') return ''
-  try {
-    const at = new Date(iso)
-    if (!Number.isNaN(at.getTime())) return `，自 ${at.toLocaleString('zh-CN', { hour12: false })}`
-  } catch {
-    // Informational only — fall through to the bare form.
-  }
-  return ''
 }
 
 const PICKER_TTL_MS = 5 * 60 * 1000
@@ -624,8 +612,8 @@ export class FeishuBot {
       await this.bindAndAnnounce(row)
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: bind %s failed: %o', row.sessionId, error)
-      if (error instanceof WriterLockedError) {
-        await this.degradeToRemoteWatch(row, error)
+      if (error instanceof SessionAlreadyOwnedError) {
+        await this.degradeToRemoteWatch(row)
         return
       }
       // The reason rides along (clipped): a bare "failed" on the phone gave
@@ -643,19 +631,20 @@ export class FeishuBot {
   }
 
   /**
-   * The single-writer guard fired on a bind: another live process drives the
-   * session. Degrade to a READ-ONLY view over its persisted log instead of a
-   * dead end — the same fold pipeline paints round cards, so every turn's
-   * final reply still lands on the phone (poll-delayed). Shared by the
-   * /resume failure path and the post-repair re-entry (a racer can steal the
-   * session in the gap between the repair lock release and the bind).
+   * The host's single-writer guard fired on a bind (SessionAlreadyOwnedError):
+   * another dsh process drives the session under its kernel write lease.
+   * Degrade to a READ-ONLY view over its persisted log instead of a dead end
+   * — the same fold pipeline paints round cards, so every turn's final reply
+   * lands on the phone (poll-delayed). Queued follow-ups drive an automatic
+   * takeover once the other process releases the session. Shared by the
+   * /resume failure path and the post-repair re-entry (a racer can take the
+   * session in the gap between the repair and the bind).
    */
-  private async degradeToRemoteWatch(row: ResumeRow, error: WriterLockedError): Promise<void> {
+  private async degradeToRemoteWatch(row: ResumeRow): Promise<void> {
     // Read-only watching is not a live main line — btw has nothing to run
     // alongside; cancel any in-flight side call on the switch.
     this.btw.cancelAll()
     try {
-      const since = formatHolderSince(error.holder.createdAt)
       await this.binder.watchRemote(row.sessionId, async events => {
         for (const event of events) {
           // Stub session header matching the bound id — turn cards,
@@ -674,8 +663,8 @@ export class FeishuBot {
       await this.store.update({ boundSessionId: row.sessionId })
       await this.reply(
         `已进入只读旁观：${row.preview}\n`
-        + `该会话正由另一进程驱动（pid ${error.holder.pid}${since}），为避免日志分叉不能从这里派活；\n`
-        + '对面的最终回复会同步到这里。/resume 或 /new 可切换。',
+        + '该会话正由另一个进程驱动，为避免日志分叉不能从这里派活；\n'
+        + '对面的最终回复会同步到这里，对面退出该会话后排队消息会自动接管。/resume 或 /new 可切换。',
       )
     } catch (watchError: unknown) {
       this.ctx.logger.warn('dsh-feishu: watch remote %s failed: %o', row.sessionId, watchError)
@@ -788,31 +777,22 @@ export class FeishuBot {
   }
 
   /**
-   * The guarded repair: hold the session's single-writer lock from BEFORE the
-   * rebuild until the swap lands (no process can start driving the session
-   * mid-way — TOCTOU), verify the rebuilt log actually loads, then swap and
-   * re-enter. Every failure path releases the lock and leaves the original
-   * byte-identical. The lock is dropped BEFORE the re-entry bind — a racer
-   * that steals the session in that window degrades to the same read-only
-   * watch a refused /resume gets.
+   * The guarded repair: rebuild the corrupt log, verify the result, then swap
+   * and re-enter. Every failure path leaves the original byte-identical.
+   *
+   * Cross-process arbitration note (0.1.5): a corrupt log cannot be DRIVEN —
+   * any process that tries to open it for write fails at log validation and
+   * the host's kernel write lease is released with that failure, so there is
+   * no live writer to exclude during the rebuild window (the pre-0.1.5
+   * pid-file guard here was deleted with the host lease taking over
+   * arbitration). A racer that takes the session after the swap degrades the
+   * re-entry below to the same read-only watch a refused /resume gets.
    */
   private async repairAndEnter(row: ResumeRow, dir: string): Promise<void> {
     // Compressed or raw — sessions written without zstd exist on disk.
     const logPath = await this.repair.locateSessionLog(dir)
     if (logPath === undefined) {
       await this.reply('修复失败：会话目录下没有日志文件，原文件未动。')
-      return
-    }
-    let claim: WriterLockAcquisition
-    try {
-      claim = await acquireWriterLock(dir)
-    } catch (error) {
-      const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
-      await this.reply(`修复失败：${reason === '' ? '无法确认会话写者状态' : reason}，原文件未动。`)
-      return
-    }
-    if (!claim.ok) {
-      await this.reply(`会话正被 pid ${claim.holder.pid} 驱动，不能修；先在桌面关闭该会话后再试。`)
       return
     }
     try {
@@ -836,17 +816,15 @@ export class FeishuBot {
       this.ctx.logger.warn('dsh-feishu: repair %s failed: %o', logPath, error)
       await this.reply(`修复失败：${clipLine(String(error instanceof Error ? error.message : error), 200) || '未知原因'}，原文件未动。`)
       return
-    } finally {
-      await releaseOwnedWriterLock(dir)
     }
-    // Bind FIRST, announce after: replying (a network round-trip) between
-    // the lock release and the bind would widen the steal window for no
-    // gain — and the bind's own WriterLockedError now has a degrade path.
+    // Bind FIRST, announce after: replying (a network round-trip) before the
+    // bind would only widen the window for a racer — and the bind's own
+    // SessionAlreadyOwnedError has a degrade path below.
     try {
       await this.bindAndAnnounce(row, '✅ 已修复并换入（原件备份为 .corrupt-bak）。')
     } catch (error) {
-      if (error instanceof WriterLockedError) {
-        await this.degradeToRemoteWatch(row, error)
+      if (error instanceof SessionAlreadyOwnedError) {
+        await this.degradeToRemoteWatch(row)
         return
       }
       const reason = clipLine(String(error instanceof Error ? error.message : error), 200)

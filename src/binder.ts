@@ -28,7 +28,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionLogRoot } from './resume-table.ts'
 import { RemoteSessionTail } from './remote-tail.ts'
-import { WriterLockedError, acquireWriterLock, projectKeyFor, releaseOwnedWriterLock, type WriterLockHolder } from './writer-lock.ts'
+import { projectKeyFor } from './session-dir.ts'
 
 /** How the current binding came to be. */
 export type BindMode = 'attached' | 'resumed' | 'created'
@@ -97,23 +97,6 @@ export class SessionBinder {
   private readonly outbox: string[] = []
   private promotingRemote = false
   private promoteTimer: ReturnType<typeof setInterval> | undefined
-  /** Writer lock taken for the CURRENTLY bound local agent. */
-  private driveLock: { dir: string } | undefined
-  /**
-   * Session dirs whose cross-process writer lock WE hold. Deliberately not
-   * cleared on rebind/detach: the agent stays live (adoptable) in this
-   * process's registry, so dropping the lock would reopen the exact
-   * two-process race the guard kills.
-   *
-   * Lifecycle caveat: locks flush at binder.dispose(). That is correct for
-   * process teardown, but NOT for "plugin fiber disposed while the dsh
-   * process keeps running" (e.g. a plugin-only reload that leaves created/
-   * resumed agents live in the registry) — during such a window the session
-   * is live here yet unlocked, and another process may cold-resume it.
-   * Accepted until lock lifecycle can ride agent lifetime instead of binder
-   * lifetime; never dispose this binder without the whole plugin/process.
-   */
-  private readonly heldLockDirs = new Set<string>()
 
   constructor(ctx: Context, options: { viewerOptions?: { intervalMs?: number; decode?(file: string): Promise<string> } } = {}) {
     this.ctx = ctx
@@ -141,21 +124,6 @@ export class SessionBinder {
     return this.outbox.length > 0
   }
 
-  /**
-   * Contract "idle releases the write": called by the bot when the bound
-   * driver's turn ends with nothing queued — drop our writer lock so the
-   * next inputting surface takes it. The next phone message re-takes the
-   * lock through its normal bind/drive path (or degrades to watching).
-   */
-  maybeReleaseIdleLock(): void {
-    if (this.hasOutbox() || this.remoteTail !== undefined) return
-    const lock = this.driveLock
-    if (lock === undefined) return
-    this.driveLock = undefined
-    this.heldLockDirs.delete(lock.dir)
-    void releaseOwnedWriterLock(lock.dir)
-  }
-
   private opChain: Promise<void> = Promise.resolve()
   private runExclusive<T>(op: () => Promise<T>): Promise<T> {
     const next = this.opChain.then(op, op)
@@ -176,7 +144,7 @@ export class SessionBinder {
     this.promoteTimer = undefined
   }
 
-  /** Queue non-empty + lock winnable ⇒ take over via registered hook. */
+  /** Queue non-empty + bind winnable ⇒ take over via registered hook. */
   private async maybePromoteRemoteInner(watchId: string): Promise<void> {
     if (this.promotingRemote || !this.hasOutbox()) return
     const hook = this.hook
@@ -184,11 +152,11 @@ export class SessionBinder {
     this.promotingRemote = true
     try {
       // Stop spectating FIRST so bot-side folds during binding stay sane.
+      // The bind itself is the takeover probe: a host-side owner still
+      // driving the session makes it throw SessionAlreadyOwnedError and we
+      // fall back to the watch below, retrying on a later poll.
       await this.stopWatchRemote()
-      await this.acquireColdGuardFor(watchId) // throws while another holder lives
-      this.driveLock = undefined // rebound below re-establishes it
-      const bound = await this.bind(watchId)
-      this.driveLock = bound.mode === 'attached' ? undefined : this.driveLock
+      await this.bind(watchId)
     } catch {
       this.promotingRemote = false
       try { await this.watchRemoteInner(watchId, () => {}) } catch { /* log gone */ }
@@ -207,11 +175,6 @@ export class SessionBinder {
         source: { kind: 'user' },
       }))
     }
-  }
-
-  private async acquireColdGuardFor(sessionId: string): Promise<void> {
-    const guard = await this.acquireLockGuard({ id: sessionId })
-    this.driveLock = guard ?? this.driveLock
   }
 
   /**
@@ -347,35 +310,25 @@ export class SessionBinder {
   private async createNewInner(cwd: string, selection?: ModelSelection): Promise<BindResult> {
     await this.releaseOwned()
     const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
-    // Single-writer guard BEFORE agents.create: minting the UUID here (not
-    // inside agents.create) lets the header handed to the locator carry the
-    // exact id + cwd that create is about to persist (locate reads only
-    // those), making the pre-create acquisition race-free by construction.
+    // A fresh UUID cannot collide: no other process knows this id, and the
+    // host's own write lease covers it from the first materializing write.
     const sessionId = crypto.randomUUID()
-    const restore = await this.acquireLockGuard({ id: sessionId, cwd })
-    try {
-      const handle = await this.agents.create({
-        sessionId: SessionId(sessionId),
-        meta: { cwd },
-        // A bare create has NO route — the first request dies with "agent has
-        // no provider/model" (the TUI composes its default selection before
-        // creating; the bot inherits the previous session's route instead).
-        ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
-        setup: agentCtx => {
-          installModelSelection(agentCtx, selectionRef)
-        },
-      })
-      this.owned = handle
-      this.driveLock = restore
-      this.sessionId = String(handle.agent.session.id)
-      // The created session's model selection is bot-owned — handing the ref
-      // back lets the bot live-switch the route later (/model).
-      return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
-    } catch (error) {
-      // Nothing was bound — do not keep a guard for a session we never made.
-      await this.discardAcquiredLock(restore)
-      throw error
-    }
+    const handle = await this.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd },
+      // A bare create has NO route — the first request dies with "agent has
+      // no provider/model" (the TUI composes its default selection before
+      // creating; the bot inherits the previous session's route instead).
+      ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
+      setup: agentCtx => {
+        installModelSelection(agentCtx, selectionRef)
+      },
+    })
+    this.owned = handle
+    this.sessionId = String(handle.agent.session.id)
+    // The created session's model selection is bot-owned — handing the ref
+    // back lets the bot live-switch the route later (/model).
+    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
   }
 
   /** Bind one session id (attach when live, else resume). */
@@ -414,63 +367,20 @@ export class SessionBinder {
     // A cold resume with no agentOptions can revive a route-less agent
     // (sessions created before the route fix have no request/header in
     // their log) — the caller resolves the route, we pass it through.
-    // Single-writer guard FIRST: a registry miss does not mean the session
-    // is free — another process may be driving it right now, and resuming
-    // here would fork the log (interleaved seq numbers). Refuse loudly
-    // instead; adopt/attach flows above intentionally touch no lock.
-    const restore = await this.acquireLockGuard({ id })
-    try {
-      const handle = await this.agents.resume({
-        resumeSessionId: SessionId(id),
-        ...(agentOptions !== undefined ? { agentOptions } : {}),
-      })
-      // No dispose of `previous` (same multi-surface rule as releaseOwned):
-      // the old agent stays live and adoptable by other surfaces.
-      this.owned = handle
-      this.driveLock = restore
-      this.sessionId = id
-      return { sessionId: id, mode: 'resumed', agent: handle.agent }
-    } catch (error) {
-      // The resume failed — release just THIS acquisition so a transient
-      // failure cannot pin the session for the remaining process lifetime.
-      // Longer-held guards (previous bindings) are untouched here.
-      await this.discardAcquiredLock(restore)
-      throw error
-    }
-  }
-
-  /**
-   * Resolve the directory the jsonl backend owns for a session
-   * (`<sessionRoot>/<projectKey(cwd)>/<id>`) and acquire its cross-process
-   * writer lock. The lock must sit beside the persisted log so every process
-   * that could write that log competes on the same file. Without a known cwd
-   * (caller gave none, none persisted) the derivation would produce a decoy
-   * path the real writer never touches — skip rather than guard nothing
-   * (fail-open; the underlying resume/create would proceed unprotected,
-   * exactly as before this guard existed).
-   */
-  private async acquireLockGuard(meta: HeaderLike): Promise<{ dir: string } | undefined> {
-    const id = String(meta.id)
-    let cwd = typeof meta.cwd === 'string' && meta.cwd !== '' ? meta.cwd : undefined
-    if (cwd === undefined) {
-      // Best-effort by design: no trustworthy cwd → unguarded skip (fail-open),
-      // never lock a decoy path.
-      cwd = await this.headerCwdOf(id).catch(() => undefined)
-    }
-    if (cwd === undefined) return undefined
-
-    const dir = join(sessionLogRoot(), projectKeyFor(cwd), id)
-    const result = await acquireWriterLock(dir)
-    if (!result.ok) throw new WriterLockedError(result.holder)
-    this.heldLockDirs.add(dir)
-    return { dir }
-  }
-
-  /** Undo one guard that did NOT end up owning a binding. */
-  private async discardAcquiredLock(guard: { dir: string } | undefined): Promise<void> {
-    if (guard === undefined) return
-    this.heldLockDirs.delete(guard.dir)
-    await releaseOwnedWriterLock(guard.dir)
+    // Cross-process single-writer arbitration is the HOST's job since 0.1.5:
+    // `agents.resume` opens the write handle under the host's kernel lease,
+    // and a session owned by another process refuses here with
+    // SessionAlreadyOwnedError (the bot degrades to a read-only watch).
+    // Adopt/attach flows above never open a write handle.
+    const handle = await this.agents.resume({
+      resumeSessionId: SessionId(id),
+      ...(agentOptions !== undefined ? { agentOptions } : {}),
+    })
+    // No dispose of `previous` (same multi-surface rule as releaseOwned):
+    // the old agent stays live and adoptable by other surfaces.
+    this.owned = handle
+    this.sessionId = id
+    return { sessionId: id, mode: 'resumed', agent: handle.agent }
   }
 
   /** Drop the binding (detach). Only OUR handle is disposed — never an attached one. */
@@ -495,12 +405,5 @@ export class SessionBinder {
   async dispose(): Promise<void> {
     await this.stopWatchRemote()
     await this.detach()
-    // Plugin teardown: release every writer lock this binder ESTABLISHED.
-    // Locks intentionally survive detach/rebind while their agent stays live
-    // in this process's registry (see heldLockDirs) — only shutdown drops them.
-    for (const dir of [...this.heldLockDirs]) {
-      this.heldLockDirs.delete(dir)
-      await releaseOwnedWriterLock(dir)
-    }
   }
 }

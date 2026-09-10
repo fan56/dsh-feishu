@@ -221,11 +221,15 @@ npm test         # build + node --test (230+ pure-logic unit tests)
 
 ## Boundaries
 
-- Single-writer guard: the cold arm of `/resume` and `/new` compete for a
-  `writer.lock` beside the session dir before touching disk — when another
-  process is driving that session, takeover is refused with the holder's pid
-  instead of silently forking the log into interleaved seq numbers; same-process
-  attach (shared agent instance) bypasses the lock and behaves as before; a refused `/resume` degrades into a READ-ONLY watch over the persisted log — the phone still receives every turn's final reply (poll-delayed, no streaming detail)
+- Single-writer guarantee (host-native since dsh 0.1.5): cold-resuming a
+  session another process is driving is refused by the host's kernel write
+  lease (`SessionAlreadyOwnedError`) instead of silently forking the log into
+  interleaved seq numbers; same-process attach (shared agent instance) never
+  opens a second write handle and behaves as before; a refused `/resume`
+  degrades into a READ-ONLY watch over the persisted log — the phone still
+  receives every turn's final reply (poll-delayed, no streaming detail), and
+  queued follow-ups take over automatically once the other process lets the
+  session go
 - Group chats are mention-gated and share the bot's single global binding:
   one bound session at a time, whichever chat dispatched last receives the
   cards. A group image is accepted only from the chat that is currently the
