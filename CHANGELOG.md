@@ -6,7 +6,7 @@ All notable changes to dsh-feishu are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
-- **dsh closure moved to 0.1.5-rc.1** (dev pins, peer floors, locks).
+- **dsh closure moved to 0.1.5-rc.2** (dev pins, peer floors, locks).
 - **Live streaming rides `agent/assistant-stream` frames.** The 0.1.5 firehose delivers settlements only, so the status card's thinking marker, in-flight text tail, pending context estimate and child tail rows are now fed by stream frames routed per session id (`foldBoundStreamChunk` / `foldChildStreamChunk`); settlements still arrive on `session/event`.
 - **V3 session artifacts** (`session.v3.jsonl[.zstd]`, current generation first) in the read-only remote view, the repair script's log lookup, and the resume-table mtime walk.
 
