@@ -3,12 +3,16 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-11
+
+### Removed
+- The vendored pid-file writer lock — dsh 0.1.5 enforces cross-process single-writer at the host itself (kernel lease on `session.lock`, contention refuses with `SessionAlreadyOwnedError`), making the vendored `link(2)` pid-file lock redundant for safety and strictly worse everywhere else (pid-reuse misreads, stale residue after SIGKILL, POSIX-only, blind to non-vendoring writers).
 
 ### Changed
-- **dsh closure moved to 0.1.5-rc.2** (dev pins, peer floors, locks).
+- **dsh support floor raised to `>= 0.1.5-rc.2`** and the closure moved to 0.1.5-rc.2 (dev pins, peer floors, locks).
 - **Live streaming rides `agent/assistant-stream` frames.** The 0.1.5 firehose delivers settlements only, so the status card's thinking marker, in-flight text tail, pending context estimate and child tail rows are now fed by stream frames routed per session id (`foldBoundStreamChunk` / `foldChildStreamChunk`); settlements still arrive on `session/event`.
 - **V3 session artifacts** (`session.v3.jsonl[.zstd]`, current generation first) in the read-only remote view, the repair script's log lookup, and the resume-table mtime walk.
+- Release: the publish-verify loop polls `npm view` for ~2 min instead of 30s — packument propagation measured ~50s on dsh-dcp v0.11.0 outran the old window and falsely failed a landed publish.
 
 
 ## [0.8.1] - 2026-09-09
