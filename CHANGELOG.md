@@ -13,6 +13,7 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ### Changed
 - **btw first-frame throttle.** The very first text delta patches the btw card immediately (the answer appears the moment the first token lands); later deltas still defer to the beat, so no per-delta Lark patch.
+- **Web-profile compat e2e** (`npm run e2e`). Runs on the local dsh against an isolated scratch `$DSH_HOME`: proves `dsh-base + dsh-web-app + dsh-feishu` composes and boots, and that a tui profile carrying `dsh-feishu` coexists with the web profile without crashing.
 
 ### Fixed
 - **Accidental cancel taps.** Approval cards (❌ 拒绝) now require a second tap: the first tap on 取消 swaps to a `确认取消 / 返回选择` interim card, and only the confirm tap settles. Non-approval selectors keep their one-tap cancel.

@@ -39,6 +39,7 @@
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke-boot.mjs",
+    "e2e": "bash e2e/web-profile-compat.sh",
     "postinstall": "node scripts/link-dsh-closure.mjs"
   },
   "dependencies": {
