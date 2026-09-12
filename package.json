@@ -38,7 +38,8 @@
     "precheck": "node scripts/link-dsh-closure.mjs",
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",
-    "smoke": "node scripts/smoke-boot.mjs"
+    "smoke": "node scripts/smoke-boot.mjs",
+    "postinstall": "node scripts/link-dsh-closure.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0"
