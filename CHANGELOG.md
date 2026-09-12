@@ -3,7 +3,7 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.10.0] - 2026-09-12
 
 ### Added
 - **`agent/turn-stopping` subscription.** A stop/cancel starts reflecting on the round card the moment the loop honors it (`⛔ 停止中` header) instead of waiting for the `turn/end` settlement.
