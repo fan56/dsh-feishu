@@ -11,6 +11,8 @@ import {
   foldBoundStreamChunk,
   foldChildEvent,
   foldChildStreamChunk,
+  foldRequestError,
+  foldTurnStopping,
   initialRunState,
   reasoningTail,
   streamingTextTail,
@@ -426,4 +428,78 @@ test('text deltas accumulate a capped streaming buffer that drains on landing', 
   foldBoundStreamChunk(state, chunk('text-delta', 'next round text').chunk, 1500)
   beginRound(state)
   assert.equal(state.textBuffer, '')
+})
+
+test('turn-stopping marks the card stopping and turn/start resets it', () => {
+  const state = initialRunState()
+  // Not running — no-op.
+  foldTurnStopping(state)
+  assert.equal(state.stopping, false)
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldTurnStopping(state)
+  assert.equal(state.stopping, true)
+  // turn/end clears the marker (the reason takes over the header).
+  foldBoundEvent(state, event('turn/end', { turn: 1, reason: { kind: 'aborted' } }, 1500, 2))
+  assert.equal(state.stopping, false)
+  // Next turn/start resets it too.
+  foldBoundEvent(state, event('turn/start', { turn: 2 }, 2000, 3))
+  foldTurnStopping(state)
+  assert.equal(state.stopping, true)
+  foldBoundEvent(state, event('turn/start', { turn: 3 }, 3000, 4))
+  assert.equal(state.stopping, false)
+})
+
+test('request-error records a one-line summary cleared on landing or turn start', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldRequestError(state, 'provider timeout after 30s')
+  assert.equal(state.lastError, 'provider timeout after 30s')
+  // Empty / undefined message clears the marker.
+  foldRequestError(state, undefined)
+  assert.equal(state.lastError, undefined)
+  foldRequestError(state, '429 rate limited')
+  // An assistant/message proves the request round-tripped — clears it.
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] } }, 1500, 2))
+  assert.equal(state.lastError, undefined)
+  // turn/start also resets (fresh turn).
+  foldRequestError(state, 'boom')
+  foldBoundEvent(state, event('turn/start', { turn: 2 }, 2000, 3))
+  assert.equal(state.lastError, undefined)
+})
+
+test('assistant/message rebuilds first-token latency and output tokens from the stream', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  // Round starts at 1000; the stream's first token lands at 1200 (time0) →
+  // TTFT 200ms. Output tokens ride the usage snapshot.
+  const stream = [
+    { type: 'reasoning-chunks', time0: 1200, index: 0, dt: [50], texts: ['thinking...', 'more'] },
+    { type: 'text-chunks', time0: 1300, index: 1, dt: [40], texts: ['', 'hello'] },
+  ]
+  foldBoundEvent(state, event('assistant/message', {
+    message: { content: [{ type: 'text', text: 'hello' }] },
+    stream,
+    usage: { inputTokens: 100, outputTokens: 25, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  }, 1400, 2))
+  assert.equal(state.lastRoundFirstTokenMs, 200) // 1200 - 1000
+  assert.equal(state.lastRoundOutputTokens, 25)
+  assert.equal(state.rounds, 1)
+})
+
+test('assistant/message without a stream leaves the perf fields undefined', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'x' }] } }, 1400, 2))
+  assert.equal(state.lastRoundFirstTokenMs, undefined)
+  assert.equal(state.lastRoundOutputTokens, undefined)
+})
+
+test('a name-bearing tool-call run counts as the first token at time0', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  const stream = [
+    { type: 'tool-call-chunks', time0: 1050, index: 0, dt: [], id: 'c1', name: 'bash', args: ['ec', 'ho'] },
+  ]
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: '' }] }, stream }, 1200, 2))
+  assert.equal(state.lastRoundFirstTokenMs, 50) // 1050 - 1000
 })

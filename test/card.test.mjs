@@ -15,7 +15,7 @@ import {
   turnHeaderTitle,
   turnPhase,
 } from '../lib/card.js'
-import { foldBoundEvent, foldBoundStreamChunk, foldChildEvent, initialRunState } from '../lib/run-state.js'
+import { foldBoundEvent, foldBoundStreamChunk, foldChildEvent, foldRequestError, foldTurnStopping, initialRunState } from '../lib/run-state.js'
 
 function event(type, data, time, seq) {
   return { type, data, time, seq }
@@ -628,4 +628,76 @@ test('push cards render errors red and omit an absent duration/assistant line', 
   const body = card.body.elements[0].content
   assert.doesNotMatch(body, /· \d/)
   assert.doesNotMatch(body, /^> /m)
+})
+
+test('stopping phase renders "⛔ 停止中" in the header and wins over live phases', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundStreamChunk(state, { type: 'text-delta', text: 'hi' }, 1100)
+  assert.match(turnHeaderTitle(state, 2000), /processing/)
+  foldTurnStopping(state)
+  assert.equal(turnPhase(state).kind, 'stopping')
+  assert.match(turnHeaderTitle(state, 2000), /⛔ 停止中/)
+  // The end-state card's header is governed by the turn reason, not stopping.
+  foldBoundEvent(state, event('turn/end', { turn: 1, reason: { kind: 'aborted' } }, 2500, 2))
+  assert.match(turnHeaderTitle(state, 2600), /已停止/)
+})
+
+test('request-error adds a warning line to the activity section', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldRequestError(state, 'provider timeout after 30s')
+  const { card } = buildStatusCard(state, {
+    sessionLabel: 'demo',
+    displayThink: false,
+    now: 1500,
+    actions: { stop: true },
+  })
+  const body = card.body.elements[0].content
+  assert.match(body, /⚠️ 请求失败：provider timeout after 30s/)
+  // Landing a message clears the line.
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] } }, 1600, 2))
+  const settled = buildStatusCard(state, {
+    sessionLabel: 'demo',
+    displayThink: false,
+    now: 1700,
+    settledRoundMs: 100,
+  })
+  assert.doesNotMatch(settled.card.body.elements[0].content, /请求失败/)
+})
+
+test('buildFooter renders ttft and output tokens only when present', () => {
+  assert.equal(buildFooter({ firstTokenMs: 250 }), '⚡ ttft 250ms')
+  assert.equal(buildFooter({ outputTokens: 850 }), '📤 850 tok')
+  assert.equal(buildFooter({ firstTokenMs: 1200, outputTokens: 2500 }), '⚡ ttft 1s · 📤 2.5k tok')
+  // Zero/absent output tokens never render a meaningless zero.
+  assert.equal(buildFooter({ outputTokens: 0 }), '')
+})
+
+test('settled round card shows ttft and output tokens in the footer', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('assistant/message', {
+    message: { content: [{ type: 'text', text: 'hi' }] },
+    stream: [{ type: 'text-chunks', time0: 1100, index: 0, dt: [], texts: ['hi'] }],
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  }, 1500, 2))
+  const { card } = buildStatusCard(state, {
+    sessionLabel: 'demo',
+    displayThink: false,
+    now: 1600,
+    settledRoundMs: 500,
+  })
+  const body = card.body.elements[0].content
+  assert.match(body, /⚡ ttft 100ms/)
+  assert.match(body, /📤 5 tok/)
+  // The live card (no settledRoundMs) keeps the footer free of round stats.
+  foldBoundEvent(state, event('turn/start', { turn: 2 }, 2000, 3))
+  const live = buildStatusCard(state, {
+    sessionLabel: 'demo',
+    displayThink: false,
+    now: 2100,
+    actions: { stop: true },
+  })
+  assert.doesNotMatch(live.card.body.elements[0].content, /ttft|📤/)
 })

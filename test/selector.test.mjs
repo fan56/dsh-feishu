@@ -36,6 +36,12 @@ function flowIdOf(card) {
   return form.elements.at(-1).value.flow_id
 }
 
+/** The flow id of a buttons-mode selector card (buttons carry it in value). */
+function buttonsFlowId(card) {
+  const button = card.body.elements.find(e => e.tag === 'button')
+  return button.value.flow_id
+}
+
 test('present sends the card; an operator pick resolves picked and patches the green terminal card', async () => {
   const { manager, sent, patches } = makeManager()
   const pending = manager.present('oc1', SPEC)
@@ -225,4 +231,81 @@ test('an aborted spec signal settles the flow as cancelled and patches the grey 
   assert.deepEqual(outcome, { status: 'cancelled' })
   assert.match(patches.at(-1).card.header.title.content, /已取消/)
   assert.equal(manager.pendingCount, 0)
+})
+
+test('confirmCancel: a first cancel tap shows the confirm card, not a settle', async () => {
+  const { manager, sent, patches } = makeManager()
+  const pending = manager.present('oc1', { ...SPEC, mode: 'buttons', confirmCancel: true })
+  await tick()
+  const flowId = buttonsFlowId(sent[0].card)
+  manager.handleAction({ flowId, cancel: true }, 'ou_op')
+  await tick()
+  // Not settled — the confirm card replaced the choice card in place.
+  assert.equal(manager.pendingCount, 1)
+  assert.match(patches.at(-1).card.header.title.content, /确认取消/)
+})
+
+test('confirmCancel: the confirm tap settles cancelled; back returns to the choice card', async () => {
+  const { manager, sent, patches } = makeManager()
+  const pending = manager.present('oc1', { ...SPEC, mode: 'buttons', confirmCancel: true })
+  await tick()
+  const flowId = buttonsFlowId(sent[0].card)
+
+  // Back first: returns to the live choice card, still pending.
+  manager.handleAction({ flowId, cancel: true }, 'ou_op')
+  await tick()
+  manager.handleAction({ flowId, back: true }, 'ou_op')
+  await tick()
+  assert.equal(manager.pendingCount, 1)
+  assert.match(patches.at(-1).card.header.title.content, /挑选一个分支/)
+  // The choice card is live again — a pick settles normally.
+  manager.handleAction({ flowId, pick: 'dev' }, 'ou_op')
+  const outcome = await pending
+  assert.deepEqual(outcome, { status: 'picked', value: 'dev', label: 'Dev' })
+})
+
+test('confirmCancel: the confirm tap settles cancelled once', async () => {
+  const { manager, sent, patches } = makeManager()
+  const pending = manager.present('oc1', { ...SPEC, mode: 'buttons', confirmCancel: true })
+  await tick()
+  const flowId = buttonsFlowId(sent[0].card)
+  manager.handleAction({ flowId, cancel: true }, 'ou_op')
+  await tick()
+  manager.handleAction({ flowId, confirm: true }, 'ou_op')
+  const outcome = await pending
+  assert.deepEqual(outcome, { status: 'cancelled' })
+  assert.equal(manager.pendingCount, 0)
+  assert.match(patches.at(-1).card.header.title.content, /已取消/)
+  // Replay of the confirm is a no-op (already settled).
+  manager.handleAction({ flowId, confirm: true }, 'ou_op')
+  assert.equal(patches.filter(p => p.card.header.title.content.includes('已取消')).length, 1)
+})
+
+test('confirmCancel: awaiting-confirm ignores a stray pick; TTL still expires it', async () => {
+  let resolveSleep
+  const { manager, sent, patches } = makeManager({ sleep: () => new Promise(r => { resolveSleep = r }) })
+  const pending = manager.present('oc1', { ...SPEC, mode: 'buttons', confirmCancel: true })
+  await tick()
+  const flowId = buttonsFlowId(sent[0].card)
+  manager.handleAction({ flowId, cancel: true }, 'ou_op')
+  await tick()
+  // A stray pick while awaiting confirm is ignored.
+  manager.handleAction({ flowId, pick: 'main' }, 'ou_op')
+  assert.equal(manager.pendingCount, 1)
+  // The TTL still bounds the confirm card.
+  resolveSleep()
+  const outcome = await pending
+  assert.deepEqual(outcome, { status: 'expired' })
+  assert.match(patches.at(-1).card.header.title.content, /已过期/)
+})
+
+test('a non-confirmCancel flow cancels on the first tap (unchanged)', async () => {
+  const { manager, sent, patches } = makeManager()
+  const pending = manager.present('oc1', { ...SPEC, mode: 'buttons' })
+  await tick()
+  const flowId = buttonsFlowId(sent[0].card)
+  manager.handleAction({ flowId, cancel: true }, 'ou_op')
+  const outcome = await pending
+  assert.deepEqual(outcome, { status: 'cancelled' })
+  assert.match(patches.at(-1).card.header.title.content, /已取消/)
 })

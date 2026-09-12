@@ -54,6 +54,13 @@ export interface SelectorSpec {
    * expiry — the awaiting caller sees `{ status: 'cancelled' }`.
    */
   readonly signal?: AbortSignal
+  /**
+   * Ask for a second tap before honoring a cancel: a first tap on 取消 swaps
+   * the card for a confirm card (确认取消 / 返回选择), and only the confirm tap
+   * settles the flow as cancelled. For flows where a stray cancel is costly
+   * (approval rejects) and the cancel button sits large on the phone.
+   */
+  readonly confirmCancel?: boolean
 }
 
 /** Builder/parser flow reference: the manager's live flow, projected. */
@@ -67,6 +74,10 @@ export interface ParsedSelectorAction {
   readonly flowId: string
   readonly pick?: string
   readonly cancel?: boolean
+  /** Confirm-cancel button of a confirm card (settles the flow cancelled). */
+  readonly confirm?: boolean
+  /** Back button of a confirm card (returns to the live choice card). */
+  readonly back?: boolean
 }
 
 // ------------------------------------------------------------------ cards --
@@ -198,6 +209,43 @@ export function buildSelectorExpiredCard(flow: SelectorFlowRef): Schema2Card {
   }
 }
 
+/**
+ * Interim card: the operator tapped 取消 on a confirm-cancel flow. Two buttons
+ * decide — 确认取消 settles the flow cancelled; 返回选择 swaps back to the
+ * live choice card. The flow stays pending underneath (its TTL keeps running).
+ */
+export function buildSelectorConfirmCancelCard(flow: SelectorFlowRef): Schema2Card {
+  const confirmName = `${SELECTOR_NAME_PREFIX}${flow.id}`
+  return {
+    schema: '2.0',
+    config: { width_mode: 'fill' },
+    header: {
+      title: { tag: 'plain_text', content: '🤔 确认取消？' },
+      subtitle: { tag: 'plain_text', content: subtitleOf(flow.spec) },
+      template: 'orange',
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: '再点一次确认取消；误触请返回选择。' },
+        {
+          tag: 'button',
+          name: confirmName,
+          value: { action: SELECTOR_ACTION, flow_id: flow.id, confirm: true },
+          text: { tag: 'plain_text', content: '确认取消' },
+          type: 'danger',
+        },
+        {
+          tag: 'button',
+          name: confirmName,
+          value: { action: SELECTOR_ACTION, flow_id: flow.id, back: true },
+          text: { tag: 'plain_text', content: '返回选择' },
+          type: 'default',
+        },
+      ],
+    },
+  }
+}
+
 // ----------------------------------------------------------------- parser --
 
 /** object-or-undefined for optional payload fields. */
@@ -245,6 +293,8 @@ export function parseSelectorAction(data: unknown, buttonName?: string): ParsedS
       const flowId = buttonValue.flow_id
       if (typeof flowId !== 'string' || flowId === '') return undefined
       if (buttonValue.cancel === true) return { flowId, cancel: true }
+      if (buttonValue.confirm === true) return { flowId, confirm: true }
+      if (buttonValue.back === true) return { flowId, back: true }
       const pick = typeof buttonValue.pick === 'string' ? buttonValue.pick : pickOfFormValue(formValue)
       return pick === undefined ? { flowId } : { flowId, pick }
     }

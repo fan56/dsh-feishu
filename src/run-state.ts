@@ -59,12 +59,30 @@ export interface RunState {
   turnStartedAt: number | undefined
   turnEndedAt: number | undefined
   turnEndReason: string | undefined
+  /**
+   * A stop is in flight: `agent/turn-stopping` fired (the loop is at its
+   * stop boundary / aborting), but the turn/end settlement has not landed
+   * yet. The card shows "⛔ 停止中" immediately instead of leaving the phone
+   * waiting on the old phase. Cleared on the next turn/start.
+   */
+  stopping: boolean
+  /** Last request failure summary (agent/request-error), shown in the card. */
+  lastError: string | undefined
   /** assistant/message count within the current turn (the "rounds"). */
   rounds: number
   /** Epoch ms when the CURRENT round started (turn start or the previous round's message). */
   roundStartedAt: number | undefined
   /** Duration of the round that just settled — the settled card's header reads it. */
   lastRoundDurationMs: number | undefined
+  /**
+   * First-token latency of the round that just settled (ms, from the round's
+   * start to the stream's first non-empty text/reasoning token), rebuilt from
+   * the embedded AssistantStreamRecord. undefined when the stream carried no
+   * token or the round start is unknown.
+   */
+  lastRoundFirstTokenMs: number | undefined
+  /** Output tokens of the round that just settled (usage.outputTokens). */
+  lastRoundOutputTokens: number | undefined
   /** Text blocks of the round that just settled — its verbatim body card. */
   lastRoundText: string
   /** Epoch ms of the latest reasoning delta (the thinking phase marker). */
@@ -126,9 +144,13 @@ export function initialRunState(): RunState {
     turnStartedAt: undefined,
     turnEndedAt: undefined,
     turnEndReason: undefined,
+    stopping: false,
+    lastError: undefined,
     rounds: 0,
     roundStartedAt: undefined,
     lastRoundDurationMs: undefined,
+    lastRoundFirstTokenMs: undefined,
+    lastRoundOutputTokens: undefined,
     lastRoundText: '',
     thinkingSince: undefined,
     reasoningBuffer: '',
@@ -166,6 +188,8 @@ function beginTurn(state: RunState, time: number): void {
   state.turnStartedAt = time
   state.turnEndedAt = undefined
   state.turnEndReason = undefined
+  state.stopping = false
+  state.lastError = undefined
   state.rounds = 0
   state.roundStartedAt = time
   state.lastRoundDurationMs = undefined
@@ -194,6 +218,7 @@ function endTurn(state: RunState, time: number, reason: string): void {
   state.running = false
   state.turnEndedAt = time
   state.turnEndReason = reason
+  state.stopping = false
   state.thinkingSince = undefined
   state.currentTool = undefined
 }
@@ -213,6 +238,32 @@ export function beginRound(state: RunState): void {
   state.lastAssistantLine = undefined
   state.lastRoundText = ''
   state.lastRoundDurationMs = undefined
+  state.lastRoundFirstTokenMs = undefined
+  state.lastRoundOutputTokens = undefined
+}
+
+/**
+ * Fold an `agent/turn-stopping` notification: the loop reached its stop
+ * boundary (a cancel/stop is being honored) but the turn/end settlement has
+ * not landed. Marking the card "stopping" now keeps the phone from waiting
+ * on the pre-stop phase. The field survives into the end-state card (the
+ * turn/end reason takes over the header there); the next turn/start resets it.
+ */
+export function foldTurnStopping(state: RunState): RunState {
+  if (!state.running) return state
+  state.stopping = true
+  return state
+}
+
+/**
+ * Fold an `agent/request-error` notification: a model request failed and a
+ * retry is (probably) scheduled. Record a one-line summary for the card's
+ * activity section so the failure is visible immediately rather than only at
+ * settlement. Cleared by the next turn/start or a landing assistant/message.
+ */
+export function foldRequestError(state: RunState, message: string | undefined): RunState {
+  state.lastError = message === undefined || message === '' ? undefined : message
+  return state
 }
 
 /** Null-safe record read: any non-object (null included) reads as empty. */
@@ -268,14 +319,78 @@ function usageComponentsOf(data: unknown): UsageComponents | undefined {
 }
 
 /** Route scalars off a `request/header` event (`data.header.config`). */
-function headerConfigOf(data: unknown): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
-  const config = rec<{ header?: { config?: Record<string, unknown> } }>(data).header?.config
+function headerConfigOf(data: unknown): { provider?: string; model?: string; reasoningEffort?: string } | undefined {  const config = rec<{ header?: { config?: Record<string, unknown> } }>(data).header?.config
   if (config === undefined) return undefined
   const out: { provider?: string; model?: string; reasoningEffort?: string } = {}
   if (typeof config.provider === 'string') out.provider = config.provider
   if (typeof config.model === 'string') out.model = config.model
   if (typeof config.reasoningEffort === 'string') out.reasoningEffort = config.reasoningEffort
   return out
+}
+
+/** One compact delta run or raw chunk embedded in an assistant/message stream. */
+interface StreamRecordLike {
+  readonly type?: string
+  readonly time0?: unknown
+  readonly dt?: unknown
+  readonly texts?: unknown
+  readonly args?: unknown
+  readonly name?: unknown
+  readonly time?: unknown
+  readonly chunk?: unknown
+}
+
+/** Whether one fragment counts as a token-bearing delta (non-empty). */
+function isTokenFragment(fragment: unknown): boolean {
+  return typeof fragment === 'string' && fragment !== ''
+}
+
+/**
+ * Rebuild the stream's FIRST token time from compact AssistantStreamRecord
+ * members — the same semantics as @deepseek-ai/dsh-llm's
+ * `assistantStreamFirstTokenTime` (a name-bearing tool-call run starts at its
+ * first member, otherwise the first non-empty fragment; member i of a packed
+ * run sits at `time0 + Σ(dt[0..i-1])`; a raw chunk qualifies when it is a
+ * token delta). Kept as a local structural read so this fold module stays
+ * host-runtime-free and independently testable. Returns undefined when the
+ * stream carries no token.
+ */
+function firstTokenTimeOf(stream: unknown): number | undefined {
+  if (!Array.isArray(stream)) return undefined
+  for (const record of stream as StreamRecordLike[]) {
+    if (record === null || typeof record !== 'object') continue
+    if (record.type === 'chunk') {
+      const chunk = rec<{ type?: unknown; text?: unknown }>(record.chunk)
+      if (
+        typeof record.time === 'number'
+        && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta')
+        && isTokenFragment(chunk.text)
+      ) {
+        return record.time
+      }
+      continue
+    }
+    if (record.type !== 'text-chunks' && record.type !== 'reasoning-chunks' && record.type !== 'tool-call-chunks') continue
+    const members = record.type === 'tool-call-chunks'
+      ? (Array.isArray(record.args) ? record.args : undefined)
+      : (Array.isArray(record.texts) ? record.texts : undefined)
+    if (members === undefined || typeof record.time0 !== 'number' || !Array.isArray(record.dt)) continue
+    // A name-bearing tool-call run starts at its first member.
+    if (record.type === 'tool-call-chunks' && typeof record.name === 'string' && record.name !== '') {
+      return record.time0
+    }
+    let time = record.time0
+    for (let index = 0; index < members.length; index += 1) {
+      if (index > 0) time += (record.dt[index - 1] as number) ?? 0
+      if (isTokenFragment(members[index])) return time
+    }
+  }
+  return undefined
+}
+
+/** Output tokens of an assistant/message usage snapshot, when reported. */
+function outputTokensOf(data: unknown): number | undefined {
+  return usageComponentsOf(data)?.outputTokens
 }
 
 /**
@@ -295,6 +410,9 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
     case 'assistant/message': {
       const text = assistantTextOf(event.data)
       if (text !== '') state.lastAssistantLine = lastNonBlankLine(text)
+      // A landed message proves the request round-tripped — clear any
+      // intermediate request-error marker (dsh emits no retry-cleared event).
+      state.lastError = undefined
       // One message = one settled round: capture its duration and verbatim
       // text for the settled card + body, then the next round starts now.
       state.lastRoundText = text
@@ -302,6 +420,16 @@ export function foldBoundEvent(state: RunState, event: SessionEvent): RunState {
       state.lastRoundDurationMs = state.roundStartedAt === undefined
         ? 0
         : Math.max(0, event.time - state.roundStartedAt)
+      // First-token latency + output tokens come from the embedded stream:
+      // the TTFT is the stream's first token time minus the round's start
+      // (the round start being the previous message's time or turn start).
+      state.lastRoundFirstTokenMs = state.roundStartedAt === undefined
+        ? undefined
+        : (() => {
+            const firstToken = firstTokenTimeOf(event.data.stream)
+            return firstToken === undefined ? undefined : Math.max(0, firstToken - state.roundStartedAt!)
+          })()
+      state.lastRoundOutputTokens = outputTokensOf(event.data)
       state.roundStartedAt = event.time
       state.rounds += 1
       // A landed message proves the request round-tripped — clear retry and

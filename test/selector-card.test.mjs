@@ -4,6 +4,7 @@ import {
   SELECTOR_ACTION,
   buildSelectorCancelledCard,
   buildSelectorCard,
+  buildSelectorConfirmCancelCard,
   buildSelectorExpiredCard,
   buildSelectorSettledCard,
   parseSelectorAction,
@@ -192,4 +193,31 @@ test('parseSelectorAction: garbage payloads degrade to undefined, never throw', 
   assert.equal(parseSelectorAction({ action: { value: { action: 42 } } }), undefined)
   assert.equal(parseSelectorAction(payload({ value: { action: SELECTOR_ACTION } })), undefined) // no flow id
   assert.equal(parseSelectorAction(payload({ value: { action: SELECTOR_ACTION, flow_id: '' } })), undefined)
+})
+
+test('parseSelectorAction recognizes the confirm-cancel buttons', () => {
+  assert.deepEqual(
+    parseSelectorAction(payload({ value: { action: SELECTOR_ACTION, flow_id: 'flow-1', confirm: true } })),
+    { flowId: 'flow-1', confirm: true },
+  )
+  assert.deepEqual(
+    parseSelectorAction(payload({ value: { action: SELECTOR_ACTION, flow_id: 'flow-1', back: true } })),
+    { flowId: 'flow-1', back: true },
+  )
+})
+
+test('the confirm-cancel card offers 确认取消 and 返回选择, never a pick', () => {
+  const card = buildSelectorConfirmCancelCard({ id: 'flow-1', spec: SPEC })
+  assert.equal(card.header.template, 'orange')
+  assert.match(card.header.title.content, /确认取消/)
+  const buttons = buttonsOf(card)
+  assert.equal(buttons.length, 2)
+  const confirm = buttons.find(b => b.value.confirm === true)
+  const back = buttons.find(b => b.value.back === true)
+  assert.ok(confirm, 'confirm button present')
+  assert.ok(back, 'back button present')
+  assert.equal(confirm.text.content, '确认取消')
+  assert.equal(back.text.content, '返回选择')
+  // No selectable options leak into the interim card.
+  assert.ok(!buttons.some(b => b.value.pick !== undefined))
 })

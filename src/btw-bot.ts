@@ -52,6 +52,8 @@ export class BtwManager {
   private beat: ReturnType<typeof setInterval> | undefined
   /** Most recent run handed to a card — the cancel path renders from it. */
   private cardRun: BtwRunState | undefined
+  /** Whether the streaming card already shipped its first content patch. */
+  private firstFrameShipped = false
   private chatId: string | undefined
   private disposed = false
 
@@ -117,6 +119,7 @@ export class BtwManager {
 
   private async openCard(run: BtwRunState): Promise<void> {
     this.cardRun = run
+    this.firstFrameShipped = false
     const chatId = this.chatId
     if (chatId === undefined) {
       this.controller.setCardOpen(false)
@@ -139,11 +142,23 @@ export class BtwManager {
     this.startBeat()
   }
 
-  /** Controller render callback: deltas no-op (the beat covers them); a
-   * settle finalizes the card in place. */
+  /**
+   * Controller render callback: the FIRST text delta ships immediately (the
+   * phone sees the answer start the moment the first token lands, not 5s
+   * later); later deltas defer to the beat (throttled — no per-delta Lark
+   * patch while the stream runs). A settle finalizes the card in place.
+   */
   private onControllerRender(): void {
     const run = this.controller.currentRun
-    if (run === undefined || run.status === 'streaming') return
+    if (run === undefined) return
+    if (run.status === 'streaming') {
+      if (this.firstFrameShipped || run.answerText === '' || this.cardMessageId === undefined) return
+      this.firstFrameShipped = true
+      void this.deps
+        .patchCard(this.cardMessageId, buildBtwCard(run, this.controller.queuedCount))
+        .catch(() => undefined)
+      return
+    }
     void this.finalizeCard(run)
   }
 

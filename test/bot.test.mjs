@@ -1085,3 +1085,46 @@ test('dispose settles pending asks and cancels selector flows before closing the
   await bot.dispose() // idempotent: no double close
   assert.equal(closes.length, 1)
 })
+
+test('/model step 2 appends the context window when resolveModelInfo knows it', async () => {
+  const llm = {
+    listProviders: () => modelProviders,
+    async listModels() {
+      return [
+        { id: 'glm-4.7', name: 'GLM-4.7' },
+        { id: 'glm-4.6', name: 'GLM-4.6' },
+      ]
+    },
+    async resolveModelInfo(provider, model) {
+      return model === 'glm-4.7'
+        ? { context: { contextWindow: 131072 } }
+        : { context: { contextWindow: 32768 } }
+    },
+  }
+  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  await bot.handleModel()
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
+  assert.equal(sends.length, 2)
+  const options = sends[1].body.elements.at(-1).elements[0].options
+  assert.equal(options[0].text.content, 'GLM-4.7 (glm-4.7) · 131k ctx')
+  assert.equal(options[1].text.content, 'GLM-4.6 (glm-4.6) · 33k ctx')
+})
+
+test('/model step 2 degrades to the plain catalog when context resolution fails', async () => {
+  const llm = {
+    listProviders: () => modelProviders,
+    async listModels() {
+      return [{ id: 'glm-4.7', name: 'GLM-4.7' }]
+    },
+    async resolveModelInfo() {
+      throw new Error('adapter down')
+    },
+  }
+  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  await bot.handleModel()
+  await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
+  assert.equal(sends.length, 2)
+  const options = sends[1].body.elements.at(-1).elements[0].options
+  // No context suffix — the picker still works.
+  assert.equal(options[0].text.content, 'GLM-4.7 (glm-4.7)')
+})

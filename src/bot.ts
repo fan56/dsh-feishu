@@ -78,6 +78,8 @@ import {
   foldBoundStreamChunk,
   foldChildEvent,
   foldChildStreamChunk,
+  foldRequestError,
+  foldTurnStopping,
   initialRunState,
   type RunState,
   subagentRows,
@@ -95,6 +97,13 @@ interface StreamFrame {
     readonly type?: string
     readonly text?: string
   }
+}
+
+/** The llm service surface the model cards need (structural). */
+interface LlmModelSurface {
+  listProviders(): readonly ModelProviderInfo[]
+  listModels(provider: string): Promise<readonly ModelInfo[]>
+  resolveModelInfo(provider: string, model: string): Promise<{ context?: { contextWindow?: number } }>
 }
 import type { BindResult, SessionBinder } from './binder.ts'
 import type { StateStore } from './state-store.ts'
@@ -338,6 +347,47 @@ export class FeishuBot {
         this.ctx.logger.warn('dsh-feishu: stream frame fold failed: %o', error)
       }
     })
+    // dsh 0.1.5 agent lifecycle notifications: `agent/turn-stopping` fires the
+    // moment a cancel/stop starts being honored (the phone sees "⛔ 停止中"
+    // instead of the stale live phase), `agent/request-error` surfaces a model
+    // failure immediately (the card shows the one-line summary even while a
+    // retry is still scheduled). Both are routed by the agent's session id
+    // exactly like the stream frames; children are ignored (their failures
+    // settle through the parent's own request cycle). Neither event is part of
+    // the cordis type surface this plugin imports — structural casts, same as
+    // the ask/approval waterfalls.
+    const onStopping = (this.ctx.on as unknown as (
+      event: 'agent/turn-stopping',
+      listener: (payload: { agent: { readonly id: SessionId } }) => void | Promise<void>,
+    ) => () => boolean)
+    const offStopping = onStopping('agent/turn-stopping', payload => {
+      try {
+        const boundId = this.binder.getSessionId()
+        if (boundId !== undefined && String(payload.agent.id) === boundId) {
+          foldTurnStopping(this.runState)
+          this.patchCurrentCard()
+        }
+      } catch (error) {
+        this.ctx.logger.warn('dsh-feishu: turn-stopping fold failed: %o', error)
+      }
+    })
+    const onRequestError = (this.ctx.on as unknown as (
+      event: 'agent/request-error',
+      listener: (payload: { agent: { readonly id: SessionId }; failure?: { message?: unknown } }) => Promise<{ kind: 'retry' } | undefined>,
+    ) => () => boolean)
+    const offRequestError = onRequestError('agent/request-error', async payload => {
+      try {
+        const boundId = this.binder.getSessionId()
+        if (boundId !== undefined && String(payload.agent.id) === boundId) {
+          const message = typeof payload.failure?.message === 'string' ? payload.failure.message : undefined
+          foldRequestError(this.runState, message)
+          this.patchCurrentCard()
+        }
+      } catch (error) {
+        this.ctx.logger.warn('dsh-feishu: request-error fold failed: %o', error)
+      }
+      return undefined // observe-only: never owns the request recovery
+    })
     const interval = setInterval(() => {
       try {
         this.beat()
@@ -347,7 +397,7 @@ export class FeishuBot {
     }, this.config.statusIntervalMs)
     interval.unref?.()
     this.ticker = interval
-    this.cleanupFns.push(offFirehose, offStream, () => clearInterval(interval))
+    this.cleanupFns.push(offFirehose, offStream, offStopping, offRequestError, () => clearInterval(interval))
     this.registerAskSurface()
     this.registerApprovalSurface()
     await this.lark.start(data => this.enqueue(data))
@@ -1415,6 +1465,25 @@ export class FeishuBot {
   }
 
   /**
+   * Immediate (off-beat) patch of the live round card — the turn-stopping /
+   * request-error handlers call this so the phone reflects the lifecycle
+   * change without waiting for the 30s beat. Hash-gated like the beat; a
+   * change lands only when the rendered content actually differs.
+   */
+  private patchCurrentCard(): void {
+    if (this.cardMessageId === undefined) return
+    const { card, hash } = buildStatusCard(this.runState, {
+      sessionLabel: this.sessionLabel(),
+      displayThink: this.store.get().displayThink,
+      now: this.now(),
+      actions: { stop: !this.binder.isReadOnlyView() },
+    })
+    if (hash === this.cardHash) return
+    this.cardHash = hash
+    void this.chain(() => this.lark.patchCard(this.cardMessageId!, card))
+  }
+
+  /**
    * One assistant/message landed = one round settled (the fold already
    * incremented rounds and captured the round's duration/text). Settle the
    * round's card to "Round N · 💬 回复", ship the round's message verbatim,
@@ -1525,10 +1594,43 @@ export class FeishuBot {
   // ------------------------------------------------------------- /model --
 
   /** The llm service surface the model cards need (structural). */
-  private llm(): { listProviders(): readonly ModelProviderInfo[]; listModels(provider: string): Promise<readonly ModelInfo[]> } | undefined {
-    return this.ctx.get('llm') as
-      | { listProviders(): readonly ModelProviderInfo[]; listModels(provider: string): Promise<readonly ModelInfo[]> }
-      | undefined
+  private llm(): LlmModelSurface | undefined {
+    return this.ctx.get('llm') as LlmModelSurface | undefined
+  }
+
+  /**
+   * Enrich a provider's model list with each model's context window, resolved
+   * in bounded-parallel and fail-open (a resolution failure leaves the model
+   * without a window rather than failing the picker). The catalog entries from
+   * `listModels` carry no context — only `resolveModelInfo` knows it.
+   */
+  private async enrichModelsWithContext(
+    llm: LlmModelSurface,
+    provider: string,
+    models: readonly ModelInfo[],
+  ): Promise<readonly ModelInfo[]> {
+    if (typeof llm.resolveModelInfo !== 'function') return models
+    const CONCURRENCY = 6
+    const out: ModelInfo[] = new Array(models.length)
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < models.length) {
+        const index = cursor
+        cursor += 1
+        const model = models[index]!
+        try {
+          const info = await llm.resolveModelInfo(provider, model.id)
+          const window = info.context?.contextWindow
+          out[index] = typeof window === 'number' && Number.isFinite(window) && window > 0
+            ? { ...model, contextWindow: window }
+            : model
+        } catch {
+          out[index] = model
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, models.length) }, worker))
+    return out
   }
 
   /**
@@ -1572,10 +1674,18 @@ export class FeishuBot {
       await this.reply(`provider ${parsed.provider} 没有可用模型。`)
       return
     }
+    // Context windows come from resolveModelInfo, not the catalog — enrich
+    // best-effort so the picker shows `· 128k ctx` per model when known.
+    let enriched: readonly ModelInfo[] = models
+    try {
+      enriched = await this.enrichModelsWithContext(llm, parsed.provider, models)
+    } catch {
+      // Enrichment is cosmetic — a failure degrades to the plain catalog.
+    }
     this.modelFlow.provider = parsed.provider
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) return
-    const messageId = await this.lark.sendCard(chatId, buildModelPickCard(parsed.provider, models, parsed.flowId))
+    const messageId = await this.lark.sendCard(chatId, buildModelPickCard(parsed.provider, enriched, parsed.flowId))
     if (this.modelFlow === undefined) return
     // Grey out the provider card — the flow moved on; a stale submit there
     // would otherwise be a silent no-op.
@@ -1841,6 +1951,8 @@ export class FeishuBot {
         title: '🔐 权限审批',
         description: `工具 \`${request.toolName}\`${detail}`,
         mode: 'buttons',
+        // 拒绝 = 拒绝一次工具执行，误触成本高 — 取消（拒绝）按钮要求二次确认。
+        confirmCancel: true,
         ...(request.signal !== undefined ? { signal: request.signal } : {}),
         options: [
           { value: 'allow', label: '✅ 允许一次' },

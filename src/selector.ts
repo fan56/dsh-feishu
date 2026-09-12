@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import {
   buildSelectorCancelledCard,
   buildSelectorCard,
+  buildSelectorConfirmCancelCard,
   buildSelectorExpiredCard,
   buildSelectorSettledCard,
   type ParsedSelectorAction,
@@ -50,7 +51,7 @@ export interface SelectorDeps {
 /** Default flow lifetime: 10 minutes. */
 const DEFAULT_TTL_MS = 10 * 60 * 1000
 
-type FlowState = 'pending' | 'picked' | 'cancelled' | 'expired' | 'failed'
+type FlowState = 'pending' | 'awaiting-confirm' | 'picked' | 'cancelled' | 'expired' | 'failed'
 
 /** One presented selection awaiting its outcome. */
 interface SelectionFlow {
@@ -76,11 +77,11 @@ export class SelectorManager {
     this.deps = deps
   }
 
-  /** Live pending-flow count (tests / debugging). */
+  /** Live pending-flow count (tests / debugging) — confirm-cancel included. */
   get pendingCount(): number {
     let count = 0
     for (const flow of this.flows.values()) {
-      if (flow.state === 'pending') count += 1
+      if (flow.state === 'pending' || flow.state === 'awaiting-confirm') count += 1
     }
     return count
   }
@@ -128,14 +129,33 @@ export class SelectorManager {
   /**
    * Settle the flow a selector submit belongs to. Unknown / already-settled
    * flows (stale or replayed cards) and non-operators are ignored silently;
-   * a pick that matches no option is treated as a cancel (warned).
+   * a pick that matches no option is treated as a cancel (warned). A confirm-
+   * cancel flow defers a cancel tap to a confirm card first (see below).
    */
   handleAction(parsed: ParsedSelectorAction, operatorOpenId: string | undefined): void {
     const flow = this.flows.get(parsed.flowId)
-    if (flow === undefined || flow.state !== 'pending') return
+    if (flow === undefined) return
     if (!this.deps.allowlisted(operatorOpenId)) return
+    // Confirm-cancel handshake: the interim card's buttons are only valid in
+    // the awaiting-confirm state; the choice card's buttons only in pending.
+    if (flow.state === 'awaiting-confirm') {
+      if (parsed.confirm === true) {
+        this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
+      } else if (parsed.back === true) {
+        this.restoreChoiceCard(flow)
+      }
+      return
+    }
+    if (flow.state !== 'pending') return
     if (parsed.cancel === true) {
-      this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
+      if (flow.spec.confirmCancel === true) {
+        // First tap on 取消: swap to the confirm card, keep the flow pending
+        // underneath (its TTL keeps running). The settle only happens on the
+        // 确认取消 tap.
+        this.enterConfirmCancel(flow)
+      } else {
+        this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
+      }
       return
     }
     const option: SelectorOption | undefined = parsed.pick === undefined
@@ -156,10 +176,28 @@ export class SelectorManager {
   /** Cancel every pending flow (e.g. the session view was rebound). */
   cancelAll(reason?: string): void {
     for (const flow of [...this.flows.values()]) {
-      if (flow.state !== 'pending') continue
+      if (flow.state === 'picked' || flow.state === 'cancelled' || flow.state === 'expired' || flow.state === 'failed') continue
       if (reason !== undefined) this.deps.logger.info?.('dsh-feishu: selector flow %s cancelled: %s', flow.id, reason)
       this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
     }
+  }
+
+  /** Swap a pending flow's card for the confirm-cancel interim card. */
+  private enterConfirmCancel(flow: SelectionFlow): void {
+    flow.state = 'awaiting-confirm'
+    this.patchChoiceCard(flow, buildSelectorConfirmCancelCard(flow))
+  }
+
+  /** Swap a confirm-cancel flow back to its live choice card. */
+  private restoreChoiceCard(flow: SelectionFlow): void {
+    flow.state = 'pending'
+    this.patchChoiceCard(flow, buildSelectorCard(flow))
+  }
+
+  /** Best-effort patch of a non-terminal card (state stays live). */
+  private patchChoiceCard(flow: SelectionFlow, card: unknown): void {
+    if (flow.messageId === undefined) return
+    void this.patchTerminal(flow.messageId, card)
   }
 
   // ------------------------------------------------------------- internals --
@@ -193,7 +231,8 @@ export class SelectorManager {
     const fire = () => {
       // State + map membership double as the cancel check for injected-sleep
       // timers that have no clearable handle.
-      if (flow.state !== 'pending' || this.flows.get(flow.id) !== flow) return
+      if (flow.state !== 'pending' && flow.state !== 'awaiting-confirm') return
+      if (this.flows.get(flow.id) !== flow) return
       this.settle(flow, { status: 'expired' }, buildSelectorExpiredCard(flow))
     }
     if (this.deps.sleep !== undefined) {
@@ -214,7 +253,7 @@ export class SelectorManager {
 
   /** Exactly-once settle: state guard → terminal patch → resolve. */
   private settle(flow: SelectionFlow, outcome: SelectorOutcome, card: unknown): void {
-    if (flow.state !== 'pending') return
+    if (flow.state !== 'pending' && flow.state !== 'awaiting-confirm') return
     flow.state = outcome.status
     flow.terminalCard = card
     this.clearTimer(flow)

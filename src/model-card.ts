@@ -20,6 +20,21 @@ export const MODEL_SUBMIT_ACTION = 'dsh_feishu_model_submit'
 const PROVIDER_SUBMIT_NAME_PREFIX = 'dsh_feishu_model_provider_'
 const MODEL_SUBMIT_NAME_PREFIX = 'dsh_feishu_model_submit_'
 
+/** Compact token count for narrow screens (`128k`, `1M`). */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(0)}k`
+  return `${Math.round(n)}`
+}
+
+/** One model option's text: `name (id)` with the context window appended when known. */
+function modelOptionText(model: ModelInfo): string {
+  const base = model.name === model.id ? model.id : `${model.name} (${model.id})`
+  return model.contextWindow !== undefined && model.contextWindow > 0
+    ? `${base} · ${fmtTokens(model.contextWindow)} ctx`
+    : base
+}
+
 /** Minimal provider/model metadata the cards render (llm service shapes). */
 export interface ModelProviderInfo {
   readonly id: string
@@ -30,6 +45,8 @@ export interface ModelInfo {
   readonly id: string
   readonly name: string
   readonly description?: string
+  /** Combined request+response context window in tokens, when the adapter reports it. */
+  readonly contextWindow?: number
 }
 
 /** One recognized provider-step submit. */
@@ -181,7 +198,7 @@ export function buildModelPickCard(
               name: 'model',
               placeholder: { tag: 'plain_text', content: '请选择模型…' },
               options: models.map(model => ({
-                text: { tag: 'plain_text', content: model.name === model.id ? model.id : `${model.name} (${model.id})` },
+                text: { tag: 'plain_text', content: modelOptionText(model) },
                 value: model.id,
               })),
             },

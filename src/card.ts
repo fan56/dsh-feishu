@@ -111,6 +111,7 @@ function turnEndWord(reason: string | undefined): string {
 /** Live phase of the turn, in header-priority order. */
 export type TurnPhase =
   | { readonly kind: 'ended'; readonly reason: string | undefined }
+  | { readonly kind: 'stopping' }
   | { readonly kind: 'tool'; readonly name: string; readonly since: number }
   | { readonly kind: 'thinking'; readonly since: number }
   | { readonly kind: 'subagent'; readonly live: number }
@@ -120,10 +121,12 @@ export type TurnPhase =
  * Classify the turn's current phase: a running tool beats thinking, thinking
  * beats waiting on subagents, everything else running is "processing". The
  * subagent phase means the main agent is between rounds while child sessions
- * still work (no live tool call, no reasoning deltas).
+ * still work (no live tool call, no reasoning deltas). A stop in flight
+ * (agent/turn-stopping observed, settlement pending) beats every live phase.
  */
 export function turnPhase(state: RunState): TurnPhase {
   if (!state.running) return { kind: 'ended', reason: state.turnEndReason }
+  if (state.stopping) return { kind: 'stopping' }
   if (state.currentTool !== undefined) {
     return { kind: 'tool', name: state.currentTool.name, since: state.currentTool.startedAt }
   }
@@ -163,6 +166,8 @@ export function turnHeaderTitle(state: RunState, now: number, settledRoundMs?: n
       return `Round ${round} · 🔧 ${phase.name} · ${formatDuration(Math.max(0, now - phase.since))}`
     case 'thinking':
       return `Round ${round} · 🤔 thinking · ${formatDuration(Math.max(0, now - phase.since))}`
+    case 'stopping':
+      return `Round ${round} · ⛔ 停止中`
     case 'subagent':
       return `Round ${round} · ⏳ subagent ×${phase.live}`
     case 'processing':
@@ -208,6 +213,9 @@ function activityItems(state: RunState, now: number, displayThink: boolean): str
   const streaming = streamingTextTail(state)
   if (streaming !== undefined) {
     items.push(`- ✍️ _${clipLine(streaming, TAIL_CLIP)}_`)
+  }
+  if (state.lastError !== undefined) {
+    items.push(`- ⚠️ 请求失败：${clipLine(state.lastError, TAIL_CLIP)}`)
   }
   return items
 }
@@ -286,6 +294,10 @@ export interface FooterFields {
    * undefined = unknown — field omitted entirely).
    */
   thinking?: string
+  /** First-token latency of the round that just settled (ms) — settled cards only. */
+  firstTokenMs?: number
+  /** Output tokens of the round that just settled — settled cards only. */
+  outputTokens?: number
 }
 
 /** Compact token count for narrow screens (`950`, `12.3k`, `1.2M`). */
@@ -293,6 +305,12 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return `${Math.round(n)}`
+}
+
+/** First-token latency rendering: sub-second values are meaningful (a whole-second round would hide a 200ms TTFT). */
+function formatTtft(ms: number): string {
+  const rounded = Math.max(0, Math.round(ms))
+  return rounded < 1000 ? `${rounded}ms` : formatDuration(rounded)
 }
 
 /** Short display name of a model id: last path segment (`org/deepseek-v4` → `deepseek-v4`). */
@@ -320,6 +338,8 @@ export function buildFooter(fields: FooterFields): string {
   }
   if (fields.cacheHitPercent !== undefined) parts.push(`⚡ CH ${fields.cacheHitPercent.toFixed(1)}%`)
   if (fields.toolCalls !== undefined && fields.toolCalls > 0) parts.push(`🔧 ${fields.toolCalls} calls`)
+  if (fields.firstTokenMs !== undefined) parts.push(`⚡ ttft ${formatTtft(fields.firstTokenMs)}`)
+  if (fields.outputTokens !== undefined && fields.outputTokens > 0) parts.push(`📤 ${fmtTokens(fields.outputTokens)} tok`)
   return parts.join(' · ')
 }
 
@@ -407,7 +427,18 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
   if (todo !== undefined) sections.push(todo.join('\n'))
   const markdown = sections.join('\n\n')
 
-  const footer = buildFooter(footerFieldsOf(state, now))
+  const footer = buildFooter({
+    ...footerFieldsOf(state, now),
+    // Round-level performance stats ride the settled card only (their values
+    // describe the round that just landed; the live card has no meaning for
+    // them yet).
+    ...(settledRoundMs !== undefined && state.lastRoundFirstTokenMs !== undefined
+      ? { firstTokenMs: state.lastRoundFirstTokenMs }
+      : {}),
+    ...(settledRoundMs !== undefined && state.lastRoundOutputTokens !== undefined && state.lastRoundOutputTokens > 0
+      ? { outputTokens: state.lastRoundOutputTokens }
+      : {}),
+  })
 
   const elements: Array<Record<string, unknown>> = [
     { tag: 'markdown', content: withStatsFooter(markdown, footer) },

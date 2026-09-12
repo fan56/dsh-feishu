@@ -3,6 +3,20 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **`agent/turn-stopping` subscription.** A stop/cancel starts reflecting on the round card the moment the loop honors it (`⛔ 停止中` header) instead of waiting for the `turn/end` settlement.
+- **`agent/request-error` subscription.** A failed model request shows a one-line `⚠️ 请求失败：…` in the card's activity section immediately, while retries are still scheduled (cleared when a message lands or a new turn starts).
+- **Round-card performance footer.** The settled round card now shows first-token latency (`⚡ ttft 200ms`) rebuilt from the embedded `AssistantStreamRecord`, plus the round's output tokens (`📤 25 tok`) from its usage snapshot — the live card stays clean.
+- **`/model` picker context windows.** Each model option appends its context window (`· 128k ctx`) when the adapter reports one, resolved in bounded-parallel and fail-open (a resolution failure degrades to the plain catalog).
+
+### Changed
+- **btw first-frame throttle.** The very first text delta patches the btw card immediately (the answer appears the moment the first token lands); later deltas still defer to the beat, so no per-delta Lark patch.
+
+### Fixed
+- **Accidental cancel taps.** Approval cards (❌ 拒绝) now require a second tap: the first tap on 取消 swaps to a `确认取消 / 返回选择` interim card, and only the confirm tap settles. Non-approval selectors keep their one-tap cancel.
+
 ## [0.9.0] - 2026-09-11
 
 ### Removed
