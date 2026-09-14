@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # web-profile compat e2e — runs on the LOCAL dsh (no container, no Lark).
 #
-# Verifies the two scenarios the phone plugin must survive when the desktop
+# Verifies the scenarios the phone plugin must survive when the desktop
 # runs a web profile alongside it:
 #
 #   leg A — web-profile composition: a profile made of `dsh-base +
@@ -11,6 +11,13 @@
 #           `tui` profile (`dsh-base + dsh-tui-pi + dsh-feishu`); both
 #           profiles boot side by side without crashing, and dsh-feishu
 #           (dormant without Lark credentials) never takes the process down.
+#   leg C — /new preset composition (issue #2): a probe plugin drives the
+#           REAL SessionBinder inside a REAL web-profile host — create must
+#           join the default agent preset (meta + composed scope), a restart
+#           + cold /resume must rejoin it, and a bare control create must
+#           still detect as unjoined (the detector works). Exercises the
+#           web-profile tool story: tool plugins are NOT loaded globally
+#           there, so a preset-less session publishes with only `skill`.
 #
 # Everything runs against a scratch $DSH_HOME under mktemp; the real
 # ~/.dsh is untouched. The dsh binary is the local one (PATH), and the
@@ -39,13 +46,14 @@ info(){ printf '  [info] %s\n' "$*"; }
 cleanup() {
   pkill -f "dsh --profile e2e-web" 2>/dev/null || true
   pkill -f "dsh --profile e2e-tui" 2>/dev/null || true
+  pkill -f "dsh --profile e2e-probe" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
 # --- scaffold one profile ---------------------------------------------------
-scaffold() { # $1=profile-name $2=comma-separated bundle list
-  local name="$1" bundles="$2"
+scaffold() { # $1=profile-name $2=comma-separated bundle list $3=extra-dependency (optional)
+  local name="$1" bundles="$2" extra="${3:-}"
   local dir="$DSH_HOME/profiles/$name"
   mkdir -p "$dir"
   printf '[]\n' > "$dir/cordis.yml"
@@ -63,6 +71,7 @@ Y
     case "$name" in
       *tui*) printf '    ,"@aiwayds/dsh-tui-pi": "link:%s"\n' "$TUI_PI" ;;
     esac
+    if [ -n "$extra" ]; then printf '    ,%s\n' "$extra"; fi
     printf '  },\n  "dsh": { "profile": { "bundles": [%s] } }\n}\n' "$bundles"
   } > "$dir/package.json"
   if ! (cd "$dir" && pnpm install >/dev/null 2>&1); then
@@ -151,6 +160,200 @@ else
   # is the real assertion; note the absence instead of failing.
   info 'tui-side dsh-feishu: no explicit dormant line in log (log-level dependent)'
 fi
+
+# ------------------------------------------------------------------ leg C --
+info '=== leg C: /new preset composition in a real web profile (probe-driven) ==='
+
+# The probe is authored INTO the scratch profile — throwaway, no repo noise.
+# It drives the linked dsh-feishu's REAL SessionBinder against the REAL host
+# services (agents / agentPresets / sessionPersistence), the same binder the
+# Lark bot uses for /new and /resume.
+PROBE_PROFILE="$DSH_HOME/profiles/e2e-probe"
+mkdir -p "$PROBE_PROFILE/probe"
+cat > "$PROBE_PROFILE/probe/package.json" <<'Y'
+{ "name": "dsh-feishu-e2e-probe", "private": true, "type": "module", "main": "index.js" }
+Y
+cat > "$PROBE_PROFILE/probe/index.js" <<'EOF'
+// e2e probe — see e2e/web-profile-compat.sh leg C. Writes one JSON result
+// file (FEISHU_PROBE_RESULT) and never throws past its own catch.
+import { randomUUID } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
+
+export const name = 'dsh-feishu-e2e-probe'
+export const inject = ['agents']
+
+const resultFile = process.env.FEISHU_PROBE_RESULT
+const write = data => { try { writeFileSync(resultFile, JSON.stringify(data)) } catch { /* gone */ } }
+const presetIdOf = composed =>
+  composed === undefined || composed === null ? null : (composed.id ?? String(composed))
+// composedPreset throws on a scopeless/absent context — a probe bug must
+// surface as DATA, not kill the leg.
+const safeComposed = (presets, agent) => {
+  try {
+    const ctx = agent?.ctx ?? agent
+    return presetIdOf(presets.composedPreset?.(ctx))
+  } catch (error) {
+    return `error: ${String(error)}`
+  }
+}
+
+async function waitService(ctx, key, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const service = ctx.get(key)
+    if (service !== undefined) return service
+    if (Date.now() > deadline) throw new Error(`service "${key}" never appeared`)
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+}
+
+export async function apply(ctx) {
+  try {
+    const presets = await waitService(ctx, 'agentPresets', 20_000)
+    await waitService(ctx, 'sessionPersistence', 20_000)
+    const expected = (await presets.resolve(undefined)).id
+    const { SessionBinder } = await import('@aiwayds/dsh-feishu/lib/binder.js')
+
+    if (process.env.FEISHU_PROBE_MODE === 'resume') {
+      // Second boot, fresh process: the target session is NOT live — the
+      // binder's cold arm must rejoin the preset recorded in its header.
+      const target = readFileSync(process.env.FEISHU_PROBE_SESSION, 'utf8').trim()
+      // Diagnostics first: does the projection still carry what /new recorded?
+      const obs = await ctx.get('sessionQuery').observeSession(target)
+      const binder = new SessionBinder(ctx)
+      const bound = await binder.bind(target)
+      write({
+        leg: 'resume', ok: true, sessionId: bound.sessionId, bindMode: bound.mode,
+        expectedPreset: expected,
+        targetProjectedPreset: obs?.projections?.values?.agentPreset ?? null,
+        composedPreset: safeComposed(presets, bound.agent),
+      })
+      return
+    }
+
+    const binder = new SessionBinder(ctx)
+    const created = await binder.createNew(process.cwd())
+    // The durable record: the presets service appends `agent-preset/selected`
+    // on mount; the host projects it back. This is what a LATER cold resume
+    // (next boot) reads — assert it here so the resume leg's premise holds.
+    const observation = await ctx.get('sessionQuery').observeSession(created.sessionId)
+    const projected = observation?.projections?.values?.agentPreset ?? null
+    const persisted = await ctx.get('sessionPersistence').list()
+    const header = persisted.find(h => String(h.id) === created.sessionId)
+    // Bare control: the PRE-FIX create shape must still detect as unjoined —
+    // proves this probe can see the difference (issue #2's exact bug).
+    const bareHandle = await ctx.agents.create({
+      sessionId: randomUUID(),
+      meta: { cwd: process.cwd() },
+    })
+    writeFileSync(process.env.FEISHU_PROBE_SESSION, created.sessionId)
+    write({
+      leg: 'create', ok: true, sessionId: created.sessionId, createMode: created.mode,
+      expectedPreset: expected,
+      projectedPreset: projected,
+      headerPreset: header?.agentPreset ?? null,
+      composedPreset: safeComposed(presets, created.agent),
+      bareComposedPreset: safeComposed(presets, bareHandle?.agent ?? bareHandle),
+    })
+  } catch (error) {
+    write({ ok: false, error: String((error && error.stack) || error) })
+  }
+}
+EOF
+
+scaffold e2e-probe '"@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app","@aiwayds/dsh-feishu"' '"dsh-feishu-e2e-probe": "link:./probe"'
+cat > "$PROBE_PROFILE/cordis.patch.yml" <<'Y'
+- insert:
+    - id: feishu-e2e-probe
+      name: dsh-feishu-e2e-probe
+Y
+
+json_get() { # $1=file $2=key
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null
+}
+
+boot_probe() { # $1=mode $2=result-file
+  local mode="$1" result="$2"
+  rm -f "$result"
+  (cd "$PROBE_PROFILE" && FEISHU_PROBE_MODE="$mode" FEISHU_PROBE_RESULT="$result" \
+    FEISHU_PROBE_SESSION="$WORK/probe-session.id" \
+    dsh --profile e2e-probe --port 0 --no-open >"$WORK/probe-$mode.log" 2>&1 &)
+  if wait_file "$result" 60; then
+    sleep 1 # let the host settle before the result file is judged
+    return 0
+  fi
+  return 1
+}
+
+wait_file() { # $1=file $2=timeout-s
+  local i
+  for i in $(seq 1 "$2"); do
+    [ -s "$1" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+boot_probe create "$WORK/probe-create.json"
+if [ "$(json_get "$WORK/probe-create.json" ok)" = "True" ]; then
+  CREATE_MODE="$(json_get "$WORK/probe-create.json" createMode)"
+  EXPECTED="$(json_get "$WORK/probe-create.json" expectedPreset)"
+  PROJECTED="$(json_get "$WORK/probe-create.json" projectedPreset)"
+  COMPOSED="$(json_get "$WORK/probe-create.json" composedPreset)"
+  BARE="$(json_get "$WORK/probe-create.json" bareComposedPreset)"
+  if [ "$CREATE_MODE" = "created" ]; then
+    ok 'probe: binder /new created the session'
+  else
+    bad "probe: /new did not create (mode=$CREATE_MODE)"
+  fi
+  if [ -n "$EXPECTED" ] && [ "$PROJECTED" = "$EXPECTED" ]; then
+    ok "probe: /new recorded the default preset durably ($PROJECTED)"
+  else
+    bad "probe: projected preset mismatch (expected '$EXPECTED', got '$PROJECTED')"
+  fi
+  if [ "$COMPOSED" = "$EXPECTED" ]; then
+    ok "probe: /new agent composes under the default preset ($COMPOSED)"
+  else
+    bad "probe: /new agent composes bare or under the wrong preset ('$COMPOSED' vs '$EXPECTED')"
+  fi
+  if [ "$BARE" = "None" ] || [ -z "$BARE" ]; then
+    ok 'probe: bare control create detects as unjoined (detector works)'
+  else
+    bad "probe: bare control unexpectedly composed ($BARE) — detector cannot see the bug"
+  fi
+else
+  bad 'probe: create leg produced no/failed result'
+  cat "$WORK/probe-create.json" 2>/dev/null | sed 's/^/    | /'
+  grep -a "dsh-feishu:" "$WORK/probe-create.log" 2>/dev/null | head -3 | sed 's/^/    | /'
+  tail -8 "$WORK/probe-create.log" 2>/dev/null | sed 's/^/    | /'
+fi
+pkill -f "dsh --profile e2e-probe" 2>/dev/null || true
+sleep 2 # kernel write lease must be released before the cold resume boot
+
+boot_probe resume "$WORK/probe-resume.json"
+if [ "$(json_get "$WORK/probe-resume.json" ok)" = "True" ]; then
+  BIND_MODE="$(json_get "$WORK/probe-resume.json" bindMode)"
+  COMPOSED="$(json_get "$WORK/probe-resume.json" composedPreset)"
+  EXPECTED="$(json_get "$WORK/probe-resume.json" expectedPreset)"
+  TARGET="$(cat "$WORK/probe-session.id" 2>/dev/null)"
+  BOUND_ID="$(json_get "$WORK/probe-resume.json" sessionId)"
+  if [ "$BIND_MODE" = "resumed" ] && [ "$BOUND_ID" = "$TARGET" ]; then
+    ok 'probe: cold /resume took the resume arm (fresh process)'
+  else
+    bad "probe: cold /resume wrong arm/id (mode=$BIND_MODE, id=$BOUND_ID, want $TARGET)"
+  fi
+  if [ "$COMPOSED" = "$EXPECTED" ]; then
+    ok "probe: cold /resume rejoined the recorded preset ($COMPOSED)"
+  else
+    bad "probe: cold /resume composed bare or wrong ('$COMPOSED' vs '$EXPECTED')"
+  fi
+else
+  bad 'probe: resume leg produced no/failed result'
+  cat "$WORK/probe-resume.json" 2>/dev/null | sed 's/^/    | /'
+  grep -a "dsh-feishu:" "$WORK/probe-resume.log" 2>/dev/null | head -3 | sed 's/^/    | /'
+  tail -8 "$WORK/probe-resume.log" 2>/dev/null | sed 's/^/    | /'
+fi
+pkill -f "dsh --profile e2e-probe" 2>/dev/null || true
 
 # ------------------------------------------------------------------ summary --
 printf '\n%d %d 0\n' "$PASS" "$FAIL" > "$WORK/e2e.result"

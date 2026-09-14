@@ -188,3 +188,15 @@ test('truncateBody cuts long bodies and appends an omission notice', () => {
 test('truncateBody enforces the minimum cap', () => {
   assert.throws(() => truncateBody('abc', 10), /at least 20/)
 })
+
+// ------------------------------------------------------ mojibake repair --
+
+test('repairMojibake restores 1252-mojibaked emoji and leaves legit text verbatim', async () => {
+  const { repairMojibake } = await import('../lib/text.js')
+  assert.equal(repairMojibake('你好！很高兴见到你 ðŸ˜Š'), '你好！很高兴见到你 😊')
+  assert.equal(repairMojibake('dash \u00E2\u20AC\u201D ok'), 'dash \u2014 ok')
+  // Legit European text: single accented chars fail the clean-decode check.
+  assert.equal(repairMojibake('café añadir'), 'café añadir')
+  assert.equal(repairMojibake('纯中文没有任何问题'), '纯中文没有任何问题')
+  assert.equal(repairMojibake('plain ascii'), 'plain ascii')
+})

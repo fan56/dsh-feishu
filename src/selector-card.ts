@@ -107,10 +107,14 @@ export function buildSelectorCard(flow: SelectorFlowRef): Schema2Card {
     elements.push({ tag: 'markdown', content: flow.spec.description })
   }
   if (flow.spec.mode === 'buttons') {
-    for (const option of options) {
+    // Button `name` must be UNIQUE across the whole card (Feishu 230099
+    // "name duplicate" otherwise — a card-level rejection that sendCard
+    // swallows) — so every button carries a distinct role/index suffix and
+    // the parser strips it back off.
+    for (const [index, option] of options.entries()) {
       elements.push({
         tag: 'button',
-        name: `${SELECTOR_NAME_PREFIX}${flow.id}`,
+        name: `${SELECTOR_NAME_PREFIX}${flow.id}_${index}`,
         value: { action: SELECTOR_ACTION, flow_id: flow.id, pick: option.value },
         text: { tag: 'plain_text', content: option.label },
         type: 'primary',
@@ -118,7 +122,7 @@ export function buildSelectorCard(flow: SelectorFlowRef): Schema2Card {
     }
     elements.push({
       tag: 'button',
-      name: `${SELECTOR_NAME_PREFIX}${flow.id}`,
+      name: `${SELECTOR_NAME_PREFIX}${flow.id}_cancel`,
       value: { action: SELECTOR_ACTION, flow_id: flow.id, cancel: true },
       text: { tag: 'plain_text', content: '取消' },
       type: 'default',
@@ -215,7 +219,7 @@ export function buildSelectorExpiredCard(flow: SelectorFlowRef): Schema2Card {
  * live choice card. The flow stays pending underneath (its TTL keeps running).
  */
 export function buildSelectorConfirmCancelCard(flow: SelectorFlowRef): Schema2Card {
-  const confirmName = `${SELECTOR_NAME_PREFIX}${flow.id}`
+  const baseName = `${SELECTOR_NAME_PREFIX}${flow.id}`
   return {
     schema: '2.0',
     config: { width_mode: 'fill' },
@@ -229,14 +233,14 @@ export function buildSelectorConfirmCancelCard(flow: SelectorFlowRef): Schema2Ca
         { tag: 'markdown', content: '再点一次确认取消；误触请返回选择。' },
         {
           tag: 'button',
-          name: confirmName,
+          name: `${baseName}_confirm`,
           value: { action: SELECTOR_ACTION, flow_id: flow.id, confirm: true },
           text: { tag: 'plain_text', content: '确认取消' },
           type: 'danger',
         },
         {
           tag: 'button',
-          name: confirmName,
+          name: `${baseName}_back`,
           value: { action: SELECTOR_ACTION, flow_id: flow.id, back: true },
           text: { tag: 'plain_text', content: '返回选择' },
           type: 'default',
@@ -304,8 +308,17 @@ export function parseSelectorAction(data: unknown, buttonName?: string): ParsedS
   }
   const name = buttonName ?? action.name
   if (typeof name === 'string' && name.startsWith(SELECTOR_NAME_PREFIX)) {
-    const flowId = name.slice(SELECTOR_NAME_PREFIX.length)
+    // Names carry a uniqueness suffix (`_<index>` | `_cancel` | `_confirm` |
+    // `_back` — Feishu rejects duplicate button names); strip the LAST
+    // `_role` segment. Unsuffixed names (older cards) parse unchanged.
+    const sliced = name.slice(SELECTOR_NAME_PREFIX.length)
+    const underscore = sliced.lastIndexOf('_')
+    const flowId = underscore === -1 ? sliced : sliced.slice(0, underscore)
     if (flowId === '') return undefined
+    const role = underscore === -1 ? undefined : sliced.slice(underscore + 1)
+    if (role === 'cancel') return { flowId, cancel: true }
+    if (role === 'confirm') return { flowId, confirm: true }
+    if (role === 'back') return { flowId, back: true }
     const pick = pickOfFormValue(formValue)
     return pick === undefined ? { flowId } : { flowId, pick }
   }

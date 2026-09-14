@@ -101,7 +101,7 @@ interface SkillsServiceLike {
 const UNBOUND_REPLY = '尚未绑定会话。先发 /resume 进入一个会话。'
 
 /** Option value that explicitly clears the effort override (TUI's default row). */
-const DEFAULT_EFFORT = 'default'
+export const DEFAULT_EFFORT = 'default'
 
 // ---------------------------------------------------------------- /think --
 

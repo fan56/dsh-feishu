@@ -55,6 +55,18 @@ function formOf(card) {
 
 // ------------------------------------------------------------------ builder --
 
+test('buttons-mode + confirm-cancel cards keep every button name unique (Feishu 230099)', () => {
+  const flow = { id: 'flow-u', spec: { title: 't', options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }], mode: 'buttons' } }
+  const names = buildSelectorCard(flow).body.elements.filter(e => e.tag === 'button').map(e => e.name)
+  assert.equal(new Set(names).size, names.length)
+  const confirmCard = buildSelectorConfirmCancelCard(flow)
+  const confirmNames = confirmCard.body.elements.filter(e => e.tag === 'button').map(e => e.name)
+  assert.equal(new Set(confirmNames).size, confirmNames.length)
+  // The name fallback still resolves the flow id from suffixed names.
+  const parsed = parseSelectorAction({ name: names[0], form_value: {} }, names[0])
+  assert.equal(parsed.flowId, 'flow-u')
+})
+
 test('select mode builds a schema 2.0 form card whose submit carries a value (200340 guard)', () => {
   const card = buildSelectorCard({ id: 'flow-1', spec: SPEC })
   assert.equal(card.schema, '2.0')

@@ -191,6 +191,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 | `bodySegmentChars` | `3500` | 长正文分段阈值 |
 | `resumeListStyle` | `"auto"` | `/resume` 列表：`auto`/`table`/`list` |
 | `backgroundPush` | `"off"` | 手机未绑定会话的完成推送（发到最后活跃的聊天）：`off` / `cron`（带 cron 投递或子代理结算通知的回合）/ `all`（所有回合结束）。环境变量覆盖：`DSH_FEISHU_BACKGROUND_PUSH` |
+| `roundButtons` | `"off"` | round 卡底部的快捷按钮：`on` 在进行中卡渲染 ⛔ 停止、在结束卡渲染 ▶️ 继续；`off` 两个都不渲染——停止走 `/stop` 命令（自带确认卡）。环境变量覆盖：`DSH_FEISHU_ROUND_BUTTONS` |
 | `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref 名 |
 
 凭证解析优先级：patch 明文 > 环境变量 `DSH_FEISHU_APP_ID/SECRET` > credentials 服务。

@@ -7,7 +7,7 @@ import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import { SessionBinder } from '../lib/binder.js'
 
 function makeRegistry() {
-  const calls = { resume: [], create: 0 }
+  const calls = { resume: [], resumeRecords: [], create: 0 }
   const agentsById = new Map()
   const handles = []
   return {
@@ -27,6 +27,7 @@ function makeRegistry() {
       get(id) { return agentsById.get(String(id)) },
       async resume(options) {
         calls.resume.push(String(options.resumeSessionId))
+        calls.resumeRecords.push(options)
         const agent = {
           id: String(options.resumeSessionId),
           session: { id: String(options.resumeSessionId) },
@@ -265,4 +266,136 @@ test('watchRemote backfills durable rows and detach clears the view', async () =
     delete process.env.DSH_SESSION_ROOT
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// Agent-preset composition (issue #2): a bare create/resume composes against
+// the empty global layer — web/headless profiles load their tool plugins
+// per-agent THROUGH the preset, so the agent publishes with only the `skill`
+// tool. /new must join the default preset like the host's own creators do;
+// a cold resume must rejoin the session's recorded preset. Every failure
+// degrades to the bare composition (tui profiles resolve no presets and load
+// tools globally — bare is correct there).
+
+/** Fake factory-setup context: `installModelSelection` only needs `.on`. */
+const fakeAgentCtx = { on: () => () => {} }
+
+function makePresetsService({ defaultId = 'standard', failResolve = false, failMount = false } = {}) {
+  const calls = { resolve: [], mount: [] }
+  return {
+    calls,
+    async resolve(presetId) {
+      calls.resolve.push(presetId)
+      if (failResolve) throw new Error('no presets configured')
+      return { id: presetId ?? defaultId }
+    },
+    async mount(agentCtx, presetId) {
+      calls.mount.push({ agentCtx, presetId })
+      if (failMount) throw new Error('preset exploded')
+    },
+  }
+}
+
+function makePresetContext({ registry, headers = [], presets, observation }) {
+  return {
+    agents: registry.agents,
+    logger: { warnings: [], warn(...args) { this.warnings.push(args.join(' ')) } },
+    get(key) {
+      if (key === 'agentPresets') return presets
+      if (key === 'sessionPersistence') return { list: async () => headers }
+      if (key === 'sessionQuery') {
+        return { observeSession: async () => observation ?? { projections: { values: {} } } }
+      }
+      return undefined
+    },
+  }
+}
+
+test('createNew joins the default preset: meta records it, setup mounts it', async () => {
+  const reg = makeRegistry()
+  const presets = makePresetsService({ defaultId: 'standard' })
+  const binder = new SessionBinder(makePresetContext({ registry: reg, presets }))
+  const result = await binder.createNew('/tmp/work')
+  assert.equal(result.mode, 'created')
+  // The DEFAULT preset (resolve called with no id), recorded in meta —
+  // this is what keeps /resume and the projections consistent with
+  // web-created sessions.
+  assert.deepEqual(presets.calls.resolve, [undefined])
+  assert.equal(reg.calls.createOptions.meta.agentPreset, 'standard')
+  assert.equal(reg.calls.createOptions.meta.cwd, '/tmp/work')
+  // The factory setup mounts the SAME preset id onto the agent context.
+  await reg.calls.createOptions.setup(fakeAgentCtx)
+  assert.deepEqual(presets.calls.mount, [{ agentCtx: fakeAgentCtx, presetId: 'standard' }])
+})
+
+test('createNew composes bare when the composition has no presets service (tui profile)', async () => {
+  const reg = makeRegistry()
+  // Plain {agents} context — no get(), no agentPresets: the tui shape.
+  const binder = new SessionBinder({ agents: reg.agents })
+  await binder.createNew('/tmp/work')
+  assert.equal(reg.calls.createOptions.meta.agentPreset, undefined)
+})
+
+test('createNew degrades to bare when the default preset cannot resolve — and warns', async () => {
+  const reg = makeRegistry()
+  const presets = makePresetsService({ failResolve: true })
+  const ctx = makePresetContext({ registry: reg, presets })
+  const binder = new SessionBinder(ctx)
+  // /new itself must survive: the agent publishes bare (host invariant
+  // warning is the backstop), the phone-side flow never dies.
+  const result = await binder.createNew('/tmp/work')
+  assert.equal(result.mode, 'created')
+  assert.equal(reg.calls.createOptions.meta.agentPreset, undefined)
+  assert.ok(ctx.logger.warnings.some(w => w.includes('resolve failed')), 'resolve failure is logged')
+})
+
+test('preset mount failure degrades to bare — the create still succeeds', async () => {
+  const reg = makeRegistry()
+  const presets = makePresetsService({ failMount: true })
+  const ctx = makePresetContext({ registry: reg, presets })
+  const binder = new SessionBinder(ctx)
+  const result = await binder.createNew('/tmp/work')
+  assert.equal(result.mode, 'created')
+  assert.equal(reg.calls.createOptions.meta.agentPreset, 'standard')
+  await reg.calls.createOptions.setup(fakeAgentCtx)
+  assert.equal(presets.calls.mount.length, 1)
+  assert.ok(ctx.logger.warnings.some(w => w.includes('mount failed')), 'mount failure is logged')
+})
+
+test('cold resume rejoins the preset recorded in the session projection', async () => {
+  const reg = makeRegistry()
+  const presets = makePresetsService({ defaultId: 'standard' })
+  const binder = new SessionBinder(makePresetContext({
+    registry: reg,
+    presets,
+    // The durable record is the `agent-preset/selected` projection (the
+    // presets service appends it on mount) — NOT the meta header.
+    observation: { projections: { values: { agentPreset: 'standard' } } },
+  }))
+  // Fresh process: the session is not live — the cold arm runs.
+  const result = await binder.bind('sess-preset')
+  assert.equal(result.mode, 'resumed')
+  await reg.calls.resumeRecords[0].setup(fakeAgentCtx)
+  assert.deepEqual(presets.calls.mount, [{ agentCtx: fakeAgentCtx, presetId: 'standard' }])
+})
+
+test('cold resume of a preset-less session stays bare (no setup, no mount)', async () => {
+  const reg = makeRegistry()
+  const presets = makePresetsService()
+  const binder = new SessionBinder(makePresetContext({
+    registry: reg,
+    presets,
+    observation: { projections: { values: {} } },
+  }))
+  await binder.bind('sess-bare')
+  assert.equal(reg.calls.resumeRecords[0].setup, undefined,
+    'a session created before the fix has nothing to rejoin')
+  assert.equal(presets.calls.mount.length, 0)
+})
+
+test('cold resume without a session query at all stays bare (tui profile)', async () => {
+  const reg = makeRegistry()
+  const binder = new SessionBinder({ agents: reg.agents })
+  await binder.bind('sess-cold')
+  assert.equal(reg.calls.resumeRecords[0].setup, undefined)
 })

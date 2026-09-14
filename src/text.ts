@@ -203,3 +203,43 @@ export function formatWhen(epochMs: number, now = Date.now()): string {
   const base = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
   return sameYear ? base : `${date.getFullYear()}-${base}`
 }
+
+// ------------------------------------------------------- mojibake repair --
+
+/**
+ * Windows-1252 specials (0x80–0x9F) that UTF-8 bytes decode to when a model
+ * run's emoji output was read as 1252 instead of UTF-8 (`😊` → `ðŸ˜Š`).
+ * Everything else in a mojibake run is plain Latin-1 (0xA0–0xFF).
+ */
+const CP1252_SPECIALS: ReadonlyMap<string, number> = new Map([
+  ['€', 0x80], ['‚', 0x82], ['ƒ', 0x83], ['„', 0x84], ['…', 0x85], ['†', 0x86],
+  ['‡', 0x87], ['ˆ', 0x88], ['‰', 0x89], ['Š', 0x8a], ['‹', 0x8b], ['Œ', 0x8c],
+  ['Ž', 0x8e], ['‘', 0x91], ['’', 0x92], ['“', 0x93], ['”', 0x94], ['•', 0x95],
+  ['–', 0x96], ['—', 0x97], ['˜', 0x98], ['™', 0x99], ['š', 0x9a], ['›', 0x9b],
+  ['œ', 0x9c], ['ž', 0x9e], ['Ÿ', 0x9f],
+])
+
+/** One maximal run of characters that could be 1252/Latin-1 mojibake bytes. */
+const MOJIBAKE_RUN = /(?:[\u00A0-\u00FF]|[€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ])+/g
+
+/**
+ * Repair UTF-8-read-as-1252 mojibake in model output (`ðŸ˜Š` → `😊`).
+ * Each candidate run is re-encoded to bytes and decoded as UTF-8; a run that
+ * does not decode cleanly (legit `café`, a lone `é`, real European text)
+ * fails the U+FFFD check and stays verbatim — ASCII and CJK sit outside the
+ * run ranges entirely and are never touched.
+ */
+export function repairMojibake(text: string): string {
+  if (!/[\u00A0-\u00FF\u20AC\u201A\u0192\u201E\u2026\u2020\u2021\u02C6\u2030\u0160\u2039\u0152\u017D\u2018-\u201D\u2013\u2014\u02DC\u2122\u0161\u203A\u0153\u017E\u0178]/.test(text)) return text
+  return text.replace(MOJIBAKE_RUN, run => {
+    const bytes: number[] = []
+    for (const char of run) {
+      const special = CP1252_SPECIALS.get(char)
+      if (special !== undefined) bytes.push(special)
+      else if (char.charCodeAt(0) >= 0xa0 && char.charCodeAt(0) <= 0xff) bytes.push(char.charCodeAt(0))
+      else return run // gaps the run — not decodable, keep verbatim
+    }
+    const repaired = Buffer.from(bytes).toString('utf8')
+    return repaired.includes('\uFFFD') ? run : repaired
+  })
+}

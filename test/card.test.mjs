@@ -258,8 +258,9 @@ test('buildFooter renders every field in order with · separators', () => {
     cacheHitPercent: 85.04,
     toolCalls: 23,
     thinking: 'high',
+    preset: 'standard',
   })
-  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls')
+  assert.equal(line, '⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 🧩 standard · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls')
 })
 
 test('buildFooter omits missing fields without leaving separators', () => {
@@ -283,6 +284,13 @@ test('buildFooter shows the thinking level only when known', () => {
   assert.equal(buildFooter({ thinking: 'medium' }), '🧠 medium')
   assert.equal(buildFooter({ thinking: 'off' }), '🧠 off')
   assert.equal(buildFooter({}), '')
+})
+
+test('buildFooter shows the preset only when known', () => {
+  assert.equal(buildFooter({ preset: 'standard' }), '🧩 standard')
+  // Unknown/empty preset leaves the field out — no dangling separator.
+  assert.equal(buildFooter({ preset: undefined, model: 'm' }), '🤖 m')
+  assert.equal(buildFooter({ preset: '', model: 'm' }), '🤖 m')
 })
 
 test('footerFieldsOf derives fields from the run state and clock', () => {
@@ -353,6 +361,16 @@ test('the turn card closes with a stats footer line behind a divider (no Round r
   assert.ok(!body.includes('Round '))
   // The hash covers the footer so beat patches follow it.
   assert.ok(hash.includes('🧠 high'))
+})
+
+test('the turn card footer carries the session preset from the context, omitted when unknown', () => {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('request/header', { header: { config: { provider: 'p', model: 'm' } } }, 1100, 2))
+  const withPreset = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000, preset: 'standard' }).card
+  assert.match(withPreset.body.elements[0].content, /🧩 standard/)
+  const without = buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 2000 }).card
+  assert.doesNotMatch(without.body.elements[0].content, /🧩/)
 })
 
 test('no built card ever carries a note element (schema V2 rejects it)', () => {

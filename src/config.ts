@@ -62,6 +62,13 @@ export interface Config {
    * chat. Override: DSH_FEISHU_BACKGROUND_PUSH.
    */
   backgroundPush?: 'off' | 'cron' | 'all'
+  /**
+   * Quick-action buttons on the round cards (default `off`): `on` renders
+   * ⛔ 停止 under the live card and ▶️ 继续 under the ended card. Off keeps
+   * both buttons out — stopping still works via the `/stop` command (which
+   * asks for a confirmation). Override: DSH_FEISHU_ROUND_BUTTONS.
+   */
+  roundButtons?: 'on' | 'off'
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -78,6 +85,7 @@ export const Config = z.object({
   resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
   btwContextMessages: z.number().min(0).max(50).step(1).default(6),
   backgroundPush: z.union([z.const('off'), z.const('cron'), z.const('all')]).default('off'),
+  roundButtons: z.union([z.const('on'), z.const('off')]).default('off'),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -94,12 +102,13 @@ export interface ResolvedConfig {
   readonly resumeListStyle: 'auto' | 'table' | 'list'
   readonly btwContextMessages: number
   readonly backgroundPush: 'off' | 'cron' | 'all'
+  readonly roundButtons: 'on' | 'off'
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
   'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle', 'btwContextMessages',
-  'backgroundPush',
+  'backgroundPush', 'roundButtons',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -138,6 +147,9 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   const envPush = envString(env, 'DSH_FEISHU_BACKGROUND_PUSH')
   const pushValue = config?.backgroundPush ?? (envPush === 'cron' || envPush === 'all' ? envPush : undefined)
   const backgroundPush = pushValue === 'cron' || pushValue === 'all' ? pushValue : 'off'
+  const envRoundButtons = envString(env, 'DSH_FEISHU_ROUND_BUTTONS')
+  const buttonsValue = config?.roundButtons ?? (envRoundButtons === 'on' || envRoundButtons === 'off' ? envRoundButtons : undefined)
+  const roundButtons = buttonsValue === 'on' ? 'on' : 'off'
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   return Object.freeze({
@@ -155,5 +167,6 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     resumeListStyle,
     btwContextMessages: btwConfigValue ?? 6,
     backgroundPush,
+    roundButtons,
   })
 }

@@ -397,7 +397,28 @@ test('an expired persisted picker replies 过期 and clears itself', async () =>
 
 // -------------------------------------------------------- /new flow --
 
-test('/new greys the old card, creates + binds a fresh session, sends the 🆕 boundary card', async () => {
+// -------------------------------------------------------- /new flow --
+
+/** Extract the config card's flow id (submit button value). */
+function newFlowIdOf(card) {
+  const form = card.body.elements.find(element => element.tag === 'form')
+  const submit = form.elements.find(element => element.form_action_type === 'submit')
+  return submit.value.flow_id
+}
+
+/** Submit the /new config card as the operator would. */
+function submitNew(bot, card, formValue) {
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: {
+      tag: 'button',
+      value: { action: 'dsh_feishu_new', flow_id: newFlowIdOf(card) },
+      form_value: formValue,
+    },
+  })
+}
+
+test('/new presents the config card; submit mints + binds with the inherited route', async () => {
   const patches = []
   const sends = []
   const updates = []
@@ -407,7 +428,7 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
     getAgent: () => undefined,
     isReadOnlyView: () => false,
     detach: async () => {},
-    async createNew(cwd, route) { createCalls.push([cwd, route]); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
+    async createNew(cwd, route, presetId) { createCalls.push([cwd, route, presetId]); return { sessionId: 'fresh-aaaa-bbbb', mode: 'created', agent: { status: 'idle' } } },
   }
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
   const bot = new FeishuBot({
@@ -434,34 +455,133 @@ test('/new greys the old card, creates + binds a fresh session, sends the 🆕 b
     },
     binder,
     store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p); updates.push(p) } },
-    allowlist: new Set(),
+    allowlist: new Set(['ou_op']),
     now: () => 1000,
   })
   bot.cardMessageId = 'm-old'
 
   await bot.handleNew()
+  await new Promise(resolve => setTimeout(resolve, 5)) // the send rides the op chain
+
+  // The config card goes out; NOTHING is created before the submit.
+  assert.equal(sends.length, 1)
+  assert.match(sends[0].header.title.content, /新会话配置/)
+  assert.equal(createCalls.length, 0)
+  assert.equal(patches.length, 0)
+
+  submitNew(bot, sends[0], {})
+  await new Promise(resolve => setTimeout(resolve, 10))
 
   // Old card greyed out first (the visual boundary for the old stream)…
-  assert.equal(patches.length, 1)
   assert.match(patches[0].card.header.title.content, /已解绑/)
-  // …then the 🆕 card opens the new stream.
-  assert.equal(sends.length, 1)
-  assert.match(sends[0].header.title.content, /🆕 新会话 · fresh-aa/)
-  assert.equal(sends[0].header.template, 'green')
+  // …then the config card becomes the 🆕 summary.
+  assert.equal(patches[1].card.header.template, 'green')
+  assert.match(patches[1].card.header.title.content, /🆕 新会话 · fresh-aa/)
   // Binding switched and persisted — with the previous session's route.
   assert.equal(state.boundSessionId, 'fresh-aaaa-bbbb')
-  // The selection carries the reasoning effort too (ox-alpha mandates it).
-  assert.deepEqual(createCalls[0][1], { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
+  // The selection carries the reasoning effort too (ox-alpha mandates it);
+  // no preset picked → the binder resolves the deployment default.
+  assert.deepEqual(createCalls[0], [process.cwd(), { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' }, undefined])
+})
+
+test('/new submit carries the picked preset/model/effort into the binder', async () => {
+  const createCalls = []
+  const sends = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: undefined, picker: undefined, phoneModel: { provider: 'zhipu', model: 'glm-4.7' } }
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      get(key) {
+        if (key === 'workspaceRegistry') {
+          return { list: () => [{ id: 'w1', path: '/Users/qingguee/proj', title: 'proj' }] }
+        }
+        if (key === 'agentPresets') {
+          return { remoteExportList: async () => ({ presets: [
+            { id: 'standard', name: '标准模式', isDefault: true },
+            { id: 'ptc', name: 'PTC 模式' },
+          ] }) }
+        }
+        if (key === 'llm') {
+          return {
+            async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }, { id: 'glm-5.3', name: 'GLM-5.3' }] },
+            async resolveModelInfo() { return { reasoning: { efforts: [{ id: 'high', name: 'High' }] } } },
+          }
+        }
+        return undefined
+      },
+    },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async createNew(cwd, route, presetId) { createCalls.push([cwd, route, presetId]); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(['ou_op']),
+    now: () => 1000,
+  })
+
+  await bot.handleNew()
+  await new Promise(resolve => setTimeout(resolve, 5)) // the send rides the op chain
+  const card = sends[0]
+  const form = card.body.elements.find(element => element.tag === 'form')
+  const selects = form.elements.filter(element => element.tag === 'select_static')
+  assert.deepEqual(selects.map(select => select.name), ['workspace', 'preset', 'model', 'effort'])
+  assert.equal(selects[0].initial_option, '/Users/qingguee/proj')
+  assert.equal(selects[1].initial_option, 'standard')
+  assert.equal(selects[2].initial_option, 'glm-4.7')
+  assert.equal(selects[3].initial_option, 'default')
+
+  submitNew(bot, card, { workspace: '/Users/qingguee/proj', preset: 'ptc', model: 'glm-5.3', effort: 'high' })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(createCalls[0], ['/Users/qingguee/proj', { provider: 'zhipu', model: 'glm-5.3', reasoningEffort: 'high' }, 'ptc'])
+})
+
+test('/new with a present-but-empty workspace registry replies NA and never sends a card', async () => {
+  const sends = []
+  const createCalls = []
+  const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: undefined, picker: undefined }
+  const bot = new FeishuBot({
+    ctx: {
+      logger: { info() {}, warn() {}, error() {} },
+      get(key) {
+        if (key === 'workspaceRegistry') return { list: () => [] }
+        return undefined
+      },
+    },
+    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+    lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
+    binder: {
+      getSessionId: () => undefined,
+      getAgent: () => undefined,
+      detach: async () => {},
+      async createNew(cwd, route, presetId) { createCalls.push([cwd, route, presetId]); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(['ou_op']),
+    now: () => 1000,
+  })
+
+  await bot.handleNew()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  // The NA notice rides sendCard (reply) — but it is NOT a config card.
+  assert.equal(sends.length, 1)
+  assert.equal(JSON.stringify(sends[0]).includes('新会话配置'), false)
+  assert.match(JSON.stringify(sends[0]), /无法创建新会话/)
+  assert.equal(createCalls.length, 0)
 })
 
 test('/new creation failure leaves the bot cleanly unbound with the reason', async () => {
   const sends = []
+  const patches = []
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
   let detached = false
   const bot = new FeishuBot({
     ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
     config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
-    lark: { async sendCard(_c, card) { sends.push(card); return 'm1' }, async patchCard() { return true } },
+    lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard(id, card) { patches.push({ id, card }); return true } },
     binder: {
       getSessionId: () => (detached ? undefined : 'old-1'),
       getAgent: () => undefined,
@@ -469,13 +589,20 @@ test('/new creation failure leaves the bot cleanly unbound with the reason', asy
       async createNew() { throw new Error('registry closed') },
     },
     store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
-    allowlist: new Set(),
+    allowlist: new Set(['ou_op']),
     now: () => 1000,
   })
+  bot.cardMessageId = 'm-old'
   await bot.handleNew()
-  // No 🆕 card; the failure reply carries the reason.
-  assert.equal(sends.length, 1)
-  assert.match(JSON.stringify(sends[0]), /新会话创建失败：registry closed/)
+  await new Promise(resolve => setTimeout(resolve, 5)) // the send rides the op chain
+  submitNew(bot, sends[0], {})
+  await new Promise(resolve => setTimeout(resolve, 10))
+  // The failure lands on the config card (orange, in place) and as a reply.
+  const failed = patches.find(p => p.card.header?.title?.content?.includes('创建失败'))
+  assert.ok(failed !== undefined, 'the failed card replaced the config card')
+  assert.equal(failed.card.header.template, 'orange')
+  assert.match(JSON.stringify(failed.card), /registry closed/)
+  assert.match(JSON.stringify(sends[1]), /新会话创建失败：registry closed/)
   assert.equal(state.boundSessionId, undefined)
   assert.equal(detached, true)
 })
@@ -661,49 +788,60 @@ test('registerAskSurface: no router — claimed ask sends the card instead of de
 test('/new route resolution: previous log wins; settings default is the fallback', async () => {
   const createCalls = []
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined }
-  const mkBot = getMap => new FeishuBot({
-    ctx: {
-      logger: { info() {}, warn() {}, error() {} },
-      get: getMap,
-    },
-    config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
-    lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
-    binder: {
-      getSessionId: () => 'old-1',
-      getAgent: () => undefined,
-      detach: async () => {},
-      async createNew(cwd, route) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
-    },
-    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
-    allowlist: new Set(),
-    now: () => 1000,
-  })
+  const mkBot = getMap => {
+    const sends = []
+    const bot = new FeishuBot({
+      ctx: {
+        logger: { info() {}, warn() {}, error() {} },
+        get: getMap,
+      },
+      config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
+      lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
+      binder: {
+        getSessionId: () => 'old-1',
+        getAgent: () => undefined,
+        detach: async () => {},
+        async createNew(cwd, route, presetId) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+      },
+      store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+      allowlist: new Set(['ou_op']),
+      now: () => 1000,
+    })
+    return { bot, sends }
+  }
+  const submitDefaults = async (bot, card) => {
+    submitNew(bot, card, {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const present = async instance => {
+    await instance.bot.handleNew()
+    await new Promise(resolve => setTimeout(resolve, 5)) // the send rides the op chain
+  }
 
   // 1) Previous session's log carries the route → inherited (default not consulted).
   const withLog = mkBot(key => key === 'sessions'
     ? { get: () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'zhipu', model: 'glm-4.7' } } }, time: 1, seq: 1 }] }) }
     : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined)
-  await withLog.handleNew()
+  await present(withLog)
+  await submitDefaults(withLog.bot, withLog.sends[0])
   assert.deepEqual(createCalls[0], { provider: 'zhipu', model: 'glm-4.7' })
 
   // 2) No previous route → the settings default (agentDefaultModel) kicks in.
   const noLog = mkBot(key => key === 'sessions'
     ? { get: () => ({ events: [] }) }
     : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined)
-  await noLog.handleNew()
+  await present(noLog)
+  await submitDefaults(noLog.bot, noLog.sends[0])
   assert.deepEqual(createCalls[1], { provider: 'fallback', model: 'default-m' })
 
-  // 3) Neither source → bare create (no agentOptions).
-  const nothing = mkBot(() => undefined)
-  await nothing.handleNew()
-  assert.equal(createCalls[2], undefined)
 })
 
 test('/new honors the stored phone default (phoneModel) between the log and the settings default', async () => {
   const createCalls = []
   const mkBot = (phoneModel, events) => {
     const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: 'old-1', picker: undefined, phoneModel }
-    return new FeishuBot({
+    const sends = []
+    const bot = new FeishuBot({
       ctx: {
         logger: { info() {}, warn() {}, error() {} },
         get: key => key === 'sessions'
@@ -711,36 +849,43 @@ test('/new honors the stored phone default (phoneModel) between the log and the 
           : key === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'fallback', model: 'default-m' }) } : undefined,
       },
       config: { statusIntervalMs: 5000, bodySegmentChars: 3500 },
-      lark: { async sendCard() { return 'm1' }, async patchCard() { return true } },
+      lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } },
       binder: {
         getSessionId: () => 'old-1',
         getAgent: () => undefined,
         detach: async () => {},
-        async createNew(cwd, route) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
+        async createNew(cwd, route, presetId) { createCalls.push(route); return { sessionId: 'fresh-1', mode: 'created', agent: { status: 'idle' } } },
       },
       store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
       allowlist: new Set(['ou_op']),
       now: () => 1000,
     })
+    return { bot, sends }
   }
   const noRouteLog = []
+  const submitDefaults = async (instance) => {
+    instance.bot.handleNew()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    submitNew(instance.bot, instance.sends[0], {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 
   // 1) No previous route + a stored phone default → it wins over the
   //    settings default, effort included (the /model, /think and
   //    /profile-switch promise "used by /new" is now real).
   const withPhone = mkBot({ provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' }, noRouteLog)
-  await withPhone.handleNew()
+  await submitDefaults(withPhone)
   assert.deepEqual(createCalls[0], { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
 
   // 2) No phoneModel → the settings default kicks in as before.
   const withoutPhone = mkBot(undefined, noRouteLog)
-  await withoutPhone.handleNew()
+  await submitDefaults(withoutPhone)
   assert.deepEqual(createCalls[1], { provider: 'fallback', model: 'default-m' })
 
   // 3) Continuity still wins: a routed previous log beats the phone default.
   const routedLog = [{ type: 'request/header', data: { header: { config: { provider: 'openrouter', model: 'stealth/ox-alpha' } } }, time: 1, seq: 1 }]
   const logWins = mkBot({ provider: 'zhipu', model: 'glm-4.7' }, routedLog)
-  await logWins.handleNew()
+  await submitDefaults(logWins)
   assert.deepEqual(createCalls[2], { provider: 'openrouter', model: 'stealth/ox-alpha' })
 })
 
@@ -1127,4 +1272,219 @@ test('/model step 2 degrades to the plain catalog when context resolution fails'
   const options = sends[1].body.elements.at(-1).elements[0].options
   // No context suffix — the picker still works.
   assert.equal(options[0].text.content, 'GLM-4.7 (glm-4.7)')
+})
+
+// -------------------------------------------------- /stop confirmation --
+
+/** Bot with a running agent, wired for the /stop confirmation flow. */
+function stopBot(lark, agent, configExtra = {}) {
+  const state = { lastChatId: 'oc_test', displayThink: false }
+  const btwCancels = []
+  const bot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 30000, bodySegmentChars: 3500, ...configExtra },
+    lark,
+    binder: {
+      getSessionId: () => 's1',
+      getAgent: () => agent,
+      isReadOnlyView: () => false,
+    },
+    store: { ready: async () => {}, get: () => state, async update(p) { Object.assign(state, p) } },
+    allowlist: new Set(['ou_op']),
+    now: () => 1000,
+  })
+  // Spy on btw.cancelAll without pulling the real LLM stack in.
+  bot.btw = { cancelAll: () => btwCancels.push(true) }
+  return { bot, btwCancels }
+}
+
+/** Dig the selector flow id out of a buttons-mode card. */
+function flowIdOf(card) {
+  const button = card.body.elements.find(e => e.tag === 'button')
+  return button.value.flow_id
+}
+
+test('/stop on an idle or unbound agent keeps the direct reply (no confirm)', async () => {
+  const sends = []
+  const lark = { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` } }
+  // Unbound.
+  const unbound = stopBot(lark, undefined)
+  await unbound.bot.handleStop()
+  assert.match(JSON.stringify(sends.at(-1)), /当前未绑定会话/)
+  // Bound but not running.
+  const idle = stopBot(lark, { status: 'idle' })
+  await idle.bot.handleStop()
+  assert.match(JSON.stringify(sends.at(-1)), /没有正在运行的 turn/)
+})
+
+test('/stop on a running agent sends a confirm card first — cancel only on 确认停止', async () => {
+  const sends = []
+  const cancels = []
+  const agent = { status: 'running', cancel: (...args) => cancels.push(args) }
+  const { bot, btwCancels } = stopBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  }, agent)
+
+  await bot.handleStop()
+  await new Promise(r => setTimeout(r, 10))
+  // 1) The confirm card is out (buttons mode, 确认停止 / 返回)…
+  const confirmCard = sends.find(c => c.header?.title?.content?.includes('确认停止'))
+  assert.ok(confirmCard !== undefined, 'confirm card was sent')
+  // …and NO cancel happened yet.
+  assert.equal(cancels.length, 0)
+  assert.equal(btwCancels.length, 0)
+
+  // 2) Tapping ⛔ 确认停止 drives the everything-stop.
+  const flowId = flowIdOf(confirmCard)
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_sel', flow_id: flowId, pick: 'stop' } },
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(cancels.length, 1)
+  assert.deepEqual(cancels[0][0], { kind: 'user' })
+  assert.deepEqual(cancels[0][1], { keepInbox: true })
+  assert.equal(btwCancels.length, 1)
+})
+
+test('/stop confirm sweep also cancels live child subagents', async () => {
+  const sends = []
+  const cancels = []
+  const childCancels = []
+  const agent = { status: 'running', cancel: () => cancels.push(true) }
+  const { bot, btwCancels } = stopBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  }, agent)
+  // Two children tracked by the run state: one live, one already settled.
+  bot.runState.subagents.set('child-live', { childId: 'child-live', label: 'worker', rounds: 2, tail: undefined, lastTool: undefined, outcome: undefined })
+  bot.runState.subagents.set('child-done', { childId: 'child-done', label: 'done', rounds: 1, tail: undefined, lastTool: undefined, outcome: 'completed' })
+  // The agents registry serves the live child only.
+  ;(bot.ctx).agents = { get(id) { return id === 'child-live' ? { cancel: (...a) => childCancels.push([id, ...a]) } : undefined } }
+
+  await bot.handleStop()
+  await new Promise(r => setTimeout(r, 10))
+  const confirmCard = sends.find(c => c.header?.title?.content?.includes('确认停止'))
+  assert.ok(confirmCard !== undefined)
+  const button = confirmCard.body.elements.find(e => e.tag === 'button' && e.value.pick === 'stop')
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_sel', flow_id: button.value.flow_id, pick: 'stop' } },
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(cancels.length, 1)
+  assert.equal(btwCancels.length, 1)
+  // The LIVE child was cancelled with keepInbox; the settled one was not touched.
+  assert.deepEqual(childCancels, [['child-live', { kind: 'user' }, { keepInbox: true }]])
+})
+
+test('/stop confirm: 返回 leaves the turn running (no cancel)', async () => {
+  const sends = []
+  const cancels = []
+  const agent = { status: 'running', cancel: (...args) => cancels.push(args) }
+  const { bot, btwCancels } = stopBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  }, agent)
+
+  await bot.handleStop()
+  await new Promise(r => setTimeout(r, 10))
+  const confirmCard = sends.find(c => c.header?.title?.content?.includes('确认停止'))
+  const flowId = flowIdOf(confirmCard)
+  bot.onCardAction({
+    operator: { open_id: 'ou_op' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_sel', flow_id: flowId, pick: 'back' } },
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(cancels.length, 0)
+  assert.equal(btwCancels.length, 0)
+  // The in-flight slot is released — a second /stop presents a fresh confirm.
+  assert.equal(bot.stopConfirmInFlight, false)
+})
+
+test('/stop confirm: a second /stop while one is pending points at the existing card', async () => {
+  const sends = []
+  const agent = { status: 'running', cancel: () => {} }
+  const { bot } = stopBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  }, agent)
+  await bot.handleStop()
+  await new Promise(r => setTimeout(r, 10))
+  const before = sends.length
+  await bot.handleStop()
+  assert.equal(sends.length, before + 1)
+  assert.match(JSON.stringify(sends.at(-1)), /停止确认卡已在上面/)
+})
+
+test('/stop confirm from a non-operator is a silent no-op', async () => {
+  const sends = []
+  const cancels = []
+  const agent = { status: 'running', cancel: (...args) => cancels.push(args) }
+  const { bot, btwCancels } = stopBot({
+    async sendCard(_c, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return true },
+  }, agent)
+  await bot.handleStop()
+  await new Promise(r => setTimeout(r, 10))
+  const confirmCard = sends.find(c => c.header?.title?.content?.includes('确认停止'))
+  const flowId = flowIdOf(confirmCard)
+  bot.onCardAction({
+    operator: { open_id: 'ou_stranger' },
+    action: { tag: 'button', value: { action: 'dsh_feishu_sel', flow_id: flowId, pick: 'stop' } },
+  })
+  await new Promise(r => setTimeout(r, 10))
+  assert.equal(cancels.length, 0)
+  assert.equal(btwCancels.length, 0)
+})
+
+// ------------------------------------------- roundButtons gating --
+
+test('roundButtons off (default) strips both quick actions; on keeps them', async () => {
+  const mkSends = () => {
+    const sends = []
+    return { sends, lark: { async sendCard(_c, card) { sends.push(card); return `m${sends.length}` }, async patchCard() { return true } } }
+  }
+  // off (default): neither the live card's stop button nor the ended card's
+  // continue button renders.
+  const off = mkSends()
+  const offBot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 30000, bodySegmentChars: 3500 },
+    lark: off.lark,
+    binder: { getSessionId: () => 's1', isReadOnlyView: () => false },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), async update() {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  offBot.runState.running = false
+  offBot.runState.turnStartedAt = 100
+  offBot.runState.turnEndedAt = 400
+  offBot.runState.turnEndReason = 'completed'
+  offBot.runState.rounds = 1
+  await offBot.finalizeTurn()
+  const offButtons = off.sends.at(-1).body.elements.filter(e => e.tag === 'button')
+  assert.equal(offButtons.length, 0)
+
+  // on: the ended card carries the continue button.
+  const on = mkSends()
+  const onBot = new FeishuBot({
+    ctx: { logger: { info() {}, warn() {}, error() {} }, get: () => undefined },
+    config: { statusIntervalMs: 30000, bodySegmentChars: 3500, roundButtons: 'on' },
+    lark: on.lark,
+    binder: { getSessionId: () => 's1', isReadOnlyView: () => false },
+    store: { ready: async () => {}, get: () => ({ lastChatId: 'oc_test', displayThink: false }), async update() {} },
+    allowlist: new Set(),
+    now: () => 1000,
+  })
+  onBot.runState.running = false
+  onBot.runState.turnStartedAt = 100
+  onBot.runState.turnEndedAt = 400
+  onBot.runState.turnEndReason = 'completed'
+  onBot.runState.rounds = 1
+  await onBot.finalizeTurn()
+  const onButtons = on.sends.at(-1).body.elements.filter(e => e.tag === 'button')
+  assert.equal(onButtons.length, 1)
+  assert.equal(onButtons[0].value.op, 'continue')
 })

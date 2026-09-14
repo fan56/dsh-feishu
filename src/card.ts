@@ -22,7 +22,7 @@
 
 import type { RunState } from './run-state.ts'
 import { contextTokensEstimate, reasoningTail, streamingTextTail, subagentDisplayLabel, subagentRows } from './run-state.ts'
-import { clipLine, formatDuration, formatWhen } from './text.ts'
+import { clipLine, formatDuration, formatWhen, repairMojibake } from './text.ts'
 import type { ResumeRow } from './resume-table.ts'
 
 /**
@@ -67,6 +67,12 @@ export interface CardContext {
    * (read-only views keep the card inert).
    */
   actions?: { readonly stop?: boolean; readonly continue?: boolean }
+  /**
+   * Agent-preset id of the bound session — a session-level fact the run
+   * state never observes, so it rides the context like sessionLabel.
+   * undefined = unknown; the footer omits the field entirely.
+   */
+  preset?: string
 }
 
 /** Tail-line clip for the think tail inside the activity list. */
@@ -294,6 +300,12 @@ export interface FooterFields {
    * undefined = unknown — field omitted entirely).
    */
   thinking?: string
+  /**
+   * Agent-preset id of the bound session (`standard`, ...). Session-level
+   * fact — the caller supplies it (run state never observes presets);
+   * undefined = unknown and the field stays out.
+   */
+  preset?: string
   /** First-token latency of the round that just settled (ms) — settled cards only. */
   firstTokenMs?: number
   /** Output tokens of the round that just settled — settled cards only. */
@@ -321,7 +333,7 @@ export function shortModelName(model: string): string {
 
 /**
  * Assemble the stats-footer line, e.g.
- * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls`.
+ * `⏱ 12m34s · 🤖 deepseek-v4 · 🧠 high · 🧩 standard · 📊 ctx 43% · ⚡ CH 85.0% · 🔧 23 calls`.
  * The round lives in the card header, never here.
  * Fields with no value (or zero counters) are skipped; separators only join
  * fields that actually rendered. Returns '' when nothing is available.
@@ -331,6 +343,7 @@ export function buildFooter(fields: FooterFields): string {
   if (fields.elapsedMs !== undefined) parts.push(`⏱ ${formatDuration(fields.elapsedMs)}`)
   if (fields.model !== undefined && fields.model !== '') parts.push(`🤖 ${shortModelName(fields.model)}`)
   if (fields.thinking !== undefined) parts.push(`🧠 ${fields.thinking}`)
+  if (fields.preset !== undefined && fields.preset !== '') parts.push(`🧩 ${fields.preset}`)
   if (fields.contextPercent !== undefined) {
     parts.push(`📊 ctx ${Math.min(100, Math.max(0, Math.round(fields.contextPercent)))}%`)
   } else if (fields.contextTokens !== undefined && fields.contextTokens > 0) {
@@ -403,7 +416,7 @@ function withStatsFooter(markdown: string, footer: string): string {
  * tail growth, todo tick) triggers the 30s-beat patch.
  */
 export function buildStatusCard(state: RunState, context: CardContext): { card: Schema2Card; hash: string } {
-  const { sessionLabel, displayThink, now, settledRoundMs, actions } = context
+  const { sessionLabel, displayThink, now, settledRoundMs, actions, preset } = context
   const title = turnHeaderTitle(state, now, settledRoundMs)
   const template = turnTemplate(state)
 
@@ -429,6 +442,9 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
 
   const footer = buildFooter({
     ...footerFieldsOf(state, now),
+    // Session-level fact from the caller — spread last so the explicit
+    // context value always wins (footerFieldsOf has no preset source).
+    ...(preset === undefined ? {} : { preset }),
     // Round-level performance stats ride the settled card only (their values
     // describe the round that just landed; the live card has no meaning for
     // them yet).
@@ -522,7 +538,7 @@ export function buildBodyCard(body: string): Schema2Card {
     schema: '2.0',
     config: { width_mode: 'fill' },
     body: {
-      elements: [{ tag: 'markdown', content: body }],
+      elements: [{ tag: 'markdown', content: repairMojibake(body) }],
     },
   }
 }
@@ -559,7 +575,7 @@ export function buildPushCard(input: {
       subtitle: { tag: 'plain_text', content: `dsh · ${input.sessionLabel}` },
       template: input.reason === 'error' ? 'red' : 'blue',
     },
-    body: { elements: [{ tag: 'markdown', content: lines.join('\n\n') }] },
+    body: { elements: [{ tag: 'markdown', content: repairMojibake(lines.join('\n\n')) }] },
   }
 }
 

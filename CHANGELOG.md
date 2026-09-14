@@ -3,6 +3,22 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0] - 2026-09-14
+
+### Added
+- **`/new` config card.** `/new` no longer mints a session outright — it presents one fill-first card (agent preset / model / reasoning effort as dropdowns, preselected from the resolved defaults) and the session is created only on submit; a green summary card replaces it in place. Every dropdown is best-effort: a source that fails just omits its field and the submit falls back to the default-resolution chain.
+- **Custom presets on `/new`.** The preset dropdown lists the full host roster — shipped four plus every user-authored preset in the harness home (`~/.dsh/.agent-presets/`), customs marked `· 自定义`, broken compositions hidden; the picked id resolves and mounts through the same host path the Web UI uses.
+- **Workspace picker on `/new`.** The first dropdown lists EXISTING workspaces from the host registry (`workspaceRegistry.list()`) — the picked path is the new session's cwd, verbatim. An empty registry replies NA (`无法创建新会话`) instead of sending a card; a profile without the registry keeps the legacy cwd fallback.
+- **Agent preset on the stats footer.** The settled round card shows the session's preset (`🧩 standard`), learned at `/new` (the operator's pick) or via the `sessionQuery` projection for attached/resumed sessions; unknown = field omitted.
+- **`roundButtons` config (default `off`).** The round card's ⛔ 停止 / ▶️ 继续 quick actions are opt-in (`on`, env `DSH_FEISHU_ROUND_BUTTONS`); off keeps the card clean — `/stop` is the stop path either way.
+- **`/stop` two-tap confirmation.** The stop gesture now sends a `⛔ 确认停止 / 返回` card (60 s auto-cancel) and only the confirm tap stops; the sweep also cancels every LIVE child subagent the run state tracks — background/continuable children previously survived the parent cancel and kept burning rounds. btw side calls die with the turn as before.
+- **Mojibake repair on body cards.** Model output that arrives UTF-8-read-as-1252 (`ðŸ˜Š`) is re-decoded at the body-card boundary (`😊`); runs that do not decode cleanly (legit European text, CJK) stay verbatim.
+
+### Fixed
+- **`/new` (and every bot-created session) now joins an agent preset** — parity with the host's own creators (`composeAgent` / webhook). A bare create composed against the empty global layer: on web/headless profiles the tool plugins load per-agent THROUGH the preset, so bot sessions published with only the `skill` tool (#2). Cold resume rejoins the session's recorded preset from the `agent-preset/selected` projection — a web-created session revived after a host restart used to land in the empty layer again. Failure paths degrade to the bare create (tui profiles load tools globally).
+- **Card buttons carry unique names.** Feishu rejects a whole card when a form-submit button shares a `name` with any other button (230099) — the `/new` submit/cancel pair and the selector buttons/confirm-cancel modes all collided; names now carry role/index suffixes with parser fallbacks. A failed `/new` card send replies instead of staying silent.
+- **Web-profile compat e2e leg C:** a probe plugin drives the real `SessionBinder` inside a real web-profile host — create joins the default preset (composed + durably projected), a restart + cold resume rejoins it, and a bare control create still detects as unjoined.
+
 ## [0.10.0] - 2026-09-12
 
 ### Added

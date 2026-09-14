@@ -90,3 +90,20 @@ test('backgroundPush env override picks up cron/all and coerces junk to off', ()
   assert.equal(resolveConfig({}, { DSH_FEISHU_BACKGROUND_PUSH: 'loud' }).backgroundPush, 'off')
   assert.equal(resolveConfig({ backgroundPush: 'cron' }, { DSH_FEISHU_BACKGROUND_PUSH: 'all' }).backgroundPush, 'cron')
 })
+
+test('roundButtons defaults to off and accepts on/off', () => {
+  assert.equal(resolveConfig({}, {}).roundButtons, 'off')
+  assert.equal(resolveConfig({ roundButtons: 'on' }, {}).roundButtons, 'on')
+  assert.equal(resolveConfig({ roundButtons: 'off' }, {}).roundButtons, 'off')
+})
+
+test('roundButtons env override picks up on/off and coerces junk to off', () => {
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ROUND_BUTTONS: 'on' }).roundButtons, 'on')
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ROUND_BUTTONS: 'off' }).roundButtons, 'off')
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ROUND_BUTTONS: 'loud' }).roundButtons, 'off')
+  assert.equal(resolveConfig({ roundButtons: 'on' }, { DSH_FEISHU_ROUND_BUTTONS: 'off' }).roundButtons, 'on')
+})
+
+test('roundButtons is a known config key (typo guard stays intact)', () => {
+  assert.throws(() => resolveConfig({ roundButton: 'on' }, {}), /unknown config key "roundButton"/)
+})

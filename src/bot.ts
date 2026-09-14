@@ -51,6 +51,7 @@ import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { SelectorManager, type SelectorOutcome } from './selector.ts'
 import { parseSelectorAction, type SelectorSpec } from './selector-card.ts'
 import {
+  DEFAULT_EFFORT,
   runPermissionCommand,
   runProfileSwitchCommand,
   runSelectSkillCommand,
@@ -62,6 +63,8 @@ import {
 import { buildResumePickerCard, buildResumePickedCard, parseResumeAction, type ParsedResumeAction } from './card.ts'
 import { buildBodyCard, buildPushCard, buildSessionListAsMarkdown, buildSessionListCard, buildStatusCard, parseRoundCardAction, type RoundActionOp, type Schema2Card } from './card.ts'
 import { classifyInbound, helpText, refusedReply } from './commands.ts'
+import { buildNewSessionCard, buildNewSessionCreatedCard, buildNewSessionFailedCard, parseNewSessionAction, type NewCardChoice, type NewSessionCardSpec, type NewSummaryRow } from './new-card.ts'
+import { NewSessionFlowManager, type NewSessionOutcome } from './new-flow.ts'
 import { buildBtwSnapshot, type BtwStreamChunk } from './btw.ts'
 import { BtwManager } from './btw-bot.ts'
 import type { ResolvedConfig } from './config.ts'
@@ -213,6 +216,8 @@ export class FeishuBot {
   private resumeCardMessageId: string | undefined
   /** Bot-created sessions' model selection refs (/model live-switch). */
   private readonly selectionRefs = new Map<string, ModelSelectionRef>()
+  /** Session id → agent-preset id learned at bind/create time (footer display). */
+  private readonly presetBySession = new Map<string, string>()
   /** /btw side-question manager (phone surface; per-surface by design). */
   private readonly btw: BtwManager
   /** The in-flight /model two-step flow. */
@@ -224,8 +229,11 @@ export class FeishuBot {
   } | undefined
   /** Generic selection-card flows (selector FW; driven via presentSelection). */
   private readonly selectors: SelectorManager
+  private readonly newFlow: NewSessionFlowManager
   /** Session ids with a corrupt-repair confirmation card currently out. */
   private readonly repairFlows = new Set<string>()
+  /** A /stop confirmation card is currently out (single slot). */
+  private stopConfirmInFlight = false
   /** Bot-side surfaces the interactive adapters drive (selector-FW commands). */
   private readonly host: InteractiveHost
   /** Inbound message that triggered the current turn (for the done reaction). */
@@ -256,6 +264,11 @@ export class FeishuBot {
       sendCard: (chatId, card) => this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)),
       patchCard: (messageId, card) => this.chain(() => this.lark.patchCard(messageId, card as Schema2Card)),
       allowlisted: openId => isOperator(openId, this.allowlist),
+      logger: this.ctx.logger,
+    })
+    this.newFlow = new NewSessionFlowManager({
+      sendCard: (chatId, card) => this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)),
+      patchCard: (messageId, card) => this.chain(() => this.lark.patchCard(messageId, card as Schema2Card)),
       logger: this.ctx.logger,
     })
     this.host = {
@@ -419,6 +432,7 @@ export class FeishuBot {
       if (live !== undefined) {
         try {
           await this.binder.bind(bound)
+          void this.learnPreset(bound)
           this.backfillRoute()
           this.maybeOpenCardForRunningAgent()
         } catch (error) {
@@ -711,6 +725,7 @@ export class FeishuBot {
         await this.reply('已自动接管该会话，排队消息已发送；本轮起由此端驱动。')
       })
       await this.store.update({ boundSessionId: row.sessionId })
+      void this.learnPreset(row.sessionId)
       await this.reply(
         `已进入只读旁观：${row.preview}\n`
         + '该会话正由另一个进程驱动，为避免日志分叉不能从这里派活；\n'
@@ -734,6 +749,7 @@ export class FeishuBot {
     // Switching sessions strands the btw context snapshot — cancel first.
     this.btw.cancelAll()
     const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
+    void this.learnPreset(row.sessionId)
     await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
     this.pendingPicker = undefined
     this.resetRunView()
@@ -903,6 +919,40 @@ export class FeishuBot {
     // A fresh session strands the btw context snapshot — cancel first.
     this.btw.cancelAll()
     const previousId = this.binder.getSessionId() ?? this.store.get().boundSessionId
+    const cwd = this.newSessionCwd(previousId)
+    const selection = this.newSessionDefaultSelection(previousId)
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) {
+      await this.reply('还没有可用的飞书会话，先在手机上给机器人发条消息。')
+      return
+    }
+    const spec = await this.buildNewSessionSpec(cwd, selection)
+    // No workspace to land in → /new is impossible (NA). The registry is the
+    // authoritative source; a profile WITHOUT the service keeps the legacy
+    // fallback cwd behavior instead of blocking.
+    if (spec.workspaces !== undefined && spec.workspaces.length === 0) {
+      await this.reply('当前环境没有任何已注册的 workspace（NA），无法创建新会话。请先在桌面端或 Web UI 打开一个工作目录后再试 /new。')
+      return
+    }
+    // The config card goes out; the session is minted ONLY on submit
+    // (handleNewOutcome). Cancel/expiry patch the grey terminal card inside
+    // the flow manager and land here as no-ops. present() resolves
+    // undefined when the CARD SEND itself failed (sendCard swallows API
+    // errors) — never stay silent there, the operator tapped /new and got
+    // nothing otherwise.
+    void this.newFlow.present(chatId, spec)
+      .then(outcome => {
+        if (outcome === undefined) return this.reply('新会话配置卡发送失败，请重试 /new。')
+        return this.handleNewOutcome(outcome, { cwd, selection })
+      })
+      .catch(error => {
+        this.ctx.logger.warn('dsh-feishu: /new config flow failed: %o', error)
+        void this.reply('新会话配置流程出错，请重试 /new。').catch(() => undefined)
+      })
+  }
+
+  /** The cwd a fresh session starts in: the bound session's cwd, else here. */
+  private newSessionCwd(previousId: string | undefined): string {
     let cwd = process.cwd()
     if (previousId !== undefined) {
       const sessions = this.ctx.get('sessions') as
@@ -911,16 +961,22 @@ export class FeishuBot {
       const headerCwd = sessions?.get(previousId)?.header?.cwd
       if (typeof headerCwd === 'string' && headerCwd !== '') cwd = headerCwd
     }
-    // Model selection for the fresh agent (a bare agents.create has NO
-    // provider/model — the first request dies with "agent has no
-    // provider/model", Round 0 ❌ in live use). Resolution order:
-    // 1. the previous session's own selection incl. reasoning effort
-    //    (continuity: same model + effort, fresh context) from its log;
-    // 2. the phone's own stored default (provider/model/effort saved by
-    //    /model, /think or /profile-switch on the phone) — the operator's
-    //    explicit pick beats the settings default;
-    // 3. the settings' default model via ctx.agentDefaultModel — the same
-    //    fallback the TUI seeds from before creating.
+    return cwd
+  }
+
+  /**
+   * Model selection the /new card PRE-FILLS (a bare agents.create has NO
+   * provider/model — the first request dies with "agent has no
+   * provider/model", Round 0 ❌ in live use). Resolution order:
+   * 1. the previous session's own selection incl. reasoning effort
+   *    (continuity: same model + effort, fresh context) from its log;
+   * 2. the phone's own stored default (provider/model/effort saved by
+   *    /model, /think or /profile-switch on the phone) — the operator's
+   *    explicit pick beats the settings default;
+   * 3. the settings' default model via ctx.agentDefaultModel — the same
+   *    fallback the TUI seeds from before creating.
+   */
+  private newSessionDefaultSelection(previousId: string | undefined): ModelSelection | undefined {
     let selection: ModelSelection | undefined
     if (previousId !== undefined) {
       const sessions = this.ctx.get('sessions') as
@@ -957,48 +1013,162 @@ export class FeishuBot {
         selection = fallback
       }
     }
+    return selection
+  }
+
+  /**
+   * Dropdown sources for the /new config card — every field is best-effort:
+   * a source that is absent (no presets service on this profile), fails, or
+   * answers nothing just omits its dropdown, and the submit falls back to
+   * the default-resolution chain for that key.
+   */
+  private async buildNewSessionSpec(cwd: string, selection?: ModelSelection): Promise<NewSessionCardSpec> {
+    // Mutable build view of the readonly card spec.
+    const spec: { -readonly [K in keyof NewSessionCardSpec]: NewSessionCardSpec[K] } = {}
+    // Workspaces FIRST: the new session lands in an EXISTING workspace the
+    // operator picks — never an invented path. An empty registry means /new
+    // is impossible (NA) and no card goes out at all.
+    try {
+      const registry = this.ctx.get('workspaceRegistry') as
+        | { list?: () => Array<{ id: unknown; path?: unknown; title?: unknown }> }
+        | undefined
+      if (registry?.list !== undefined) {
+        const entities = registry.list()
+        const choices = entities
+          .filter(workspace => typeof workspace.path === 'string' && workspace.path !== '')
+          .map(workspace => ({
+            value: workspace.path as string,
+            label: clipLine(typeof workspace.title === 'string' && workspace.title !== ''
+              ? workspace.title
+              : (workspace.path as string).split('/').pop() || (workspace.path as string), 48),
+          }))
+        // Set even when EMPTY — an empty list from a PRESENT registry is the
+        // NA signal (no workspace to land in); only an ABSENT registry leaves
+        // the field undefined (legacy fallback cwd).
+        spec.workspaces = choices
+        if (choices.length > 0) {
+          spec.defaultWorkspace = choices.some(choice => choice.value === cwd) ? cwd : choices[0]?.value
+        }
+      }
+    } catch {
+      // Registry unavailable — the dropdown is omitted, cwd falls back.
+    }
+    try {
+      const presets = this.ctx.get('agentPresets') as
+        | { remoteExportList?: () => Promise<{ presets: Array<{ id: string; name?: string; isDefault?: boolean; broken?: boolean; trust?: string }> }> }
+        | undefined
+      if (presets?.remoteExportList !== undefined) {
+        const roster = await presets.remoteExportList()
+        const choices = roster.presets
+          .filter(preset => preset.broken !== true)
+          .map(preset => ({
+            value: preset.id,
+            // User-authored presets are marked so the picker reads as
+            // "shipped roster + your own" — same roster the host picker shows.
+            label: `${preset.name ?? preset.id}${preset.isDefault === true ? ' ★' : ''}${preset.trust === 'user' ? ' · 自定义' : ''}`,
+          }))
+        if (choices.length > 0) {
+          spec.presets = choices
+          spec.defaultPreset = roster.presets.find(preset => preset.isDefault === true)?.id ?? choices[0]?.value
+        }
+      }
+    } catch {
+      // Preset roster unavailable — the dropdown is omitted.
+    }
+    const llm = this.ctx.get('llm') as
+      | {
+          listModels?: (provider: string) => Promise<readonly { id: string; name?: string; contextWindow?: number }[]>
+          resolveModelInfo?: (provider: string, model: string) => Promise<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>
+        }
+      | undefined
+    const provider = selection?.provider
+    if (llm?.listModels !== undefined && provider !== undefined) {
+      try {
+        const models = await llm.listModels(provider)
+        const choices = models.map(model => ({
+          value: model.id,
+          label: model.name === undefined || model.name === model.id ? model.id : `${model.name} (${model.id})`,
+        }))
+        if (choices.length > 0) {
+          spec.models = choices
+          spec.defaultModel = selection?.model
+        }
+      } catch {
+        // Model metadata unavailable — the dropdown is omitted.
+      }
+    }
+    if (llm?.resolveModelInfo !== undefined && provider !== undefined && selection?.model !== undefined) {
+      try {
+        const info = await llm.resolveModelInfo(provider, selection.model)
+        const efforts = info.reasoning?.efforts
+        if (efforts !== undefined && efforts.length > 0) {
+          spec.efforts = [{ value: DEFAULT_EFFORT, label: '默认' }, ...efforts.map(effort => ({ value: effort.id, label: effort.name }))]
+          spec.defaultEffort = selection.reasoningEffort ?? DEFAULT_EFFORT
+        }
+      } catch {
+        // Effort metadata unavailable — the dropdown is omitted.
+      }
+    }
+    const contextParts: string[] = []
+    if (provider !== undefined) contextParts.push(`provider：${provider}（换 provider 用 /model）`)
+    contextParts.push(`cwd：${cwd.split('/').pop() || cwd}`)
+    spec.contextLine = contextParts.join(' · ')
+    return spec
+  }
+
+  /**
+   * The operator submitted (or closed) the /new config card. Only a submit
+   * mints a session: the picks overlay the resolved defaults, each absent
+   * key keeping the default. The preset id goes to the binder verbatim —
+   * omitted resolves the deployment default (issue #2 parity).
+   */
+  private async handleNewOutcome(outcome: NewSessionOutcome, base: { cwd: string; selection?: ModelSelection }): Promise<void> {
+    if (outcome.status !== 'submitted') return
+    const picks = outcome.picks
+    // The picked workspace path IS the new session's cwd; absent (card
+    // without the dropdown) falls back to the resolved cwd.
+    const cwd = picks.workspace ?? base.cwd
+    const provider = base.selection?.provider
+    const model = picks.model ?? base.selection?.model
+    let selection: ModelSelection | undefined
+    if (provider !== undefined && model !== undefined) {
+      let reasoningEffort: ModelSelection['reasoningEffort'] | undefined
+      if (picks.effort === undefined) reasoningEffort = base.selection?.reasoningEffort
+      else if (picks.effort === DEFAULT_EFFORT) reasoningEffort = undefined
+      else reasoningEffort = picks.effort as ModelSelection['reasoningEffort']
+      selection = { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
+    }
     // Grey out the live card BEFORE resetRunView clears cardMessageId —
     // the original ordering made this patch dead code.
     await this.closeCardAsDetached()
     this.resetRunView()
     try {
-      const created = await this.binder.createNew(cwd, selection)
+      const created = await this.binder.createNew(cwd, selection, picks.preset)
       if (created.selectionRef !== undefined) {
         this.selectionRefs.set(created.sessionId, created.selectionRef)
       }
+      void this.learnPreset(created.sessionId, picks.preset)
       await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
-      const chatId = this.store.get().lastChatId
-      if (chatId !== undefined) {
-        const card: Schema2Card = {
-          schema: '2.0',
-          config: { width_mode: 'fill' },
-          header: {
-            title: { tag: 'plain_text', content: `🆕 新会话 · ${created.sessionId.slice(0, 8)}` },
-            subtitle: { tag: 'plain_text', content: `dsh · ${cwd.split('/').pop() ?? cwd}` },
-            template: 'green',
-          },
-          body: {
-            elements: [{
-              tag: 'markdown',
-              content: '以上是旧会话的记录；从这里开始是新会话。直接发消息即可派活，`/resume` 可回到旧会话。',
-            }],
-          },
-        }
-        await this.lark.sendCard(chatId, card)
-      }
+      const rows: NewSummaryRow[] = [
+        { field: 'Workspace', value: cwd.split('/').pop() || cwd },
+        { field: 'Preset', value: picks.preset ?? '环境默认' },
+        { field: 'Model', value: provider !== undefined || model !== undefined ? [provider, model].filter(Boolean).join(' / ') : '环境默认' },
+        { field: 'Think', value: picks.effort ?? base.selection?.reasoningEffort ?? DEFAULT_EFFORT },
+        { field: 'Session', value: created.sessionId.slice(0, 8) },
+      ]
+      await this.lark.patchCard(outcome.messageId, buildNewSessionCreatedCard(rows, created.sessionId))
     } catch (error) {
       // Creation failed — ensure we stay cleanly unbound and say why.
       await this.binder.detach()
       await this.store.update({ boundSessionId: undefined })
       this.ctx.logger.warn('dsh-feishu: /new create failed: %o', error)
       const reason = clipLine(String(error instanceof Error ? error.message : error), 200)
+      await this.lark.patchCard(outcome.messageId, buildNewSessionFailedCard(reason === '' ? '未知错误' : reason)).catch(() => undefined)
       await this.reply(`新会话创建失败：${reason === '' ? '未知错误' : reason}`)
     }
   }
 
   private async handleStop(): Promise<void> {
-    // The stop gesture is the everything-stop: phone-side btw calls die too.
-    this.btw.cancelAll()
     const agent = this.binder.getAgent()
     if (agent === undefined) {
       await this.reply('当前未绑定会话。')
@@ -1008,9 +1178,78 @@ export class FeishuBot {
       await this.reply('当前没有正在运行的 turn。')
       return
     }
+    // Second-tap guard: one pending confirmation at a time. The flow runs
+    // DETACHED — handleStop fires from the inbound drain (fine to await) but
+    // also from card-action taps, and presentSelection dead-locks when
+    // awaited from inside the card chain.
+    if (this.stopConfirmInFlight) {
+      await this.reply('停止确认卡已在上面，请在原卡片上操作。')
+      return
+    }
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined) return
+    this.stopConfirmInFlight = true
+    void this.stopConfirmFlow(chatId)
+      .catch(async error => {
+        this.ctx.logger.warn('dsh-feishu: stop confirm flow failed: %o', error)
+        await this.reply('停止确认流程异常中断。').catch(() => undefined)
+      })
+      .finally(() => {
+        this.stopConfirmInFlight = false
+      })
+  }
+
+  /** Confirmation card → the actual everything-stop on 确认停止 only. */
+  private async stopConfirmFlow(chatId: string): Promise<void> {
+    // 60s lifetime via the spec signal: an abort settles the flow cancelled,
+    // exactly like the framework's own TTL expiry (silent, card greyed).
+    let outcome: SelectorOutcome
+    try {
+      outcome = await this.presentSelection(chatId, {
+        title: '⛔ 确认停止当前 turn？',
+        description: '停止会打断正在运行的 agent（排队中的消息保留）。60 秒内未操作自动取消。',
+        options: [
+          { value: 'stop', label: '⛔ 确认停止' },
+          { value: 'back', label: '返回' },
+        ],
+        mode: 'buttons',
+        signal: AbortSignal.timeout(60_000),
+      })
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: stop confirm card failed: %o', error)
+      await this.reply('停止确认卡发送失败。')
+      return
+    }
+    if (outcome.status !== 'picked' || outcome.value !== 'stop') return
+    await this.stopNow()
+  }
+
+  /** The everything-stop: phone-side btw calls die too. */
+  private async stopNow(): Promise<void> {
+    this.btw.cancelAll()
+    const agent = this.binder.getAgent()
+    if (agent === undefined || agent.status !== 'running') return
     try {
       agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await this.reply('已发送停止指令（排队中的消息保留）。')
+      // Background/continuable children survive the parent cancel (they do
+      // not ride the tool call's abort signal) — sweep every live child the
+      // run state tracks, the same everything-stop leg the TUI's bridge
+      // provides (dsh-tui-pi 2.10.0). keepInbox preserves a continuable
+      // child's queued work; this stops the running turn, not the child.
+      let stoppedChildren = 0
+      const agents = (this.ctx as Context & { agents?: { get(id: string): { cancel(cause: unknown, options?: { keepInbox?: boolean }): void } | undefined } | undefined }).agents
+      for (const row of subagentRows(this.runState)) {
+        if (row.outcome !== undefined) continue
+        try {
+          agents?.get(row.childId)?.cancel({ kind: 'user' }, { keepInbox: true })
+          stoppedChildren += 1
+        } catch {
+          // Child not live in this process — nothing to stop.
+        }
+      }
+      await this.reply(stoppedChildren > 0
+        ? `已发送停止指令（含 ${stoppedChildren} 个子代理；排队中的消息保留）。`
+        : '已发送停止指令（排队中的消息保留）。')
     } catch (error) {
       this.ctx.logger.warn('dsh-feishu: stop failed: %o', error)
       await this.reply('停止指令发送失败。')
@@ -1253,6 +1492,7 @@ export class FeishuBot {
     try {
       const bound = await this.binder.bind(id, await this.resolveResumeRoute(id))
       await this.store.update({ boundSessionId: id })
+      void this.learnPreset(id)
       this.backfillRoute()
       this.maybeOpenCardForRunningAgent()
       return bound.agent
@@ -1412,6 +1652,51 @@ export class FeishuBot {
     return id === undefined ? '—' : id.slice(0, 8)
   }
 
+  /**
+   * Preset id of the bound session for the stats footer — sync lookup of the
+   * cache populated at bind/create time. undefined = never learned (sessions
+   * predating preset tracking, query-less profiles); the footer omits it.
+   */
+  private sessionPreset(): string | undefined {
+    const id = this.binder.getSessionId()
+    return id === undefined ? undefined : this.presetBySession.get(id)
+  }
+
+  /**
+   * Learn a session's preset: the operator's explicit /new pick when given,
+   * else the host's sessionQuery projection of `agent-preset/selected` (the
+   * same record binder.presetOfSession reads for resume rejoins). Best-effort
+   * — a missing/failed query leaves the cache untouched, the footer omits
+   * the field, and nothing else depends on it.
+   */
+  private async learnPreset(sessionId: string, picked?: string): Promise<void> {
+    if (picked !== undefined) {
+      this.presetBySession.set(sessionId, picked)
+      return
+    }
+    try {
+      const query = this.ctx.get('sessionQuery') as
+        | { observeSession(id: SessionId): Promise<{ projections?: { values?: { agentPreset?: unknown } } } | undefined> }
+        | undefined
+      const observation = await query?.observeSession(SessionId(sessionId))
+      const preset = observation?.projections?.values?.agentPreset
+      if (typeof preset === 'string' && preset !== '') this.presetBySession.set(sessionId, preset)
+    } catch {
+      // Best-effort — footer simply stays without the field.
+    }
+  }
+
+  /**
+   * Round-card quick actions, config-gated: `roundButtons: 'off'` (default)
+   * keeps the card inert — no ⛔ 停止 / ▶️ 继续 at all; `/stop` is the stop
+   * path either way. Read-only views never get buttons even when enabled.
+   */
+  private roundActions(op: RoundActionOp): { readonly stop?: boolean; readonly continue?: boolean } | undefined {
+    if (this.config.roundButtons !== 'on') return undefined
+    if (this.binder.isReadOnlyView()) return undefined
+    return op === 'stop' ? { stop: true } : { continue: true }
+  }
+
   /** Open the per-turn card (bound session's agent is mid-turn). */
   private async openCard(): Promise<void> {
     const chatId = this.store.get().lastChatId
@@ -1420,7 +1705,8 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
-      actions: { stop: !this.binder.isReadOnlyView() },
+      actions: this.roundActions('stop'),
+      preset: this.sessionPreset(),
     })
     const messageId = await this.lark.sendCard(chatId, card)
     if (messageId !== undefined) {
@@ -1457,7 +1743,8 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
-      actions: { stop: !this.binder.isReadOnlyView() },
+      actions: this.roundActions('stop'),
+      preset: this.sessionPreset(),
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
@@ -1476,7 +1763,8 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
-      actions: { stop: !this.binder.isReadOnlyView() },
+      actions: this.roundActions('stop'),
+      preset: this.sessionPreset(),
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
@@ -1499,7 +1787,8 @@ export class FeishuBot {
         displayThink: this.store.get().displayThink,
         now: this.now(),
         settledRoundMs: this.runState.lastRoundDurationMs,
-        actions: { stop: !this.binder.isReadOnlyView() },
+        actions: this.roundActions('stop'),
+        preset: this.sessionPreset(),
       })
       if (this.cardMessageId !== undefined) {
         const ok = await this.lark.patchCard(this.cardMessageId, card)
@@ -1532,7 +1821,8 @@ export class FeishuBot {
       sessionLabel: this.sessionLabel(),
       displayThink: this.store.get().displayThink,
       now: this.now(),
-      actions: { continue: !this.binder.isReadOnlyView() },
+      actions: this.roundActions('continue'),
+      preset: this.sessionPreset(),
     })
     if (this.cardMessageId !== undefined) {
       const ok = await this.lark.patchCard(this.cardMessageId, card)
@@ -1996,6 +2286,14 @@ export class FeishuBot {
     if (modelSubmit !== undefined) {
       if (!isOperator(operator, this.allowlist)) return
       void this.chain(() => this.handleModelSubmitted(modelSubmit))
+      return
+    }
+    // /new config card: submit mints the session (handleNewOutcome), cancel
+    // patches the grey card — both settle the awaiting present() promise.
+    const newSession = parseNewSessionAction(data)
+    if (newSession !== undefined) {
+      if (!isOperator(operator, this.allowlist)) return
+      this.newFlow.handleAction(newSession)
       return
     }
     // Round-card quick actions (⛔ 停止 / ▶️ 继续) — same allowlist gate as

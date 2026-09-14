@@ -47,7 +47,6 @@ interface PersistenceSeam {
   list(signal?: AbortSignal): Promise<HeaderLike[]>
 }
 
-
 /** Result of a successful bind. */
 export interface BindResult {
   readonly sessionId: string
@@ -57,13 +56,40 @@ export interface BindResult {
   readonly selectionRef?: ModelSelectionRef
 }
 
+/**
+ * The projected session observation this module needs (structural). The
+ * presets service appends an `agent-preset/selected` event on mount, and the
+ * host projects it back as `values.agentPreset` — the durable record of what
+ * a session composes under.
+ */
+interface SessionObservationLike {
+  projections?: { values?: { agentPreset?: unknown } } | undefined
+}
+
+/** The host's session query (structural) — observe a persisted session. */
+interface SessionQuerySeam {
+  observeSession(sessionId: SessionId): Promise<SessionObservationLike | undefined>
+}
+
+/** Structural surface of the host's agent-presets service (optional — ctx.get yields undefined in compositions without one). */
+interface AgentPresetsSeam {
+  /** The named preset, or the configured default when the operator names none. */
+  resolve(presetId?: string): Promise<{ id: string }>
+  /** Join an agent (its factory-setup context) to the preset's composition. */
+  mount(agentCtx: Context, presetId: string): Promise<unknown>
+}
+
 /** Minimal registry surface (structural — matches ctx.agents). */
 interface AgentsRegistry {
   get(id: SessionId): Agent | undefined
-  resume(options: { resumeSessionId: SessionId }): Promise<AgentHandle>
+  resume(options: {
+    resumeSessionId: SessionId
+    agentOptions?: { provider?: string; model?: string }
+    setup?: (agentCtx: Context) => unknown
+  }): Promise<AgentHandle>
   create(options: {
     sessionId: SessionId
-    meta?: { cwd?: string }
+    meta?: { cwd?: string; agentPreset?: string }
     agentOptions?: { provider?: string; model?: string }
     setup?: (agentCtx: Context) => unknown
   }): Promise<AgentHandle>
@@ -235,15 +261,91 @@ export class SessionBinder {
     this.remoteTail = undefined
   }
 
-  /** Historical cwd for a session from persisted headers — best-effort. */
-  private async headerCwdOf(sessionId: string): Promise<string | undefined> {
+  /** The persisted header for a session id — best-effort (absent = undefined). */
+  private async headerOf(sessionId: string): Promise<HeaderLike | undefined> {
     try {
       const persistence = this.ctx.get('sessionPersistence') as PersistenceSeam | undefined
       const stored = (await persistence?.list().catch(() => [])) ?? []
-      const header = stored.find(candidate => String(candidate.id) === sessionId)
-      return typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
+      return stored.find(candidate => String(candidate.id) === sessionId)
     } catch {
       return undefined
+    }
+  }
+
+  /** Historical cwd for a session from persisted headers — best-effort. */
+  private async headerCwdOf(sessionId: string): Promise<string | undefined> {
+    const header = await this.headerOf(sessionId)
+    return typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
+  }
+
+  /**
+   * The preset a session composes under — the host's projection of the
+   * `agent-preset/selected` events the presets service appends on mount
+   * (the controller reads the same value off its observation before ITS
+   * resumes). NOT the meta header: agentPreset never persists there.
+   * undefined = query absent or session predates preset tracking.
+   */
+  private async presetOfSession(sessionId: string): Promise<string | undefined> {
+    try {
+      const query = this.ctx.get('sessionQuery') as SessionQuerySeam | undefined
+      if (query === undefined) return undefined
+      const observation = await query.observeSession(SessionId(sessionId))
+      const preset = observation?.projections?.values?.agentPreset
+      return typeof preset === 'string' && preset !== '' ? preset : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The host's agent-presets service — undefined in compositions without one. */
+  private presetsService(): AgentPresetsSeam | undefined {
+    try {
+      return this.ctx.get('agentPresets') as AgentPresetsSeam | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * The preset a fresh session must join — the id the /new card picked, or
+   * the configured default when it named none. undefined = compose bare:
+   * every failure path degrades there rather than failing /new (tui profiles
+   * resolve no presets and load their tools globally, where bare is the
+   * correct composition).
+   */
+  private async resolveSessionPreset(presetId?: string): Promise<{ id: string } | undefined> {
+    const presets = this.presetsService()
+    if (presets === undefined) return undefined
+    try {
+      return await presets.resolve(presetId)
+    } catch (error) {
+      this.warn(`preset "${presetId ?? 'default'}" resolve failed — composing bare: ${String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * Join the agent to the preset inside the factory setup. Failure degrades
+   * to a bare composition rather than failing the create/resume — the host's
+   * own "published without joining an agent preset" warning is the visible
+   * backstop, and the phone-side flow must not die on a misconfigured preset.
+   */
+  private async mountPreset(agentCtx: Context, presetId: string): Promise<void> {
+    const presets = this.presetsService()
+    if (presets === undefined) return
+    try {
+      await presets.mount(agentCtx, presetId)
+    } catch (error) {
+      this.warn(`preset "${presetId}" mount failed — agent composes bare: ${String(error)}`)
+    }
+  }
+
+  /** Best-effort warn — compositions without a logger silently skip. */
+  private warn(message: string): void {
+    try {
+      (this.ctx as Context & { logger?: { warn(message: string): void } }).logger?.warn(`dsh-feishu: ${message}`)
+    } catch {
+      // No logger here — nothing to fall back to.
     }
   }
 
@@ -296,9 +398,9 @@ export class SessionBinder {
    * effort, and effort-less requests die on endpoints that mandate
    * reasoning (400 "Reasoning is mandatory", ox-alpha in live use).
    */
-  async createNew(cwd: string, selection?: ModelSelection): Promise<BindResult> {
+  async createNew(cwd: string, selection?: ModelSelection, presetId?: string): Promise<BindResult> {
     if (this.binding !== undefined) await this.binding.catch(() => undefined)
-    const task = this.createNewInner(cwd, selection)
+    const task = this.createNewInner(cwd, selection, presetId)
     this.binding = task
     try {
       return await task
@@ -307,21 +409,33 @@ export class SessionBinder {
     }
   }
 
-  private async createNewInner(cwd: string, selection?: ModelSelection): Promise<BindResult> {
+  private async createNewInner(cwd: string, selection?: ModelSelection, presetId?: string): Promise<BindResult> {
     await this.releaseOwned()
     const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
     // A fresh UUID cannot collide: no other process knows this id, and the
     // host's own write lease covers it from the first materializing write.
     const sessionId = crypto.randomUUID()
+    // Join an agent preset — parity with the host's own creators
+    // (session-controller `composeAgent`, webhook `createWebhookSession`).
+    // A bare create composes against the empty global layer: web/headless
+    // profiles load their tool plugins per-agent THROUGH the preset, so an
+    // unjoined agent publishes with only the `skill` tool (issue #2). The
+    // id comes from the /new config card when the operator picked one;
+    // omitted resolves the deployment's default. Failure degrades to the
+    // bare create (tui profiles resolve no presets and load tools globally
+    // — bare is correct there); the host's own "published without joining
+    // an agent preset" warning stays as the visible backstop.
+    const preset = await this.resolveSessionPreset(presetId)
     const handle = await this.agents.create({
       sessionId: SessionId(sessionId),
-      meta: { cwd },
+      meta: { cwd, ...(preset === undefined ? {} : { agentPreset: preset.id }) },
       // A bare create has NO route — the first request dies with "agent has
       // no provider/model" (the TUI composes its default selection before
       // creating; the bot inherits the previous session's route instead).
       ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
-      setup: agentCtx => {
+      setup: async agentCtx => {
         installModelSelection(agentCtx, selectionRef)
+        if (preset !== undefined) await this.mountPreset(agentCtx, preset.id)
       },
     })
     this.owned = handle
@@ -372,9 +486,20 @@ export class SessionBinder {
     // and a session owned by another process refuses here with
     // SessionAlreadyOwnedError (the bot degrades to a read-only watch).
     // Adopt/attach flows above never open a write handle.
+    // Rejoin the session's OWN recorded preset: `agents.resume` carries no
+    // composition of its own (the controller's resume recomposes via
+    // composeAgent), so without this a web-created session revived after a
+    // host restart lands in the empty global layer again — tools gone.
+    // Sessions with no recorded preset (pre-fix bot sessions) resume bare.
+    const presetId = await this.presetOfSession(id)
     const handle = await this.agents.resume({
       resumeSessionId: SessionId(id),
       ...(agentOptions !== undefined ? { agentOptions } : {}),
+      ...(presetId === undefined ? {} : {
+        setup: async agentCtx => {
+          await this.mountPreset(agentCtx, presetId)
+        },
+      }),
     })
     // No dispose of `previous` (same multi-surface rule as releaseOwned):
     // the old agent stays live and adoptable by other surfaces.

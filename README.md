@@ -186,6 +186,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 | `bodySegmentChars` | `3500` | long-body segmentation threshold |
 | `resumeListStyle` | `"auto"` | `/resume` list: `auto`/`table`/`list` |
 | `backgroundPush` | `"off"` | Completion push for sessions the phone is not bound to, into the last active chat: `off` / `cron` (turns carrying a cron delivery or a subagent-settled notice) / `all` (every finished turn). Env override: `DSH_FEISHU_BACKGROUND_PUSH` |
+| `roundButtons` | `"off"` | Quick-action buttons on round cards: `on` renders ⛔ 停止 under the live card and ▶️ 继续 under the ended card; `off` keeps both out — the `/stop` command (with its own confirmation) is the stop path either way. Env override: `DSH_FEISHU_ROUND_BUTTONS` |
 | `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref names |
 
 Credential resolution order: plaintext in patch > `DSH_FEISHU_APP_ID/SECRET` env
