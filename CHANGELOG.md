@@ -3,6 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- **Round replies embed into the settle card.** When a round settles, its body no longer ships as a standalone message wedged between two status cards (easy to miss) — a body that fits one segment (`bodySegmentChars` or less) embeds into the round card itself as a `##### 💬 Round 回复` section, the last section before the `---` stats footer, so the reply grows out of the card the operator is already watching; the activity list's clipped `- 💬` preview line is retired on embedded cards (kept on live cards). Oversized bodies keep the segmented body-card path; empty bodies still ship nothing; the turn-end ✅ card stays compact.
+
 ## [0.11.1] - 2026-09-15
 
 ### Fixed

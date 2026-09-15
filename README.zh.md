@@ -14,6 +14,9 @@
 
 - **Round 卡实时直播**：每个 LLM 往返一张卡——当前状态（🤔 thinking / 🔧 工具 / ⏳ 子代理）、
   工具调用、生成中的正文尾行，**5 秒伪流式**刷新
+- **回复长在 Round 卡里**：轮次落定时，该轮回答直接嵌进你正盯着的那张卡——`💬 Round 回复`
+  段落在统计 footer 正上方——不再是夹在两张状态卡之间容易漏看的独立消息
+  （超过一个正文段的超长回答仍单独成卡发出）
 - **Round 卡快捷按钮**：turn 进行中是 ⛔ 停止，结束后是 ▶️ 继续——免打字一键操作
 - **权限审批卡**：宿主审批瀑布（沙箱提权等）发问时，手机弹 **✅ 允许一次 / ❌ 拒绝** 卡——
   人不在电脑前，长任务不再卡死在权限提示上（会话审批策略须为 `ask`；过期即拒绝，绝不默认放行）
@@ -188,7 +191,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 | `mode` | `"on"` | `"off"` 完全停用 |
 | `domain` | `"feishu"` | `"feishu"`（国内）或 `"lark"`（国际版） |
 | `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式），范围 [5000, 600000] |
-| `bodySegmentChars` | `3500` | 长正文分段阈值 |
+| `bodySegmentChars` | `3500` | 长正文分段阈值，兼作嵌入上限：落定轮次的正文不超过它就直接嵌进该轮 Round 卡（`💬 Round 回复` 段），不再单独发消息；超出 [500, 30000] 报错停用 |
 | `resumeListStyle` | `"auto"` | `/resume` 列表：`auto`/`table`/`list` |
 | `backgroundPush` | `"off"` | 手机未绑定会话的完成推送（发到最后活跃的聊天）：`off` / `cron`（带 cron 投递或子代理结算通知的回合）/ `all`（所有回合结束）。环境变量覆盖：`DSH_FEISHU_BACKGROUND_PUSH` |
 | `roundButtons` | `"off"` | round 卡底部的快捷按钮：`on` 在进行中卡渲染 ⛔ 停止、在结束卡渲染 ▶️ 继续；`off` 两个都不渲染——停止走 `/stop` 命令（自带确认卡）。环境变量覆盖：`DSH_FEISHU_ROUND_BUTTONS` |

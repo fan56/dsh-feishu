@@ -11,6 +11,7 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 ## ✨ Highlights
 
 - **Live round cards**: one card per LLM round-trip — current state (🤔 thinking / 🔧 tool / ⏳ subagent), tool calls, and a growing tail of the in-flight message, refreshed every **5 seconds** (pseudo-streaming)
+- **Replies land in the round card**: when a round settles, its answer embeds into the very card you were watching — a `💬 Round 回复` section right above the stats footer — instead of arriving as a bare message wedged between status cards (answers longer than one body segment still ship as their own cards)
 - **Quick actions on the round card**: ⛔ 停止 while a turn runs, ▶️ 继续 once it ends — one tap instead of typing
 - **Approval cards**: when the host's approval waterfall asks for a sandbox escalation, the phone gets a **✅ 允许一次 / ❌ 拒绝** card — an unattended run no longer stalls at the desk (the session's approval policy must be `ask`; expiry fails closed)
 - **Interactive ask-user cards**: when the agent calls `ask_user_question`, your phone gets an **interactive card** (dropdown / multi-select / text input + submit); the answer flows straight back. Pair it with [ask-router](https://www.npmjs.com/package/@aiwayds/dsh-ask-router) for **both desktop and phone prompting — first answer wins**
@@ -183,7 +184,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 | `mode` | `"on"` | `"off"` disables the plugin entirely |
 | `domain` | `"feishu"` | `"feishu"` (CN) or `"lark"` (international) |
 | `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
-| `bodySegmentChars` | `3500` | long-body segmentation threshold |
+| `bodySegmentChars` | `3500` | long-body segmentation threshold — also the embed ceiling: a settled round's body at or under it rides the round card itself (`💬 Round 回复` section) instead of shipping as separate message(s) |
 | `resumeListStyle` | `"auto"` | `/resume` list: `auto`/`table`/`list` |
 | `backgroundPush` | `"off"` | Completion push for sessions the phone is not bound to, into the last active chat: `off` / `cron` (turns carrying a cron delivery or a subagent-settled notice) / `all` (every finished turn). Env override: `DSH_FEISHU_BACKGROUND_PUSH` |
 | `roundButtons` | `"off"` | Quick-action buttons on round cards: `on` renders ⛔ 停止 under the live card and ▶️ 继续 under the ended card; `off` keeps both out — the `/stop` command (with its own confirmation) is the stop path either way. Env override: `DSH_FEISHU_ROUND_BUTTONS` |

@@ -55,7 +55,7 @@ dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
 | `appIdRef` | `"dsh-feishu-app-id"` | credentials 服务里 App ID 的 ref 名 |
 | `appSecretRef` | `"dsh-feishu-app-secret"` | credentials 服务里 App Secret 的 ref 名 |
 | `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式）；超出 [5000, 600000] 报错停用 |
-| `bodySegmentChars` | `3500` | 长正文分段阈值；超出 [500, 30000] 报错停用 |
+| `bodySegmentChars` | `3500` | 长正文分段阈值，兼作嵌入上限——落定轮次的正文不超过它就直接嵌进该轮 Round 卡（`💬 Round 回复` 段），不再单独发消息；超出 [500, 30000] 报错停用 |
 | `resumeListStyle` | `"auto"` | `/resume` 列表渲染：`auto`（表格卡，失败回退 markdown 列表）/ `table` / `list` |
 | `btwContextMessages` | `6` | `/btw` 侧问携带的最近对话条数，[0, 50]；0 = 不带快照 |
 | `backgroundPush` | `"off"` | 手机未绑定会话的完成推送（发到最后活跃聊天）：`off` / `cron`（带 cron 投递或子代理结算的回合）/ `all`（所有回合） |
