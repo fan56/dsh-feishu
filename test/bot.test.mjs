@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { FeishuBot } from '../lib/bot.js'
+import { FeishuBot, shouldEmbedRoundText } from '../lib/bot.js'
 
 /** Minimal FeishuBot with faked deps; private internals are driven directly. */
 function makeBot(lark, clock) {
@@ -30,7 +30,7 @@ function roundBot(lark, binder = { getSessionId: () => 's1', isReadOnlyView: () 
   })
 }
 
-test('a settled round patches its card 💬, ships its body, opens the next round card', async () => {
+test('a settled round embeds its short body into the settle card and opens the next round card', async () => {
   const patches = []
   const sends = []
   let messageId = 0
@@ -41,26 +41,88 @@ test('a settled round patches its card 💬, ships its body, opens the next roun
   bot.runState.running = true
   bot.runState.rounds = 1
   bot.runState.roundStartedAt = 1000
+  bot.runState.turnStartedAt = 1000 // footer needs it to render the `---` divider
   bot.runState.lastRoundDurationMs = 4000
-  bot.runState.lastRoundText = 'round one answer'
+  bot.runState.lastRoundText = 'round one answer' // ≤ bodySegmentChars (100)
   bot.runState.lastAssistantLine = 'round one answer'
   bot.cardMessageId = 'm0'
 
   await bot.settleRound()
 
-  // 1) the round card settles in place with the 💬 header…
+  // 1) the round card settles in place with the 💬 header and the embedded
+  //    reply section (before the `---` stats footer), no clipped preview…
   assert.equal(patches.length, 1)
   assert.equal(patches[0].id, 'm0')
   assert.equal(patches[0].card.header.title.content, 'Round 1 · 💬 回复 · 4s')
-  // 2) the round's message ships verbatim…
-  assert.equal(sends.length, 2)
-  assert.equal(sends[0].card.body.elements[0].content, 'round one answer')
+  const content = patches[0].card.body.elements[0].content
+  assert.ok(content.includes('##### 💬 Round 回复\nround one answer'))
+  assert.ok(content.indexOf('##### 💬 Round 回复') < content.indexOf('---'))
+  assert.ok(!content.includes('- 💬 _'))
+  // 2) no separate body message — the reply lives in the card now…
   // 3) …then the next round's card opens (fresh, running).
-  assert.match(sends[1].card.header.title.content, /^Round 2 · /)
-  assert.equal(bot.cardMessageId, 'm2') // second send = the next round's card
+  assert.equal(sends.length, 1)
+  assert.match(sends[0].card.header.title.content, /^Round 2 · /)
+  assert.equal(bot.cardMessageId, 'm1') // the only send = the next round's card
   // The per-round story reset for the new card.
   assert.deepEqual(bot.runState.toolHistory, [])
   assert.equal(bot.runState.lastRoundText, '')
+})
+
+test('an oversized round body skips the embed and ships as its own body card', async () => {
+  const patches = []
+  const sends = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard(id, card) { patches.push({ id, card }); return true },
+  })
+  const longText = 'x'.repeat(120) // > bodySegmentChars (100)
+  bot.runState.running = true
+  bot.runState.rounds = 1
+  bot.runState.lastRoundDurationMs = 4000
+  bot.runState.lastRoundText = longText
+  bot.runState.lastAssistantLine = 'clipped…'
+  bot.cardMessageId = 'm0'
+
+  await bot.settleRound()
+
+  // Settle card stays compact: no reply section, the preview line survives.
+  assert.equal(patches.length, 1)
+  const content = patches[0].card.body.elements[0].content
+  assert.ok(!content.includes('##### 💬 Round 回复'))
+  assert.match(content, /- 💬 _clipped…_/)
+  // The body ships verbatim in its own segmented cards, then the next round opens.
+  assert.equal(sends.length, 3)
+  assert.equal(sends[0].header, undefined) // body cards — no banner
+  assert.equal(sends[0].body.elements[0].content, 'x'.repeat(100))
+  assert.equal(sends[1].body.elements[0].content, 'x'.repeat(20))
+  assert.match(sends[2].header.title.content, /^Round 2 · /)
+})
+
+test('a patch-failed settle falls back to sending the same built card (embed rides along)', async () => {
+  const sends = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { sends.push(card); return `m${sends.length}` },
+    async patchCard() { return false },
+  })
+  bot.runState.running = true
+  bot.runState.rounds = 1
+  bot.runState.lastRoundDurationMs = 4000
+  bot.runState.lastRoundText = 'embedded answer'
+  bot.cardMessageId = 'm0'
+
+  await bot.settleRound()
+
+  // First send = the fallback settle card (embedded), second = next round.
+  assert.equal(sends.length, 2)
+  assert.ok(sends[0].body.elements[0].content.includes('##### 💬 Round 回复\nembedded answer'))
+  assert.match(sends[1].header.title.content, /^Round 2 · /)
+})
+
+test('shouldEmbedRoundText: non-empty bodies within one segment embed; empty or oversized do not', () => {
+  assert.equal(shouldEmbedRoundText('hi', 100), true)
+  assert.equal(shouldEmbedRoundText('x'.repeat(100), 100), true) // exactly one segment
+  assert.equal(shouldEmbedRoundText('', 100), false)
+  assert.equal(shouldEmbedRoundText('x'.repeat(101), 100), false)
 })
 
 test('a round with no text settles its card without a body send', async () => {

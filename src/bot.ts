@@ -174,6 +174,17 @@ function cardOperatorOf(data: unknown): string | undefined {
   return typeof operator === 'string' ? operator : undefined
 }
 
+/**
+ * Decide whether a settled round's body embeds into its settle card (the
+ * `💬 Round 回复` section) instead of shipping as standalone body-card
+ * message(s). Empty bodies never embed (nothing to render); a body longer
+ * than one body segment keeps the segmented body-card path — embedding would
+ * duplicate segmentation inside the card for no gain.
+ */
+export function shouldEmbedRoundText(roundText: string, bodySegmentChars: number): boolean {
+  return roundText !== '' && roundText.length <= bodySegmentChars
+}
+
 const PICKER_TTL_MS = 5 * 60 * 1000
 
 
@@ -1774,19 +1785,25 @@ export class FeishuBot {
   /**
    * One assistant/message landed = one round settled (the fold already
    * incremented rounds and captured the round's duration/text). Settle the
-   * round's card to "Round N · 💬 回复", ship the round's message verbatim,
-   * then open the next round's card. Runs serialized on the card chain.
+   * round's card to "Round N · 💬 回复" — a body that fits a single segment
+   * embeds into that very card (`💬 Round 回复` section), oversized bodies
+   * ship verbatim as their own cards — then open the next round's card. Runs
+   * serialized on the card chain.
    */
   private async settleRound(): Promise<void> {
     if (this.disposed) return
     const chatId = this.store.get().lastChatId
     const roundText = this.runState.lastRoundText
+    const embed = shouldEmbedRoundText(roundText, this.config.bodySegmentChars)
     if (chatId !== undefined) {
       const { card } = buildStatusCard(this.runState, {
         sessionLabel: this.sessionLabel(),
         displayThink: this.store.get().displayThink,
         now: this.now(),
         settledRoundMs: this.runState.lastRoundDurationMs,
+        // The embed rides the SAME card build through the patch and the
+        // patch-failed fallback send alike — one build, both paths covered.
+        ...(embed ? { settledRoundText: roundText } : {}),
         actions: this.roundActions('stop'),
         preset: this.sessionPreset(),
       })
@@ -1796,9 +1813,9 @@ export class FeishuBot {
       } else {
         await this.lark.sendCard(chatId, card)
       }
-      // The round's own message ships verbatim (code blocks, tables) — the
-      // card's activity line is only a clipped preview of it.
-      if (roundText !== '') {
+      // A body too big for the embed still ships verbatim (code blocks,
+      // tables) — the card's activity line is only a clipped preview of it.
+      if (!embed && roundText !== '') {
         await this.replyLong(roundText)
       }
     }

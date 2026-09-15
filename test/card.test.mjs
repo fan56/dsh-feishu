@@ -232,6 +232,67 @@ test('a settled round card headers "Round N · 💬 回复 · duration" while th
   assert.match(card.body.elements[0].content, /- 💬 _scanned_/)
 })
 
+function settledRoundState() {
+  const state = initialRunState()
+  foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))
+  foldBoundEvent(state, event('tool/call', { callId: 'c', name: 'bash', arguments: '' }, 1100, 2))
+  foldBoundEvent(state, event('tool/result', { message: { content: [] } }, 3200, 3))
+  foldBoundEvent(state, event('assistant/message', { message: { content: [{ type: 'text', text: 'scanned the repo\nnext: fix tests' }] } }, 4000, 4))
+  return state
+}
+
+test('an embedded settle card renders the round body as the last section, before the stats footer', () => {
+  const state = settledRoundState()
+  const content = md(buildStatusCard(state, {
+    sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000,
+    settledRoundText: 'scanned the repo\nnext: fix tests',
+  }).card)
+  // The reply section carries the body verbatim under its heading…
+  assert.match(content, /##### 💬 Round 回复\nscanned the repo\nnext: fix tests/)
+  // …after the activity section…
+  assert.ok(content.indexOf('##### 🧭 活动') < content.indexOf('##### 💬 Round 回复'))
+  // …and before the `---` stats footer.
+  assert.ok(content.indexOf('##### 💬 Round 回复') < content.indexOf('---'))
+})
+
+test('an embedded settle card drops the clipped 💬 preview line; the live card keeps it', () => {
+  const state = settledRoundState()
+  const settled = md(buildStatusCard(state, {
+    sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000,
+    settledRoundText: 'scanned the repo\nnext: fix tests',
+  }).card)
+  assert.ok(!settled.includes('- 💬 _'))
+  const live = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 4000 }).card)
+  assert.match(live, /- 💬 _next: fix tests_/)
+})
+
+test('an empty settledRoundText renders no reply section (and keeps the preview line)', () => {
+  const state = settledRoundState()
+  for (const settledRoundText of [undefined, '']) {
+    const content = md(buildStatusCard(state, { sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000, settledRoundText }).card)
+    assert.ok(!content.includes('##### 💬 Round 回复'))
+    assert.match(content, /- 💬 _next: fix tests_/)
+  }
+})
+
+test('the embedded reply passes through the same mojibake repair as body cards', () => {
+  const state = settledRoundState()
+  const content = md(buildStatusCard(state, {
+    sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000,
+    settledRoundText: '很高兴见到你 ðŸ˜Š',
+  }).card)
+  assert.match(content, /##### 💬 Round 回复\n很高兴见到你 😊/)
+})
+
+test('an embedded reply changes the card hash (beat skips only identical rebuilds)', () => {
+  const state = settledRoundState()
+  const base = { sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000 }
+  const without = buildStatusCard(state, base)
+  const withText = buildStatusCard(state, { ...base, settledRoundText: 'scanned the repo\nnext: fix tests' })
+  assert.notEqual(without.hash, withText.hash)
+  assert.equal(withText.hash, buildStatusCard(state, { ...base, settledRoundText: 'scanned the repo\nnext: fix tests' }).hash)
+})
+
 test('an ended card with no round activity omits the activity section entirely', () => {
   const state = initialRunState()
   foldBoundEvent(state, event('turn/start', { turn: 1 }, 1000, 1))

@@ -4,15 +4,17 @@
  * publisher uses to skip no-op updates. One card per ROUND: opened when a
  * round starts (turn/start, or right after the previous round settled),
  * patched in place on the status beat (30s, hash-gated), settled to
- * "Round N · 💬 回复" when its assistant/message lands — the same message
- * ships verbatim as a body card — and the turn's final card carries the
- * end state (✅/❌/⛔ + total duration).
+ * "Round N · 💬 回复" when its assistant/message lands — a body that fits one
+ * segment embeds into the settle card itself (`💬 Round 回复` section;
+ * oversized bodies still ship as standalone body cards) — and the turn's
+ * final card carries the end state (✅/❌/⛔ + total duration).
  *
  * Layout: the header carries the round number plus the live phase
  * (🤔 thinking / 🔧 tool / ⚙️ processing / ⏳ subagent / end icon); the body is
  * markdown sections — an activity list (thinking state, tool calls by name,
- * the latest LLM message), a subagent list (status + last output line), and a
- * GFM task-list todo section whose first line carries the ☑ x/z progress.
+ * the latest LLM message), a subagent list (status + last output line), a
+ * GFM task-list todo section whose first line carries the ☑ x/z progress,
+ * and, on the settle card, the round's embedded reply as the LAST section.
  * The stats line (elapsed · model · think level · CH% · tool calls) closes
  * the markdown body after an `---` divider — schema V2 cards REJECT the
  * legacy `note` tag (server error 200861), so no note element may appear in
@@ -60,6 +62,15 @@ export interface CardContext {
    * phase. The round count itself comes from the state (already incremented).
    */
   settledRoundMs?: number
+  /**
+   * The settled round's full body, embedded into the settle card as a
+   * `##### 💬 Round 回复` section placed LAST (right before the `---` stats
+   * footer) — the reply grows into the card the eye is already on, instead
+   * of arriving as a separate message wedged between status cards. The
+   * caller decides fit (one segment or less); undefined/empty = no section,
+   * and the activity list keeps its clipped `- 💬` preview line.
+   */
+  settledRoundText?: string
   /**
    * Quick actions rendered as buttons under the body (taps arrive via
    * card.action.trigger → parseRoundCardAction). The running card carries the
@@ -195,8 +206,11 @@ function turnTemplate(state: RunState): NonNullable<Schema2Card['header']>['temp
  * retry counter when retrying, the latest LLM message line, then the live
  * items (running tool, thinking state — with the think tail when display is
  * on). Reads chronologically: what it did, what it said, what it is doing.
+ * `omitAssistantPreview` drops the clipped `- 💬` message bullet — used when
+ * the settle card embeds the round's full body (the preview would only
+ * duplicate the section right below).
  */
-function activityItems(state: RunState, now: number, displayThink: boolean): string[] {
+function activityItems(state: RunState, now: number, displayThink: boolean, omitAssistantPreview = false): string[] {
   const items: string[] = []
   for (const row of state.toolHistory.slice(-TOOL_ITEMS)) {
     items.push(`- 🔧 ${row.name} · ${row.ok ? '✔' : '✘'} ${formatDuration(row.durationMs)}`)
@@ -204,7 +218,7 @@ function activityItems(state: RunState, now: number, displayThink: boolean): str
   if (state.retries > 0) {
     items.push(`- ↻ retry ${state.retries}${state.maxRetries !== undefined ? `/${state.maxRetries}` : ''}`)
   }
-  if (state.lastAssistantLine !== undefined) {
+  if (state.lastAssistantLine !== undefined && !omitAssistantPreview) {
     items.push(`- 💬 _${clipLine(state.lastAssistantLine, MSG_CLIP)}_`)
   }
   if (state.currentTool !== undefined) {
@@ -416,11 +430,14 @@ function withStatsFooter(markdown: string, footer: string): string {
  * tail growth, todo tick) triggers the 30s-beat patch.
  */
 export function buildStatusCard(state: RunState, context: CardContext): { card: Schema2Card; hash: string } {
-  const { sessionLabel, displayThink, now, settledRoundMs, actions, preset } = context
+  const { sessionLabel, displayThink, now, settledRoundMs, settledRoundText, actions, preset } = context
   const title = turnHeaderTitle(state, now, settledRoundMs)
   const template = turnTemplate(state)
+  // An embedded reply renders as its own section and retires the activity
+  // list's clipped preview of the same text (pure duplication there).
+  const embedReply = settledRoundText !== undefined && settledRoundText !== ''
 
-  const activity = activityItems(state, now, displayThink)
+  const activity = activityItems(state, now, displayThink, embedReply)
   const sections: string[] = []
   if (state.running) {
     // Live card: always show the section, placeholder while the round waits
@@ -438,6 +455,12 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
   }
   const todo = todoSectionLines(state)
   if (todo !== undefined) sections.push(todo.join('\n'))
+  // The embedded reply closes the sections — the stats footer (`---`) then
+  // seals the card, so the body sits exactly where the eye already is. The
+  // text ships verbatim through the same mojibake repair as body cards.
+  if (embedReply) {
+    sections.push(['##### 💬 Round 回复', repairMojibake(settledRoundText)].join('\n'))
+  }
   const markdown = sections.join('\n\n')
 
   const footer = buildFooter({
