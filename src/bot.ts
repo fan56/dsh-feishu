@@ -70,7 +70,7 @@ import { BtwManager } from './btw-bot.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
-import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
+import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, readPersistedSession, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
   applyChildBackfill,
   applyRouteBackfill,
@@ -1464,7 +1464,7 @@ export class FeishuBot {
     const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
     if (persistence !== undefined) {
       try {
-        const { events } = await persistence.inspect(SessionId(sessionId))
+        const { events } = await readPersistedSession(persistence, SessionId(sessionId))
         const backfill = backfillRouteFromLog(events)
         if (backfill.provider !== undefined && backfill.model !== undefined) {
           return { provider: backfill.provider, model: backfill.model }
@@ -2047,7 +2047,7 @@ export class FeishuBot {
       const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
       if (persistence !== undefined) {
         try {
-          const { events } = await persistence.inspect(SessionId(bound))
+          const { events } = await readPersistedSession(persistence, SessionId(bound))
           const backfill = backfillRouteFromLog(events)
           if (backfill.provider !== undefined && backfill.model !== undefined) {
             return {

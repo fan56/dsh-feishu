@@ -29,10 +29,68 @@ import { basename, join } from 'node:path'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { clipLine, textOfContent } from './text.ts'
 
+/** One `persistence.list()` entry: dsh ≥ 0.1.5-rc.1 wraps each header in a `{header, revision, sizeBytes}` snapshot; ≤ 0.1.2 returned the bare header. */
+export type SessionListEntry = SessionHeader | { header: SessionHeader }
+
+/**
+ * Normalize one {@link SessionPersistenceLike.list} entry to its bare header
+ * (port of dsh-tui-pi's `headerOf`): the 0.1.5 host returns snapshots, older
+ * hosts return the header directly.
+ */
+export function headerOf<T extends { id: unknown }>(entry: T | { header: T }): T {
+  return (entry as { header?: T }).header ?? (entry as T)
+}
+
+/** Read side of the 0.1.5 cold-read handle (`open(id, 'read')`). */
+interface SessionReadHandle {
+  header: SessionHeader
+  read(offset?: number, length?: number, options?: { signal?: AbortSignal }): Promise<{ events: readonly SessionEvent[] }>
+  close(): Promise<void>
+}
+
 /** The `sessionPersistence` surface this module needs (structural). */
 export interface SessionPersistenceLike {
-  list(signal?: AbortSignal): Promise<SessionHeader[]>
-  inspect(id: SessionId, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }>
+  list(signal?: AbortSignal): Promise<readonly SessionListEntry[]>
+  /**
+   * Legacy (≤ 0.1.2) one-shot validated read. dsh 0.1.5-rc.1 removed it —
+   * {@link readPersistedSession} routes through `open` + a read-handle drain
+   * when `open` is present.
+   */
+  inspect?(id: SessionId, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }>
+  /** dsh 0.1.5-rc.1: validated cold read = `open(id, 'read')` + a full read-handle drain. */
+  open?(sessionId: SessionId, access: 'read' | 'write', options?: { signal?: AbortSignal }): Promise<SessionReadHandle>
+}
+
+/**
+ * Validated cold read of one stored session's full log, `{meta, events}`.
+ * Routes the two host seam generations: the 0.1.5 `open` + read-handle drain
+ * when present, else the legacy one-shot `inspect` (port of dsh-tui-pi's
+ * `readPersistedSession`).
+ */
+export async function readPersistedSession(
+  persistence: SessionPersistenceLike,
+  id: SessionId,
+): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }> {
+  if (typeof persistence.open === 'function') {
+    const handle = await persistence.open(id, 'read')
+    try {
+      const events: SessionEvent[] = []
+      let offset = 0
+      for (;;) {
+        const batch = await handle.read(offset)
+        if (batch.events.length === 0) break
+        events.push(...batch.events)
+        offset += batch.events.length
+      }
+      return { meta: handle.header, events }
+    } finally {
+      await handle.close()
+    }
+  }
+  if (typeof persistence.inspect !== 'function') {
+    throw new Error('session persistence exposes neither open() nor inspect()')
+  }
+  return await persistence.inspect(id)
 }
 
 /** One table row shown to the operator (preview/lastTime enrich during build). */
@@ -178,7 +236,7 @@ export async function buildResumeRows(
   limit = RESUME_ROW_LIMIT,
   concurrency = RESUME_CONCURRENCY,
 ): Promise<ResumeRow[]> {
-  const headers = await persistence.list()
+  const headers = (await persistence.list()).map(headerOf)
   const candidates = headers.filter(isResumableSessionHeader)
   candidates.sort((a, b) => {
     const at = lastUpdates?.get(String(a.id)) ?? a.createdAt
@@ -192,7 +250,7 @@ export async function buildResumeRows(
   const scratch = new Set<string>()
   const enrich = async (row: ResumeRow): Promise<void> => {
     try {
-      const { events } = await persistence.inspect(SessionId(row.sessionId))
+      const { events } = await readPersistedSession(persistence, SessionId(row.sessionId))
       const preview = previewOfEvents(events)
       if (preview === undefined) {
         // Inspected fine but no conversational message ever landed here —

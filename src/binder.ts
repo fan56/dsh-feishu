@@ -26,7 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { sessionLogRoot } from './resume-table.ts'
+import { headerOf as headerOfEntry, sessionLogRoot } from './resume-table.ts'
 import { RemoteSessionTail } from './remote-tail.ts'
 import { projectKeyFor } from './session-dir.ts'
 
@@ -44,7 +44,8 @@ interface HeaderLike {
 
 /** The persistence surface this module needs (structural). */
 interface PersistenceSeam {
-  list(signal?: AbortSignal): Promise<HeaderLike[]>
+  /** dsh ≥ 0.1.5-rc.1 returns `{header, ...}` snapshots; ≤ 0.1.2 bare headers. */
+  list(signal?: AbortSignal): Promise<Array<HeaderLike | { header: HeaderLike }>>
 }
 
 /** Result of a successful bind. */
@@ -265,7 +266,7 @@ export class SessionBinder {
   private async headerOf(sessionId: string): Promise<HeaderLike | undefined> {
     try {
       const persistence = this.ctx.get('sessionPersistence') as PersistenceSeam | undefined
-      const stored = (await persistence?.list().catch(() => [])) ?? []
+      const stored = ((await persistence?.list().catch(() => [])) ?? []).map(headerOfEntry)
       return stored.find(candidate => String(candidate.id) === sessionId)
     } catch {
       return undefined

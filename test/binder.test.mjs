@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import { SessionBinder } from '../lib/binder.js'
+import { sessionLogRoot } from '../lib/resume-table.js'
+import { projectKeyFor } from '../lib/session-dir.js'
 
 function makeRegistry() {
   const calls = { resume: [], resumeRecords: [], create: 0 }
@@ -398,4 +400,24 @@ test('cold resume without a session query at all stays bare (tui profile)', asyn
   const binder = new SessionBinder({ agents: reg.agents })
   await binder.bind('sess-cold')
   assert.equal(reg.calls.resumeRecords[0].setup, undefined)
+})
+
+// dsh 0.1.5-rc.1 wraps every list() entry in a {header, ...} snapshot; the
+// seam must normalize before reading id/cwd or sessionDirOf goes undefined.
+
+test('sessionDirOf resolves through 0.1.5 snapshot list entries', async () => {
+  const reg = makeRegistry()
+  const headers = [{ header: { id: 'snap-dir', cwd: '/proj/snap' }, revision: { c: 1n }, sizeBytes: 1 }]
+  const binder = new SessionBinder(makeGuardContext({ headers, registry: reg }))
+  assert.equal(
+    await binder.sessionDirOf('snap-dir'),
+    join(sessionLogRoot(), projectKeyFor('/proj/snap'), 'snap-dir'),
+  )
+})
+
+test('sessionDirOf returns undefined when the snapshot header carries no cwd', async () => {
+  const reg = makeRegistry()
+  const headers = [{ header: { id: 'snap-nocwd' } }]
+  const binder = new SessionBinder(makeGuardContext({ headers, registry: reg }))
+  assert.equal(await binder.sessionDirOf('snap-nocwd'), undefined)
 })

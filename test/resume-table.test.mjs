@@ -5,6 +5,7 @@ import {
   isResumableSessionHeader,
   pickResumeRow,
   previewOfEvents,
+  readPersistedSession,
 } from '../lib/resume-table.js'
 
 function header(id, createdAt, overrides = {}) {
@@ -158,4 +159,91 @@ test('an inspect FAILURE keeps the row — unknown is not scratch', async () => 
   const rows = await buildResumeRows(persistence(headers, events))
   assert.deepEqual(rows.map(r => r.sessionId), ['unknown', 'real'])
   assert.equal(rows[0].preview, '? · unknown') // fallback label (no cwd), row kept
+})
+
+// ------------------------------------------------- dsh 0.1.5-rc.1 seam --
+// 0.1.5 wrapped every list() entry in a {header, revision, sizeBytes}
+// snapshot and replaced inspect() with open(id, 'read') + a read-handle
+// drain. Against the bare-header reading every field came back undefined
+// and every picker row rendered `#N · ? · undefine · NaN-NaN-NaN NaN:NaN`
+// (String(undefined).slice(0,8) + new Date(undefined)) — these tests pin
+// the snapshot vocabulary.
+
+function snapshotPersistence(headers, eventsById = new Map(), { batchSize = 2 } = {}) {
+  return {
+    async list() { return headers.map(h => ({ header: h, revision: { c: 1n }, sizeBytes: 1 })) },
+    async open(id, access) {
+      assert.equal(access, 'read', 'cold reads must request read access')
+      const meta = headers.find(h => String(h.id) === String(id))
+      const events = eventsById.get(String(id))
+      if (meta === undefined || events === undefined) throw new Error('missing')
+      let closed = false
+      return {
+        header: meta,
+        async read(offset) {
+          if (closed) throw new Error('read after close')
+          return { events: events.slice(offset, offset + batchSize) }
+        },
+        async close() { closed = true },
+      }
+    },
+  }
+}
+
+test('0.1.5 snapshot list + open-drain rows carry real metadata', async () => {
+  const headers = [header('snap', 100, { cwd: '/home/me/repo' })]
+  const events = new Map([['snap', [userEvent('hello world'), { type: 'turn/end', seq: 9, time: 123456, data: {} }]]])
+  const rows = await buildResumeRows(snapshotPersistence(headers, events))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].sessionId, 'snap')
+  assert.equal(rows[0].dir, 'repo')
+  assert.equal(rows[0].preview, 'hello world')
+  assert.equal(rows[0].lastTime, 123456)
+})
+
+test('snapshot rows keep the legacy ordering and scratch-filtering semantics', async () => {
+  const headers = [
+    header('snap-scratch', 5000),
+    header('snap-real', 4000, { cwd: '/tmp/proj' }),
+  ]
+  const events = new Map([
+    ['snap-scratch', [{ type: 'command/run', seq: 1, time: 5001, data: { name: 'resume' } }]],
+    ['snap-real', [userEvent('real work')]],
+  ])
+  const rows = await buildResumeRows(snapshotPersistence(headers, events))
+  assert.deepEqual(rows.map(r => r.sessionId), ['snap-real'])
+})
+
+test('readPersistedSession drains a batched handle fully and closes it', async () => {
+  const events = [userEvent('a'), userEvent('b'), userEvent('c'), userEvent('d'), userEvent('e')]
+  const opened = []
+  const persistence = {
+    async open(id, access) {
+      opened.push({ id, access })
+      let closed = false
+      return {
+        header: header('drain', 1),
+        async read(offset) {
+          if (closed) throw new Error('read after close')
+          return { events: events.slice(offset, offset + 2) }
+        },
+        async close() { closed = true },
+      }
+    },
+  }
+  const { meta, events: drained } = await readPersistedSession(persistence, 'drain')
+  assert.deepEqual(opened, [{ id: 'drain', access: 'read' }])
+  assert.equal(meta.id, 'drain')
+  assert.equal(drained.length, 5)
+})
+
+test('readPersistedSession falls back to legacy inspect when open is absent', async () => {
+  const legacy = persistence([header('legacy', 1)], new Map([['legacy', [userEvent('x')]]]))
+  const { events } = await readPersistedSession(legacy, 'legacy')
+  assert.equal(events.length, 1)
+})
+
+test('readPersistedSession refuses a seam exposing neither open nor inspect', async () => {
+  const bare = { async list() { return [] } }
+  await assert.rejects(() => readPersistedSession(bare, 'x'), /neither open\(\) nor inspect\(\)/)
 })
