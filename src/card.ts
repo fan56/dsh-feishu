@@ -24,7 +24,7 @@
 
 import type { RunState } from './run-state.ts'
 import { contextTokensEstimate, reasoningTail, streamingTextTail, subagentDisplayLabel, subagentRows } from './run-state.ts'
-import { clipLine, formatDuration, formatWhen, repairMojibake } from './text.ts'
+import { clipLine, closeOpenFence, formatDuration, formatWhen, repairMojibake } from './text.ts'
 import type { ResumeRow } from './resume-table.ts'
 
 /**
@@ -457,9 +457,12 @@ export function buildStatusCard(state: RunState, context: CardContext): { card: 
   if (todo !== undefined) sections.push(todo.join('\n'))
   // The embedded reply closes the sections — the stats footer (`---`) then
   // seals the card, so the body sits exactly where the eye already is. The
-  // text ships verbatim through the same mojibake repair as body cards.
+  // text ships verbatim through the same mojibake repair as body cards; a
+  // dangling fence (a max-tokens cut mid-code-block) is closed here so the
+  // `---` footer renders OUTSIDE the code block — a card-side repair only,
+  // the caller's roundText is never modified.
   if (embedReply) {
-    sections.push(['##### 💬 Round 回复', repairMojibake(settledRoundText)].join('\n'))
+    sections.push(['##### 💬 Round 回复', closeOpenFence(repairMojibake(settledRoundText))].join('\n'))
   }
   const markdown = sections.join('\n\n')
 

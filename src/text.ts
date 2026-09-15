@@ -170,6 +170,20 @@ function openFenceOpener(segment: string): { reopen: string; close: string } | u
   return { reopen: openerLine, close: opener.char.repeat(opener.length) }
 }
 
+/**
+ * Append a closing fence line when `text` ends inside an open fence (``` or
+ * ~~~, marker-aware — same tracking as {@link segmentText}), so whatever the
+ * caller appends AFTER the text (a `---` stats footer, following card
+ * sections) does not get swallowed into the code block: an unclosed ```
+ * renders the rest of the card as garbage. Card-side rendering repair only —
+ * a text that ships verbatim keeps the author's fences untouched. Returns
+ * the text unchanged when its fences already balance.
+ */
+export function closeOpenFence(text: string): string {
+  const open = openFenceOpener(text)
+  return open === undefined ? text : `${text}\n${open.close}`
+}
+
 /** Join the text blocks of a message content array into one trimmed string. */
 export function textOfContent(content: unknown): string {
   if (typeof content === 'string') return content.trim()

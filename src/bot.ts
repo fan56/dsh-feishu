@@ -1807,15 +1807,23 @@ export class FeishuBot {
         actions: this.roundActions('stop'),
         preset: this.sessionPreset(),
       })
+      // sendCard swallows API errors and resolves undefined on failure — an
+      // embedded body rides the settle card, so a card lost in flight would
+      // take the answer with it. Track which delivery path actually landed.
+      let settleCardLost = false
       if (this.cardMessageId !== undefined) {
         const ok = await this.lark.patchCard(this.cardMessageId, card)
-        if (!ok) await this.lark.sendCard(chatId, card)
+        if (!ok) settleCardLost = (await this.lark.sendCard(chatId, card)) === undefined
       } else {
-        await this.lark.sendCard(chatId, card)
+        settleCardLost = (await this.lark.sendCard(chatId, card)) === undefined
       }
       // A body too big for the embed still ships verbatim (code blocks,
       // tables) — the card's activity line is only a clipped preview of it.
-      if (!embed && roundText !== '') {
+      // An embedded body whose settle card was lost falls back to that same
+      // verbatim path (replyLong segments internally), restoring the pre-embed
+      // delivery guarantee: the round's answer must stay visible even when its
+      // card is not.
+      if ((!embed || settleCardLost) && roundText !== '') {
         await this.replyLong(roundText)
       }
     }

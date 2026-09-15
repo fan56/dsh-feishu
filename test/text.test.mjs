@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   clipLine,
+  closeOpenFence,
   formatDuration,
   formatWhen,
   lastNonBlankLine,
@@ -141,6 +142,24 @@ test('segmentText normalizes CRLF so no \\r leaks into segments', () => {
   for (const seg of segmentText('x'.repeat(40) + '\r\nmore', 20)) {
     assert.ok(!seg.includes('\r'), `segment carries a stray CR: ${JSON.stringify(seg)}`)
   }
+})
+
+test('closeOpenFence appends a matching closer for a dangling fence (marker-aware)', () => {
+  assert.equal(closeOpenFence('look:\n```ts\nconst x = 1'), 'look:\n```ts\nconst x = 1\n```')
+  assert.equal(closeOpenFence('```\ncode'), '```\ncode\n```')
+  // A longer opener needs a matching-length closer (a bare ``` cannot close ````).
+  assert.equal(closeOpenFence('````md\n> quote'), '````md\n> quote\n````')
+  assert.equal(closeOpenFence('~~~\ncode'), '~~~\ncode\n~~~')
+  // A ``` inside a ~~~ fence is literal content — the ~~~ stays the open fence.
+  assert.equal(closeOpenFence('~~~\n```\ncode'), '~~~\n```\ncode\n~~~')
+})
+
+test('closeOpenFence leaves fence-balanced text untouched', () => {
+  assert.equal(closeOpenFence('plain text, no fences'), 'plain text, no fences')
+  assert.equal(closeOpenFence('```ts\nconst x = 1\n```'), '```ts\nconst x = 1\n```')
+  assert.equal(closeOpenFence('~~~\n```\nliteral\n```\n~~~'), '~~~\n```\nliteral\n```\n~~~')
+  // A same-char but SHORTER run does not close — the ``` pair inside is literal.
+  assert.equal(closeOpenFence('````\n```\nliteral'), '````\n```\nliteral\n````')
 })
 
 test('lastNonBlankLine strips ANSI, folds whitespace, skips blanks', () => {

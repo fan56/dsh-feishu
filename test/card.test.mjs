@@ -284,6 +284,28 @@ test('the embedded reply passes through the same mojibake repair as body cards',
   assert.match(content, /##### 💬 Round 回复\n很高兴见到你 😊/)
 })
 
+test('an embedded reply cut off inside a code fence gets the fence closed so the footer stays outside the block', () => {
+  const state = settledRoundState()
+  const content = md(buildStatusCard(state, {
+    sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000,
+    settledRoundText: 'look:\n```ts\nconst x = 1', // a max-tokens cut mid-fence
+  }).card)
+  // A closing fence line is appended at the end of the reply body…
+  assert.ok(content.includes('##### 💬 Round 回复\nlook:\n```ts\nconst x = 1\n```'))
+  // …and the `---` divider + stats footer follow OUTSIDE the code block.
+  assert.ok(content.includes('const x = 1\n```\n\n---\n\n'))
+})
+
+test('an embedded reply with balanced fences gains no synthetic closer', () => {
+  const state = settledRoundState()
+  const content = md(buildStatusCard(state, {
+    sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000,
+    settledRoundText: '```ts\nconst x = 1\n```',
+  }).card)
+  // The balanced body renders verbatim straight into the divider — untouched.
+  assert.ok(content.includes('##### 💬 Round 回复\n```ts\nconst x = 1\n```\n\n---\n\n'))
+})
+
 test('an embedded reply changes the card hash (beat skips only identical rebuilds)', () => {
   const state = settledRoundState()
   const base = { sessionLabel: 'x', displayThink: false, now: 4000, settledRoundMs: 3000 }

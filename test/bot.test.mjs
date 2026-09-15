@@ -118,6 +118,29 @@ test('a patch-failed settle falls back to sending the same built card (embed rid
   assert.match(sends[1].header.title.content, /^Round 2 · /)
 })
 
+test('a settle card lost in flight (patch + fallback send both fail) re-delivers the embedded body', async () => {
+  const sends = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { sends.push(card); return undefined }, // every send fails
+    async patchCard() { return false },
+  })
+  bot.runState.running = true
+  bot.runState.rounds = 1
+  bot.runState.lastRoundDurationMs = 4000
+  bot.runState.lastRoundText = 'embedded answer'
+  bot.cardMessageId = 'm0'
+
+  await bot.settleRound()
+
+  // sends[0] = the lost fallback settle card, sends[1] = the full body
+  // re-delivered verbatim as a body card, sends[2] = the next round's card.
+  assert.equal(sends.length, 3)
+  assert.ok(sends[0].header.title.content.includes('Round 1 · 💬 回复'))
+  assert.equal(sends[1].header, undefined) // body card — no banner
+  assert.equal(sends[1].body.elements[0].content, 'embedded answer')
+  assert.match(sends[2].header.title.content, /^Round 2 · /)
+})
+
 test('shouldEmbedRoundText: non-empty bodies within one segment embed; empty or oversized do not', () => {
   assert.equal(shouldEmbedRoundText('hi', 100), true)
   assert.equal(shouldEmbedRoundText('x'.repeat(100), 100), true) // exactly one segment
@@ -154,10 +177,14 @@ test('turn/end finalizes the current card and never resends round bodies', async
   bot.runState.turnEndedAt = 4000
   bot.runState.turnEndReason = 'completed'
   bot.runState.rounds = 3
+  // A last round text is present at turn/end — it must NOT embed: the end
+  // card stays compact (its round already settled/embedded separately).
+  bot.runState.lastRoundText = 'the final answer'
   bot.cardMessageId = 'm9'
   await bot.finalizeTurn()
   assert.equal(patches.length, 1)
   assert.equal(patches[0].card.header.title.content, 'Round 3 · ✅ 完成 · 3s')
+  assert.ok(!patches[0].card.body.elements[0].content.includes('💬 Round 回复'))
   assert.equal(sends.length, 0) // bodies already went out per round
   assert.equal(bot.cardMessageId, undefined)
 })

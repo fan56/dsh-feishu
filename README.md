@@ -184,7 +184,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 | `mode` | `"on"` | `"off"` disables the plugin entirely |
 | `domain` | `"feishu"` | `"feishu"` (CN) or `"lark"` (international) |
 | `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
-| `bodySegmentChars` | `3500` | long-body segmentation threshold — also the embed ceiling: a settled round's body at or under it rides the round card itself (`💬 Round 回复` section) instead of shipping as separate message(s) |
+| `bodySegmentChars` | `3500` | long-body segmentation threshold — also the embed ceiling: a settled round's body at or under it rides the round card itself (`💬 Round 回复` section) instead of shipping as separate message(s); values outside [500, 30000] error the plugin off |
 | `resumeListStyle` | `"auto"` | `/resume` list: `auto`/`table`/`list` |
 | `backgroundPush` | `"off"` | Completion push for sessions the phone is not bound to, into the last active chat: `off` / `cron` (turns carrying a cron delivery or a subagent-settled notice) / `all` (every finished turn). Env override: `DSH_FEISHU_BACKGROUND_PUSH` |
 | `roundButtons` | `"off"` | Quick-action buttons on round cards: `on` renders ⛔ 停止 under the live card and ▶️ 继续 under the ended card; `off` keeps both out — the `/stop` command (with its own confirmation) is the stop path either way. Env override: `DSH_FEISHU_ROUND_BUTTONS` |
