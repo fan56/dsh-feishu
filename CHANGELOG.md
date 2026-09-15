@@ -3,6 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.1] - 2026-09-15
+
+### Fixed
+- **`/resume` picker metadata through the dsh 0.1.5 persistence seam.** dsh 0.1.5-rc.1 wrapped every `sessionPersistence.list()` entry in a `{header, revision, sizeBytes}` snapshot (was a bare `SessionHeader`) and removed `inspect()` in favor of `open(id, 'read')` + a read-handle drain; the 0.1.5 migration batch missed the resume readers, so every field resolved against the wrapper and each row rendered `#N · ? · undefine · NaN-NaN-NaN NaN:NaN` (`String(undefined).slice(0,8)` plus `new Date(undefined)`) — `/resume N` could not bind either. Ports dsh-tui-pi's seam vocabulary: `headerOf` normalizes both `list()` generations, `readPersistedSession` cold-reads via `open` + drain with the legacy `inspect` as fallback. Consumers fixed alongside: the cold-resume model-route backfill and the binder's persisted-cwd lookup (both silently degrading on 0.1.5 hosts).
+
 ## [0.11.0] - 2026-09-14
 
 ### Added
