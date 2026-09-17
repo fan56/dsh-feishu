@@ -3,6 +3,19 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **`/feishu-onboard` — one-command onboarding from the desktop TUI.** An interactive, question-by-question guide (degrades to a plain printed guide when no ask provider is configured) with three paths: **scan-to-create** — the terminal renders a QR code, one scan + confirm in the Feishu app and the plugin creates the enterprise custom app itself via Feishu's official scan-to-create flow (OAuth device flow, official SDK `registerApp`), pre-provisioned with the bot capability, long-connection events (`im.message.receive_v1`, `card.action.trigger`) and the six scopes (`im:message:send_as_bot`, `im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly`, `im:message.resources:readonly`, `im:message.reactions:write`, `im:chat:readonly`); **bind an existing app** — App ID/Secret entered once, written only to the local credentials file (never into session logs) and auto-verified against the API, with wrong credentials re-asked and a missing bot capability (error `11205`) still saving the credentials plus a console fix checklist; or a **six-step manual console guide** (with the permission-preselection deep link for the scopes). Either path ends the same way: `app_id`/`app_secret` land in the credentials service (`dsh-feishu-app-id` / `dsh-feishu-app-secret` refs), the onboarding user is set as operator, and the plugin **hot-activates in the same process** — no dsh restart. Fine print: the preset scopes ride a platform gray release — uncovered tenants get automatic verification plus the preselection deep link to top up; colleagues need a published version (Version Management & Release), self-use does not.
+- **Pairing mode (self-serve first admin).** With valid credentials but an empty allowlist the bot no longer sleeps: it stays connected, and anyone who **DMs** it receives an 「管理员配对」 confirmation card — one tap claims admin, first come first served. The claim persists to `settings.yaml` `dsh-feishu.pairedOperators`, takes effect immediately (no restart), never triggers from group chats, and once the list is non-empty, outsiders go fully invisible again. On a shared tenant that means whoever DMs the bot first becomes its admin — DM it yourself first if that matters.
+- **`DSH_FEISHU_OPERATORS` is now actually read.** Comma-separated open_ids appended to the allowlist — handy for quick local tests without editing the patch. The dormant log had been recommending this variable for a while, but no code ever read it until now.
+
+### Changed
+- **Empty `operators` with valid credentials boots into pairing mode** instead of full dormancy (see above) — the bot keeps its WebSocket, answers DMs with the pairing card, and arms itself the moment the first admin claims. The bundled `dsh-feishu-config` skill is rewritten around the new onboarding paths (scan-to-create / existing app / manual guide).
+
+### Fixed
+- **The dormant log referenced `DSH_FEISHU_OPERATORS` before it was supported** — setting the variable had no effect at all; the allowlist builder now unions it in.
+
 ## [0.12.0] - 2026-09-16
 
 ### Changed

@@ -124,3 +124,16 @@ test('help text mentions /btw', () => {
   const text = helpText(true)
   assert.match(text, /\/btw/)
 })
+
+test('/feishu-onboard routes to its own intent (never a model prompt)', () => {
+  assert.deepEqual(classifyInbound('/feishu-onboard'), { kind: 'onboard' })
+  // Args do not change the routing (the command is desktop-only either way).
+  assert.deepEqual(classifyInbound('/feishu-onboard extra'), { kind: 'onboard' })
+})
+
+test('help text lists /feishu-onboard as a desktop first-config command', () => {
+  for (const text of [helpText(true), helpText(false)]) {
+    assert.match(text, /\/feishu-onboard — 桌面端命令/)
+    assert.match(text, /首次配置请回电脑端运行/)
+  }
+})

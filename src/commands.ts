@@ -38,6 +38,7 @@ export type Intent =
   | { kind: 'profile-switch' }
   | { kind: 'display'; target: 'think'; value: 'on' | 'off' }
   | { kind: 'btw'; line: string }
+  | { kind: 'onboard' }
   | { kind: 'passthrough'; name: string; line: string }
   | { kind: 'rejected'; name: string }
 
@@ -157,6 +158,11 @@ export function classifyInbound(text: string): Intent {
     case 'select-skill': return { kind: 'select-skill' }
     case 'profile-switch': return { kind: 'profile-switch' }
     case 'btw': return { kind: 'btw', line: rest ?? '' }
+    case 'feishu-onboard':
+      // This plugin's own desktop one-shot config command. On the phone it
+      // must NEVER fall through to the model as a prompt — answer with the
+      // fixed desktop pointer instead.
+      return { kind: 'onboard' }
     case 'feishu-plugin': {
       // Named after the plugin itself: ownership of phone-side commands
       // must be self-evident (a bare /display read as a dsh/TUI command
@@ -210,6 +216,7 @@ export function helpText(bound: boolean): string {
     '· /select-skill — 列出可用技能，点选后激活到当前会话',
     '',
     '**本插件**',
+    '· /feishu-onboard — 桌面端命令：扫码创建/绑定飞书应用并自动写好凭据与管理员（首次配置请回电脑端运行）',
     '· /feishu-plugin think on|off — 开关回复尾部的思考显示（默认开）',
     '· /help — 显示本说明',
     '',

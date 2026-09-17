@@ -107,3 +107,22 @@ test('roundButtons env override picks up on/off and coerces junk to off', () => 
 test('roundButtons is a known config key (typo guard stays intact)', () => {
   assert.throws(() => resolveConfig({ roundButton: 'on' }, {}), /unknown config key "roundButton"/)
 })
+
+test('DSH_FEISHU_OPERATORS is appended to config.operators (the documented env override actually reads)', () => {
+  assert.deepEqual(resolveConfig({ operators: ['ou_a'] }, { DSH_FEISHU_OPERATORS: 'ou_b,ou_c' }).operators, ['ou_a', 'ou_b', 'ou_c'])
+  assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: 'ou_b' }).operators, ['ou_b'])
+})
+
+test('DSH_FEISHU_OPERATORS entries are trimmed and empty items dropped', () => {
+  assert.deepEqual(
+    resolveConfig({}, { DSH_FEISHU_OPERATORS: ' ou_b ,  ,ou_c,,' }).operators,
+    ['ou_b', 'ou_c'],
+  )
+})
+
+test('DSH_FEISHU_OPERATORS absent/blank leaves the config list untouched', () => {
+  assert.deepEqual(resolveConfig({}, {}).operators, [])
+  assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: '' }).operators, [])
+  assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: '   ' }).operators, [])
+  assert.deepEqual(resolveConfig({ operators: ['ou_a'] }, {}).operators, ['ou_a'])
+})

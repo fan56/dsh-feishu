@@ -118,8 +118,9 @@ function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
 
 /**
  * Validate, default, and merge the static config with `DSH_FEISHU_*` env
- * overrides. Throws on unknown keys (a typo'd patch config must not silently
- * disarm the bot).
+ * overrides (`DSH_FEISHU_OPERATORS` is APPENDED to the config list; the rest
+ * are first-wins). Throws on unknown keys (a typo'd patch config must not
+ * silently disarm the bot).
  */
 export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
   if (config !== undefined) {
@@ -152,10 +153,17 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   const roundButtons = buttonsValue === 'on' ? 'on' : 'off'
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
+  // DSH_FEISHU_OPERATORS (comma-separated open_ids) EXTENDS the config list —
+  // the dormant-state warning has long promised this variable to users, so the
+  // resolver must actually read it. Entries are trimmed; empties are dropped.
+  const envOperators = env.DSH_FEISHU_OPERATORS
+  const envOperatorList = envOperators === undefined || envOperators.trim() === ''
+    ? []
+    : envOperators.split(',').map(id => id.trim()).filter(id => id !== '')
   return Object.freeze({
     mode: config?.mode === 'off' ? 'off' : 'on',
     domain,
-    operators: Object.freeze([...(config?.operators ?? [])]),
+    operators: Object.freeze([...(config?.operators ?? []), ...envOperatorList]),
     appId: configAppId && configAppId !== '' ? configAppId : envString(env, 'DSH_FEISHU_APP_ID'),
     appSecret: configAppSecret && configAppSecret !== ''
       ? configAppSecret

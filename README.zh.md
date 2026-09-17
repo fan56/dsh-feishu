@@ -12,6 +12,8 @@
 
 ## ✨ 亮点
 
+- **一条命令完成接入**：桌面端 `/feishu-onboard` —— 扫码创建应用、自动写入凭证与管理员、热激活免重启
+- **自助配对**：白名单为空时，第一个私聊者点一下确认卡即成为管理员
 - **Round 卡实时直播**：每个 LLM 往返一张卡——当前状态（🤔 thinking / 🔧 工具 / ⏳ 子代理）、
   工具调用、生成中的正文尾行，**5 秒伪流式**刷新
 - **回复长在 Round 卡里**：轮次落定时，该轮回答直接嵌进你正盯着的那张卡——`💬 Round 回复`
@@ -52,22 +54,7 @@ https://github.com/user-attachments/assets/c0d7092f-deda-4443-b75a-2bc93bd30d86
 
 ## 🚀 安装与配置
 
-### 第一步：创建飞书应用（网页操作，≈10 分钟）
-
-登录 [open.feishu.cn](https://open.feishu.cn) → 创建「企业自建应用」：
-
-1. 记下 `App ID`（`cli_` 开头）和 `App Secret`
-2. 「添加应用能力」→ **机器人**
-3. 「事件与回调」→ 订阅方式选 **长连接**，添加事件：
-   `im.message.receive_v1`（收消息）和 `card.action.trigger`（卡片交互——
-   问询卡与 /resume 选择卡需要）
-4. 权限管理开通：`im:message:send_as_bot`、`im:message.p2p_msg:readonly`、
-   `im:message.group_msg:readonly`（群聊派活）、
-   `im:message.resources:readonly`（图片下载）、
-   `im:message.reactions:write`
-5. 可用范围加自己 → **创建版本并发布**（不发布事件不通，最常见的卡点）
-
-### 第二步：安装插件到 profile（≈2 分钟）
+### 第一步：安装插件到 profile（≈2 分钟）
 
 ```bash
 git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu
@@ -93,15 +80,42 @@ cd ~/github/dsh-feishu && npm install && npm run link-closure
 cd ~/.dsh/profiles/<你的 profile> && pnpm install
 ```
 
-### 第三步：配置凭证（≈1 分钟）
+### 第二步：配置 bot——三选一
+
+`/feishu-onboard` 是**桌面端命令**——在电脑上的 dsh TUI 里运行（手机端运行只会收到指引，引导你去电脑端）。下面三个方案与命令提供的三条路径一一对应。
+
+#### 方案 A —— `/feishu-onboard`（推荐，≈2 分钟，无需碰飞书控制台）
+
+在桌面端 TUI 运行 `/feishu-onboard`。命令逐问引导（没配 ask 提供方时自动降级为纯文字指南），并和你一起选路径：
+
+- **扫码一键创建应用**——全程不进飞书后台
+- **绑定已有应用**——见方案 B
+- **手动指南**——见方案 C
+
+扫码路径下，终端渲染二维码 → 用飞书 App 扫码并确认 → 插件基于飞书官方「扫码创建应用」能力（OAuth device flow，官方 SDK registerApp）自动创建企业自建应用，并预置好本插件需要的一切：
+
+- 机器人能力
+- 长连接事件：`im.message.receive_v1`、`card.action.trigger`
+- 权限：`im:message:send_as_bot`、`im:message.p2p_msg:readonly`、
+  `im:message.group_at_msg:readonly`、`im:message.resources:readonly`、
+  `im:message.reactions:write`、`im:chat:readonly`
+
+随后一步到位：`app_id`/`app_secret` 自动写入 dsh 凭据服务（refs：`dsh-feishu-app-id` / `dsh-feishu-app-secret`），扫码用户自动设为管理员（operators），插件在**同一进程内热激活**——不用重启 dsh。扫码、私聊机器人，配置就此完成。
+
+> 小字：预置权限依赖平台灰度。灰度未覆盖时，命令会自动验证并用「权限预选深链」引导补开。要让**其他同事**使用机器人，还需到开放平台「版本管理与发布」创建版本并发布（自己用不需要）。
+
+#### 方案 B —— 已有飞书应用
+
+两种方式把凭证交给插件：
+
+- **跑 `/feishu-onboard` 选「已有应用」**：输入 App ID / App Secret（只写入本地凭据文件，不进会话日志）→ 命令当场调 API 验证；凭据错误会让你重新输入；应用没开机器人能力（错误码 `11205`）时凭据仍会保存，并给出控制台修复清单。也可以在这一步把自己的 open_id 加入管理员。
+- **或者手动写两个文件**：
 
 ```yaml
 # ~/.dsh/.credentials.yaml （权限 600；改完重启 dsh 生效）
 dsh-feishu-app-id: cli_xxxxxxxxxx
 dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
 ```
-
-### 第四步：白名单（≈1 分钟）
 
 只有白名单内的飞书用户能使用 bot，其余人私聊完全隐身：
 
@@ -113,7 +127,33 @@ dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
       - ou_xxxxxxxxxxxxxx     # 你的 open_id（管理后台成员详情页可查）
 ```
 
-### 第五步：推荐加装 ask-router（多端问询）
+生效白名单是三者并集：这里的 `operators` ∪ `~/.dsh/settings.yaml` 的
+`dsh-feishu.pairedOperators`（配对模式与 `/feishu-onboard` 写入）∪ 环境变量
+`DSH_FEISHU_OPERATORS`（逗号分隔 open_id，本地快速测试免改 patch）。
+
+#### 方案 C —— 手动控制台配置
+
+想自己在 [open.feishu.cn](https://open.feishu.cn) 控制台点一遍？六步（≈10 分钟）；做完回到**方案 B** 把凭证交给插件。
+
+1. **创建应用**：登录 open.feishu.cn → 创建「企业自建应用」，记下 `App ID`（`cli_` 开头）和 `App Secret`
+2. **添加机器人**：「添加应用能力」→ **机器人**
+3. **权限**（「权限管理」）：`im:message:send_as_bot`、`im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`（群聊 @派活）、`im:message.resources:readonly`（图片下载）、`im:message.reactions:write`、`im:chat:readonly`。捷径：权限预选深链 `https://open.feishu.cn/app/{AppID}/auth?q=...&op_from=openapi` 会替你把这些权限勾好——灰度未覆盖时 `/feishu-onboard` 给你的就是这条链接
+4. **事件与回调**：订阅方式选**长连接**，添加事件 `im.message.receive_v1`（收消息）和 `card.action.trigger`（卡片交互——问询卡与 /resume 选择卡需要）
+5. **可用范围 → 版本发布**：可用范围加自己 → **创建版本并发布**（不发布事件不通，最常见的卡点）
+6. **凭证**：落到 `~/.dsh/.credentials.yaml`（权限 600；改完重启 dsh 生效）——照方案 B 的 yaml 手写，或跑 `/feishu-onboard` 选「已有应用」让它代存并验证
+
+### 第三步：启动并验证
+
+```bash
+dsh --profile <你的 profile>
+# 日志出现 dsh-feishu: armed (1 operator(s), feishu) 即成功
+```
+
+私聊 bot 发 `/help` → 回命令清单；`/resume` 看会话列表；发文本即派活。
+
+**管理员名单还是空的？** bot 不再完全休眠：有凭证但没有 operators 时，它保持在线进入**配对模式**——任何私聊它的人都会收到一张「管理员配对」确认卡，点一下即成为管理员（先到先得；持久化到 `~/.dsh/settings.yaml` 的 `dsh-feishu.pairedOperators`，立即生效、无需重启）。群聊永不触发配对；名单里有了管理员之后，名单外的人依旧完全隐身。共享租户下这意味着：第一个私聊 bot 的同事就会成为它的管理员——不希望如此的话，自己先私聊点卡，或按方案 B 预先配好 `operators`。
+
+## 🔀 推荐加装 ask-router（多端问询）
 
 ```bash
 npm install -g @aiwayds/dsh-ask-router
@@ -122,15 +162,6 @@ npm install -g @aiwayds/dsh-ask-router
 bundles 里加 `@aiwayds/dsh-ask-router`，放在 **dsh-base 之后、所有 UI 之前**。
 装了它：手机问询卡与桌面 TUI 面板**双端同弹、先答先得**。不装也能用——
 手机独占问询（无其它 UI 时），或桌面 TUI 面板优先。
-
-### 启动并验证
-
-```bash
-dsh --profile <你的 profile>
-# 日志出现 dsh-feishu: armed (1 operator(s), feishu) 即成功
-```
-
-私聊 bot 发 `/help` → 回命令清单；`/resume` 看会话列表；发文本即派活。
 
 ## 🗑️ 卸载
 
@@ -144,7 +175,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 
 以下内容有意保留在磁盘上（删除数据是破坏性的；重装后会继续复用）：
 
-- `~/.dsh/settings.yaml` 的 `dsh-feishu:` 段 —— 绑定的会话 id、picker 样式、手机端偏好；想重置配对就删掉这一段。
+- `~/.dsh/settings.yaml` 的 `dsh-feishu:` 段 —— 绑定的会话 id、picker 样式、手机端偏好，以及 `pairedOperators`（配对管理员名单，由配对模式 / `/feishu-onboard` 写入）；想重置配对（含管理员名单）就删掉这一段。
 - 会话目录里的修复产物：`*.corrupt-bak*` 是损坏日志修复前的唯一副本 —— 请保留；`*.repaired.*` 是修复后重写的日志。
 - `/tmp/dsh-feishu-bot.lock` 只在 SIGKILL 后可能残留；下次启动的 stale-pid 检查会自动接管，无需手动处理。
 
@@ -187,7 +218,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 
 | key | 默认 | 说明 |
 | --- | --- | --- |
-| `operators` | `[]` | open_id 白名单，**必填才激活** |
+| `operators` | `[]` | open_id 白名单——生效名单为三者并集：本项 ∪ settings.yaml `dsh-feishu.pairedOperators` ∪ 环境变量 `DSH_FEISHU_OPERATORS`（逗号分隔 open_id）；为空时 bot 以配对模式启动 |
 | `mode` | `"on"` | `"off"` 完全停用 |
 | `domain` | `"feishu"` | `"feishu"`（国内）或 `"lark"`（国际版） |
 | `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式），范围 [5000, 600000] |
@@ -211,11 +242,12 @@ feishu」，指南会自动加载——先核查前置条件（飞书应用、�
 
 | 现象 | 处理 |
 | --- | --- |
-| 启动日志 `no operators configured — dormant` | 白名单没配（第四步） |
-| `no Lark credentials` | 凭证没配（第三步），改后需重启 |
+| 日志出现 `pairing mode` | 属预期：已配凭证但白名单为空——bot 以配对模式运行，首个私聊者点确认卡即成为管理员；想跳过配对，按方案 B 预配 `operators` |
+| 其他人用不了机器人 | 没有覆盖到他们的已发布版本：到「版本管理与发布」创建版本并发布，并把对方加进可用范围 |
+| `no Lark credentials` | 凭证没配（方案 B），改后需重启 |
 | `startup failed` | App ID/Secret 错误或网络不通；应用未发布版本 |
 | 私聊不回 | open_id 与白名单不符（非白名单静默忽略） |
-| 问询卡点了没反应 | 后台未订阅 `card.action.trigger`（第一步第 3 条） |
+| 问询卡点了没反应 | 后台未订阅 `card.action.trigger`（方案 C 第 4 条） |
 | `/resume N` 报过期 | 列表 5 分钟有效，重发 `/resume` |
 
 ## 开发

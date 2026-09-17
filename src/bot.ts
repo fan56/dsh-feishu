@@ -4,6 +4,10 @@
  *
  * Lifecycle rules (design doc §2/§5 定稿):
  * - silent startup — the bot never sends anything unprompted;
+ * - pairing mode: with a COMPLETELY empty operator list (config ∪ persisted
+ *   paired), the first p2p DM is offered a pairing confirmation card whose
+ *   tap claims admin (persisted, effective in-process immediately); groups
+ *   never pair, and once any admin exists strangers are silent again;
  * - binding only through /resume; unbound input gets one hint line;
  * - prompts inject via `agent.steer` while a turn runs (join the CURRENT
  *   turn's next round — the operator's mid-course corrections land
@@ -70,6 +74,16 @@ import { BtwManager } from './btw-bot.ts'
 import type { ResolvedConfig } from './config.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
+import {
+  buildPairingOfferCard,
+  buildPairingRejectedCard,
+  buildPairingSuccessCard,
+  decidePairing,
+  PAIRING_PERSIST_NOTE,
+  pairingActionContextOf,
+  parsePairingAction,
+  type PairingActionContext,
+} from './pairing.ts'
 import { buildResumeRows, loadSessionLastUpdates, pickResumeRow, readPersistedSession, type ResumeRow, type SessionPersistenceLike } from './resume-table.ts'
 import {
   applyChildBackfill,
@@ -187,6 +201,9 @@ export function shouldEmbedRoundText(roundText: string, bodySegmentChars: number
 
 const PICKER_TTL_MS = 5 * 60 * 1000
 
+/** Pairing-offer card cache cap (chatId → messageId); over this, drop the oldest. */
+const PAIRING_CARD_CACHE_LIMIT = 32
+
 
 export interface BotDeps {
   readonly ctx: Context
@@ -251,6 +268,13 @@ export class FeishuBot {
   private turnOriginMessageId: string | undefined
   /** The bot's own open_id — group mention routing (resolved at start; optional). */
   private botOpenId: string | undefined
+  /**
+   * Pairing-offer cards currently out (chatId → messageId), so a repeated DM
+   * in the same chat PATCHES the existing card instead of stacking a new one.
+   * Bounded: over the cap the oldest chat's entry is dropped (a fresh card is
+   * simply sent next time — self-healing, no correctness impact).
+   */
+  private readonly pairingCards = new Map<string, string>()
   /** Per-session background-push scratch (firehose fold; bounded). */
   private readonly pushTracks = new Map<string, PushTrack>()
   private ticker: ReturnType<typeof setInterval> | undefined
@@ -274,7 +298,7 @@ export class FeishuBot {
       // step so selector sends/patches never interleave with a settle.
       sendCard: (chatId, card) => this.chain(() => this.lark.sendCard(chatId, card as Schema2Card)),
       patchCard: (messageId, card) => this.chain(() => this.lark.patchCard(messageId, card as Schema2Card)),
-      allowlisted: openId => isOperator(openId, this.allowlist),
+      allowlisted: openId => this.mayOperate(openId),
       logger: this.ctx.logger,
     })
     this.newFlow = new NewSessionFlowManager({
@@ -554,7 +578,22 @@ export class FeishuBot {
   }
 
   private async process(message: InboundMessage): Promise<void> {
-    if (!isOperator(message.openId, this.allowlist)) return // silent — non-operator
+    // Pairing gate (replaces the plain allowlist check): the operator lists
+    // are unioned with the PERSISTED pairing admins, re-read on every message
+    // so a just-confirmed pairing takes effect in this very process. When the
+    // union is empty, the first p2p DM is offered the pairing card instead of
+    // being dropped; groups and configured-away senders stay silent.
+    const decision = decidePairing({
+      chatType: message.chatType,
+      senderOpenId: message.openId,
+      configOperators: [...this.allowlist],
+      pairedOperators: this.store.get().pairedOperators ?? [],
+    })
+    if (decision.kind === 'ignore') return // silent — non-operator
+    if (decision.kind === 'offer-pairing') {
+      await this.offerPairing(message.chatId)
+      return
+    }
     if (message.chatType === 'group' && !this.groupGate(message)) return
     if (this.store.get().lastChatId !== message.chatId) {
       await this.store.update({ lastChatId: message.chatId })
@@ -586,6 +625,11 @@ export class FeishuBot {
       case 'select-skill': await this.interactiveCommand(runSelectSkillCommand); break
       case 'profile-switch': await this.interactiveCommand(runProfileSwitchCommand); break
       case 'btw': await this.handleBtw(message, intent.line); break
+      case 'onboard':
+        // Desktop-only one-shot config — never let it reach the model as a
+        // prompt from the phone.
+        await this.reply('「/feishu-onboard」是桌面端首次配置命令，请在电脑端 dsh 的 TUI 里运行；手机端完成配置后即可用 /help 开始。')
+        break
       case 'display':
         await this.store.update({ displayThink: intent.value === 'on' })
         await this.reply(intent.value === 'on' ? '已开启思考尾行显示。' : '已关闭思考尾行显示（/feishu-plugin think on 重新开启）。')
@@ -596,6 +640,93 @@ export class FeishuBot {
       case 'passthrough': await this.handlePassthrough(intent.name, intent.line); break
       case 'prompt': await this.handlePrompt(message, intent.text); break
     }
+  }
+
+  // ----------------------------------------------------------- pairing --
+
+  /**
+   * Effective operator gate: the configured allowlist OR a persisted pairing
+   * admin (read fresh — a claim must take effect in-process immediately).
+   * Every interactive surface (card callbacks, selector FW) funnels through
+   * here so a paired admin is a first-class operator everywhere, not only on
+   * the message path.
+   */
+  private mayOperate(openId: string | undefined): boolean {
+    if (isOperator(openId, this.allowlist)) return true
+    if (openId === undefined || openId === '') return false
+    const paired = this.store.get().pairedOperators
+    return Array.isArray(paired) && paired.includes(openId)
+  }
+
+  /**
+   * Whether an admin exists at all (config ∪ paired, freshly read) — the
+   * pairing card's claim window is open only while this is false.
+   */
+  private hasAnyOperator(): boolean {
+    if (this.allowlist.size > 0) return true
+    const paired = this.store.get().pairedOperators
+    return Array.isArray(paired) && paired.length > 0
+  }
+
+  /**
+   * Offer the pairing confirmation card in a p2p chat. A repeated DM in the
+   * same chat patches the already-out card (no stacking); a patch failure
+   * (card deleted/too old) falls back to a fresh send. Both sends swallow
+   * API errors — `undefined` messageId simply means the offer never landed
+   * and the next DM retries.
+   */
+  private async offerPairing(chatId: string): Promise<void> {
+    const existing = this.pairingCards.get(chatId)
+    if (existing !== undefined) {
+      const patched = await this.chain(() => this.lark.patchCard(existing, buildPairingOfferCard()))
+      if (patched) return
+      this.pairingCards.delete(chatId)
+    }
+    const messageId = await this.chain(() => this.lark.sendCard(chatId, buildPairingOfferCard()))
+    if (messageId === undefined) return
+    this.pairingCards.set(chatId, messageId)
+    if (this.pairingCards.size > PAIRING_CARD_CACHE_LIMIT) {
+      const oldest = this.pairingCards.keys().next().value
+      if (oldest !== undefined) this.pairingCards.delete(oldest)
+    }
+  }
+
+  /**
+   * A pairing-card tap arrived: claim admin for the TAPPER (the open_id in
+   * the event, never the card's original target). The claim window is
+   * re-checked at tap time against the CURRENT config ∪ paired union — a
+   * stale card tapped after an operator was configured resolves to the
+   * "已有管理员" terminal state instead of a second admin. Never throws:
+   * a failed claim degrades to a log line, the card callback contract
+   * forbids leaking errors into the SDK dispatcher.
+   */
+  private async handlePairingClaim(openId: string, context: PairingActionContext): Promise<void> {
+    try {
+      const chatId = context.chatId ?? this.pairingChatIdOf(context.messageId)
+      const messageId = context.messageId ?? (chatId === undefined ? undefined : this.pairingCards.get(chatId))
+      if (this.hasAnyOperator()) {
+        if (messageId !== undefined) await this.lark.patchCard(messageId, buildPairingRejectedCard())
+        if (chatId !== undefined) this.pairingCards.delete(chatId)
+        return
+      }
+      await this.store.addPairedOperator(openId)
+      if (messageId !== undefined) await this.lark.patchCard(messageId, buildPairingSuccessCard())
+      if (chatId !== undefined) {
+        this.pairingCards.delete(chatId)
+        await this.lark.sendText(chatId, PAIRING_PERSIST_NOTE)
+      }
+    } catch (error) {
+      this.ctx.logger.warn('dsh-feishu: pairing claim for %s failed: %o', openId, error)
+    }
+  }
+
+  /** Reverse lookup: which chat a tracked pairing card was sent to. */
+  private pairingChatIdOf(messageId: string | undefined): string | undefined {
+    if (messageId === undefined) return undefined
+    for (const [chatId, tracked] of this.pairingCards) {
+      if (tracked === messageId) return chatId
+    }
+    return undefined
   }
 
   // ------------------------------------------------------------ commands --
@@ -2295,21 +2426,29 @@ export class FeishuBot {
     // contract as the ask and selector branches below: non-operators (and
     // payloads without an operator) are silent no-ops, never errors.
     const operator = cardOperatorOf(data)
+    // Pairing-card taps run BEFORE the operator gate: the tapper is by
+    // definition not on the allowlist yet — claiming is the whole point.
+    // The event's own open_id (the tapper) becomes the claimed admin.
+    if (parsePairingAction(data) !== undefined) {
+      if (operator === undefined || operator === '') return
+      void this.chain(() => this.handlePairingClaim(operator, pairingActionContextOf(data)))
+      return
+    }
     const resume = parseResumeAction(data)
     if (resume !== undefined) {
-      if (!isOperator(operator, this.allowlist)) return
+      if (!this.mayOperate(operator)) return
       void this.chain(() => this.handleResumeAction(resume))
       return
     }
     const modelProvider = parseModelProviderAction(data)
     if (modelProvider !== undefined) {
-      if (!isOperator(operator, this.allowlist)) return
+      if (!this.mayOperate(operator)) return
       void this.chain(() => this.handleModelProviderPicked(modelProvider))
       return
     }
     const modelSubmit = parseModelSubmitAction(data)
     if (modelSubmit !== undefined) {
-      if (!isOperator(operator, this.allowlist)) return
+      if (!this.mayOperate(operator)) return
       void this.chain(() => this.handleModelSubmitted(modelSubmit))
       return
     }
@@ -2317,16 +2456,16 @@ export class FeishuBot {
     // patches the grey card — both settle the awaiting present() promise.
     const newSession = parseNewSessionAction(data)
     if (newSession !== undefined) {
-      if (!isOperator(operator, this.allowlist)) return
+      if (!this.mayOperate(operator)) return
       this.newFlow.handleAction(newSession)
       return
     }
-    // Round-card quick actions (⛔ 停止 / ▶️ 继续) — same allowlist gate as
+    // Round-card quick actions (⛔ 停止 / ▶️ 继续) — same operator gate as
     // every interactive surface; taps on stale cards degrade to the /stop
     // path's own "no running turn" reply.
     const roundOp = parseRoundCardAction(data)
     if (roundOp !== undefined) {
-      if (!isOperator(operator, this.allowlist)) return
+      if (!this.mayOperate(operator)) return
       void this.handleRoundAction(roundOp).catch(() => undefined)
       return
     }
@@ -2342,7 +2481,7 @@ export class FeishuBot {
     }
     const entry = this.pendingAsks.get(parsed.questionId)
     if (entry === undefined) return
-    if (!isOperator(operator, this.allowlist)) return
+    if (!this.mayOperate(operator)) return
     const result = parseAskFormValue(entry.questions, parsed.formValue)
     if (result.kind === 'missing') {
       void this.reply(`还有未回答的问题：${result.missing.join('、')}`)

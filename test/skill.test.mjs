@@ -102,6 +102,23 @@ test('provider.get loads the packaged SKILL.md with matching metadata', async ()
   assert.equal(frontmatterValue(markdown, 'description'), candidate.description)
 })
 
+// Anti-drift guards: the onboarding rewrite must keep these key facts in the
+// SKILL.md body (frontmatter is stripped so the description cannot satisfy
+// them by accident). If one of these fails, a rewrite dropped a load-bearing
+// fact — restore it instead of deleting the assertion.
+test('SKILL.md body keeps the onboarding key-fact anchors', async () => {
+  const markdown = await readFile(new URL('../skills/dsh-feishu-config/SKILL.md', import.meta.url), 'utf8')
+  const body = stripFrontmatter(markdown)
+  assert.match(body, /\/feishu-onboard/, 'desktop one-shot onboarding command')
+  assert.match(body, /pairedOperators/, 'runtime pairing admin list in settings.yaml')
+  assert.match(body, /card\.action\.trigger/, 'card callback subscription')
+  assert.match(body, /长连接/, 'WebSocket long-connection event subscription mode')
+  assert.match(body, /版本管理与发布/, 'version publishing step (most common blocker)')
+  assert.match(body, /11205|机器人能力/, 'bot-capability error code handled by /feishu-onboard')
+  assert.match(body, /im\.message\.receive_v1/, 'message-received event subscription')
+  assert.match(body, /DSH_FEISHU_OPERATORS/, 'operators env override actually read at runtime')
+})
+
 test('stripFrontmatter tolerates missing or unclosed frontmatter', () => {
   // No frontmatter: returned unchanged.
   assert.equal(stripFrontmatter('plain body\n'), 'plain body\n')

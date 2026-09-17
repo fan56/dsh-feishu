@@ -10,6 +10,8 @@ Drive an existing [dsh](https://github.com/deepseek-ai/deepseek-harness) (DeepSe
 
 ## ✨ Highlights
 
+- **One-command onboarding**: `/feishu-onboard` on the desktop — scan-to-create the Feishu app, auto-writes credentials + operators, hot-activates without a restart
+- **Self-serve pairing**: empty allowlist → the first DM claims admin via a one-tap card
 - **Live round cards**: one card per LLM round-trip — current state (🤔 thinking / 🔧 tool / ⏳ subagent), tool calls, and a growing tail of the in-flight message, refreshed every **5 seconds** (pseudo-streaming)
 - **Replies land in the round card**: when a round settles, its answer embeds into the very card you were watching — a `💬 Round 回复` section right above the stats footer — instead of arriving as a bare message wedged between status cards (answers longer than one body segment still ship as their own cards)
 - **Quick actions on the round card**: ⛔ 停止 while a turn runs, ▶️ 继续 once it ends — one tap instead of typing
@@ -43,23 +45,7 @@ https://github.com/user-attachments/assets/c0d7092f-deda-4443-b75a-2bc93bd30d86
 
 ## 🚀 Install & Configure
 
-### Step 1: Create the Feishu app (web, ≈10 min)
-
-Sign in at [open.feishu.cn](https://open.feishu.cn) → create a **Custom App** (企业自建应用):
-
-1. Note the `App ID` (starts with `cli_`) and `App Secret`
-2. "Add app capability" → **Bot**
-3. "Events & callbacks" → subscription mode **Long connection**; add events:
-   `im.message.receive_v1` (messages) and `card.action.trigger` (card
-   interactions — required by the ask cards and the /resume picker)
-4. Permissions: `im:message:send_as_bot`, `im:message.p2p_msg:readonly`,
-   `im:message.group_msg:readonly` (group dispatch),
-   `im:message.resources:readonly` (image download),
-   `im:message.reactions:write`
-5. Availability: add yourself → **create a version and publish** (events don't
-   flow until you publish — the most common stumbling block)
-
-### Step 2: Install the plugin into your profile (≈2 min)
+### Step 1: Install the plugin into your profile (≈2 min)
 
 ```bash
 git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu
@@ -85,15 +71,62 @@ Edit `~/.dsh/profiles/<your-profile>/package.json`:
 cd ~/.dsh/profiles/<your-profile> && pnpm install
 ```
 
-### Step 3: Credentials (≈1 min)
+### Step 2: Configure the bot — pick one
+
+`/feishu-onboard` is a **desktop** command — run it in the dsh TUI on your
+computer (from the phone it replies with a pointer back to the desktop). The
+three options below mirror the three paths the command offers.
+
+#### Option A — `/feishu-onboard` (recommended, ≈2 min, no Feishu console needed)
+
+Run `/feishu-onboard` in the desktop TUI. It asks a handful of questions one
+by one (no ask provider configured? it degrades to a plain printed guide) and
+picks the path with you:
+
+- **Scan to create the app** — zero Feishu console work
+- **Bind an app you already have** — see Option B
+- **Manual guide** — see Option C
+
+On the scan path the terminal renders a QR code → scan it with the Feishu app
+and confirm → the plugin creates an enterprise custom app for you via Feishu's
+official scan-to-create flow (OAuth device flow, official SDK `registerApp`),
+pre-provisioned with everything this plugin needs:
+
+- Bot capability
+- Long-connection events: `im.message.receive_v1`, `card.action.trigger`
+- Permissions: `im:message:send_as_bot`, `im:message.p2p_msg:readonly`,
+  `im:message.group_at_msg:readonly`, `im:message.resources:readonly`,
+  `im:message.reactions:write`, `im:chat:readonly`
+
+Then it finishes the job: `app_id`/`app_secret` are written into the dsh
+credentials service (refs `dsh-feishu-app-id` / `dsh-feishu-app-secret`), the
+scanning user is added as an operator, and the plugin **hot-activates in the
+same process** — no dsh restart. Scan, then DM the bot; that's the whole
+setup.
+
+> Fine print: the preset permissions ride a platform gray release. Where the
+> gray hasn't landed, the command verifies them automatically and guides the
+> top-up with a permission-preselection deep link. And for **colleagues** to
+> use the bot you still publish it once under Version Management & Release
+> (not needed for your own use).
+
+#### Option B — You already have a Feishu app
+
+Two ways to hand the credentials to the plugin:
+
+- **Run `/feishu-onboard` and pick "existing app"**: enter App ID / App Secret
+  (written only to the local credentials file — never into session logs) →
+  the command verifies them against the API on the spot; wrong credentials
+  are re-asked; if the app lacks the bot capability (error code `11205`) the
+  credentials are still saved and a console fix checklist is printed. You can
+  also add your own open_id as an operator there.
+- **Or write the two files yourself**:
 
 ```yaml
 # ~/.dsh/.credentials.yaml (chmod 600; restart dsh after changing)
 dsh-feishu-app-id: cli_xxxxxxxxxx
 dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
 ```
-
-### Step 4: Allowlist (≈1 min)
 
 Only allowlisted Feishu users can use the bot — everyone else is invisible:
 
@@ -105,7 +138,60 @@ Only allowlisted Feishu users can use the bot — everyone else is invisible:
       - ou_xxxxxxxxxxxxxx     # your open_id (admin console → member details)
 ```
 
-### Step 5: Recommended — add ask-router (multi-surface prompting)
+The effective allowlist is a union: `operators` here ∪
+`dsh-feishu.pairedOperators` in `~/.dsh/settings.yaml` (written by pairing
+mode and `/feishu-onboard`) ∪ the `DSH_FEISHU_OPERATORS` env var
+(comma-separated open_ids — handy for quick local tests without editing the
+patch).
+
+#### Option C — Manual console setup
+
+Prefer driving the [open.feishu.cn](https://open.feishu.cn) console yourself?
+Six steps (≈10 min) — once they're done, return to **Option B** to hand the
+credentials to the plugin:
+
+1. **Create the app**: sign in at open.feishu.cn → create a **Custom App**
+   (企业自建应用); note the `App ID` (starts with `cli_`) and `App Secret`
+2. **Add the bot**: "Add app capability" → **Bot**
+3. **Permissions** ("Permissions & management"): `im:message:send_as_bot`,
+   `im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly` (group
+   @-mention dispatch), `im:message.resources:readonly` (image download),
+   `im:message.reactions:write`, `im:chat:readonly`. Shortcut: the
+   permission-preselection deep link
+   `https://open.feishu.cn/app/{AppID}/auth?q=...&op_from=openapi` pre-ticks
+   the scopes — the same link `/feishu-onboard` hands you when a preset scope
+   isn't gray-released for your tenant
+4. **Events & callbacks**: subscription mode **Long connection**; add the
+   events `im.message.receive_v1` (messages) and `card.action.trigger` (card
+   interactions — required by the ask cards and the /resume picker)
+5. **Availability → version & publish**: add yourself under Availability,
+   then **create a version and publish** — events don't flow until you
+   publish (the most common stumbling block)
+6. **Credentials**: they belong in `~/.dsh/.credentials.yaml` (chmod 600;
+   restart dsh after changing) — paste the Option B yaml by hand, or run
+   `/feishu-onboard` → "existing app" and let it store and verify them
+
+### Step 3: Start & verify
+
+```bash
+dsh --profile <your-profile>
+# the log line dsh-feishu: armed (1 operator(s), feishu) means success
+```
+
+DM the bot `/help` → you get the command list; `/resume` lists sessions; send
+text to dispatch work.
+
+**Operators list still empty?** The bot no longer sits fully dormant: with
+valid credentials and no operators it stays connected in **pairing mode** —
+anyone who DMs it receives an **admin pairing** confirmation card, and one tap
+claims admin (first come, first served; persisted to
+`dsh-feishu.pairedOperators` in `~/.dsh/settings.yaml`, effective immediately,
+no restart). Group chats never trigger it, and once the list has an admin,
+everyone outside it is invisible again. On a shared tenant that means the
+first colleague to DM the bot becomes its admin — if that's not what you
+want, DM it yourself first, or pre-configure `operators` per Option B.
+
+## 🔀 Recommended: add ask-router (multi-surface prompting)
 
 ```bash
 npm install -g @aiwayds/dsh-ask-router
@@ -116,16 +202,6 @@ bundle**. With it: phone cards and the desktop TUI panel prompt
 **simultaneously — first answer wins**. Without it things still work — the
 phone owns prompting when no other UI is present, otherwise the desktop UI
 takes it.
-
-### Start & verify
-
-```bash
-dsh --profile <your-profile>
-# the log line dsh-feishu: armed (1 operator(s), feishu) means success
-```
-
-DM the bot `/help` → you get the command list; `/resume` lists sessions; send
-text to dispatch work.
 
 ## 🗑️ Uninstall
 
@@ -139,7 +215,7 @@ The host reconciles the profile automatically: the `dsh.profile.bundles` entry i
 
 What stays on disk (kept on purpose — deleting data is destructive; a reinstall reuses it):
 
-- `~/.dsh/settings.yaml` `dsh-feishu:` section — bound session id, picker style, phone-model preference. Delete the section to reset the pairing.
+- `~/.dsh/settings.yaml` `dsh-feishu:` section — bound session id, picker style, phone-model preference, and `pairedOperators` (the paired-admin list written by pairing mode / `/feishu-onboard`). Delete the section to reset the pairing — admins included.
 - Repair artifacts inside session dirs: `*.corrupt-bak*` is the only pre-repair copy of a damaged session log — keep it; `*.repaired.*` is the rewritten log the repair produced.
 - `/tmp/dsh-feishu-bot.lock` can linger after a SIGKILL; the stale-pid check steals it on the next start, so no manual step is needed.
 
@@ -180,7 +256,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 
 | key | default | description |
 | --- | --- | --- |
-| `operators` | `[]` | open_id allowlist — **required to arm the bot** |
+| `operators` | `[]` | open_id allowlist — the effective list is the union of this, `dsh-feishu.pairedOperators` (settings.yaml) and `DSH_FEISHU_OPERATORS` (comma-separated open_ids); an empty list boots the bot into pairing mode |
 | `mode` | `"on"` | `"off"` disables the plugin entirely |
 | `domain` | `"feishu"` | `"feishu"` (CN) or `"lark"` (international) |
 | `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
@@ -207,11 +283,12 @@ config key table, the `DSH_FEISHU_*` env vars, and the runtime-state
 
 | Symptom | Fix |
 | --- | --- |
-| Log: `no operators configured — dormant` | Allowlist missing (Step 4) |
-| Log: `no Lark credentials` | Credentials missing (Step 3); restart after changing |
+| Log shows `pairing mode` | Expected with credentials set but an empty allowlist: the bot runs in pairing mode — the first person to DM it gets the admin-pairing card and can claim admin with one tap. Pre-configure `operators` (Option B) to skip pairing |
+| Others can't use the bot | No published version covers them: create a version under **Version Management & Release** and publish, and keep them inside the availability scope |
+| Log: `no Lark credentials` | Credentials missing (Option B); restart after changing |
 | Log: `startup failed` | Wrong App ID/Secret, network blocked, or the app version isn't published |
 | Bot ignores DMs | Your open_id isn't in the allowlist (non-allowlisted users are silently ignored) |
-| Ask card taps do nothing | `card.action.trigger` isn't subscribed (Step 1.3) |
+| Ask card taps do nothing | `card.action.trigger` isn't subscribed (Option C, step 4) |
 | `/resume N` says expired | The list lives 5 minutes — send `/resume` again |
 
 ## Development

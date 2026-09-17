@@ -1,9 +1,9 @@
 /**
- * Persisted bot state (bound session, think-display preference, last chat).
- * Preferred backend: the dsh settings service, under this plugin's own
- * `dsh-feishu` namespace (schema-validated, survives restarts, visible in
- * dsh's settings surfaces). Degrades to an in-memory copy when no settings
- * provider is mounted — the bot still works, it just re-binds after a
+ * Persisted bot state (bound session, think-display preference, last chat,
+ * pairing admins). Preferred backend: the dsh settings service, under this
+ * plugin's own `dsh-feishu` namespace (schema-validated, survives restarts,
+ * visible in dsh's settings surfaces). Degrades to an in-memory copy when no
+ * settings provider is mounted — the bot still works, it just re-binds after a
  * restart.
  */
 
@@ -44,6 +44,14 @@ export interface BotState {
    * route exists.
    */
   phoneModel: { provider: string; model: string; reasoningEffort?: string } | undefined
+  /**
+   * Admins added through pairing mode (the zero-config bootstrap): the first
+   * p2p chat to tap the pairing card when the allowlist is completely empty.
+   * Persisted so a claim survives restarts; unioned with the configured
+   * operators on every gate check (read fresh — a claim must take effect
+   * in-process immediately).
+   */
+  pairedOperators: readonly string[]
 }
 
 const DEFAULT_STATE: BotState = {
@@ -52,6 +60,7 @@ const DEFAULT_STATE: BotState = {
   lastChatId: undefined,
   picker: undefined,
   phoneModel: undefined,
+  pairedOperators: [],
 }
 
 /**
@@ -97,6 +106,22 @@ function decodePhoneModel(raw: unknown): { provider: string; model: string; reas
   }
 }
 
+/**
+ * Decode the persisted pairing-admin list. Defensive: a malformed blob (not
+ * JSON, not an array, junk entries, empty strings) degrades to a filtered
+ * list or [] rather than surfacing garbage into the authorization gate.
+ */
+function decodePairedOperators(raw: unknown): readonly string[] {
+  if (typeof raw !== 'string' || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
+  } catch {
+    return []
+  }
+}
+
 // dsh-settings 0.1.2-alpha.3 removed the runtime settingsNamespace() helper:
 // a plain literal is the supported spelling (same adaptation as
 // dsh-model-sync / dsh-cron / dsh-vault).
@@ -108,7 +133,8 @@ const STATE_SCHEMA = z.object({
   lastChatId: z.string().default(''),
   picker: z.string().default(''),
   phoneModel: z.string().default(''),
-}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string }>
+  pairedOperators: z.string().default(''),
+}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string; pairedOperators: string }>
 
 function fromSection(section: unknown): BotState {
   const value = (section ?? {}) as Partial<Record<keyof BotState, unknown>>
@@ -123,6 +149,7 @@ function fromSection(section: unknown): BotState {
       : undefined,
     picker: decodePicker(value.picker),
     phoneModel: decodePhoneModel(value.phoneModel),
+    pairedOperators: decodePairedOperators(value.pairedOperators),
   }
 }
 
@@ -133,7 +160,7 @@ function fromSection(section: unknown): BotState {
  */
 export class StateStore {
   private readonly memory: BotState = { ...DEFAULT_STATE }
-  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string }> | undefined
+  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string; pairedOperators: string }> | undefined
   private readonly registration: Promise<void>
 
   constructor(ctx: Context) {
@@ -149,7 +176,7 @@ export class StateStore {
         try {
           if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
             this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
-              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '', phoneModel: '' },
+              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '', phoneModel: '', pairedOperators: '' },
               applies: 'live',
             })
           }
@@ -199,9 +226,27 @@ export class StateStore {
         lastChatId: next.lastChatId ?? '',
         picker: next.picker === undefined ? '' : JSON.stringify(next.picker),
         phoneModel: next.phoneModel === undefined ? '' : JSON.stringify(next.phoneModel),
+        pairedOperators: JSON.stringify([...next.pairedOperators]),
       })
     } catch {
       // Persistence failed — the in-memory copy still serves this run.
     }
+  }
+
+  /**
+   * The persisted pairing admins (OnboardStoreSeam shape): read fresh from
+   * the store on every call so a claim lands in-process immediately.
+   */
+  getPairedOperators(): readonly string[] {
+    return this.get().pairedOperators
+  }
+
+  /** Add a pairing admin (dedup-merge) and persist. Never throws. */
+  async addPairedOperator(openId: string): Promise<void> {
+    const value = openId.trim()
+    if (value === '') return
+    const current = this.getPairedOperators()
+    if (current.includes(value)) return
+    await this.update({ pairedOperators: [...current, value] })
   }
 }
