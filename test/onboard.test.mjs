@@ -343,12 +343,16 @@ test('runOnboard scan happy path writes credentials, pairs the scan user, report
   const store = fakeStore()
   let registerDeps
   const report = await runOnboard(baseDeps({
-    ask: fakeAsk([{ selected: ['没有 — 扫码一键创建（推荐）'] }]),
+    ask: fakeAsk([
+      { selected: ['没有 — 扫码一键创建（推荐）'] },
+      { selected: ['我已完成确认'] },
+    ]),
     credentials,
     store,
     verifyImpl: async () => ({ status: 'ok', botName: '新机器人', botOpenId: 'ou_newbot' }),
     registerImpl: async deps => {
       registerDeps = deps
+      deps.showQr('https://launcher.example/scan-1', 600)
       return { status: 'ok', appId: 'cli_new', appSecret: 'sec_new', operatorOpenId: 'ou_scan' }
     },
   }))
@@ -365,6 +369,84 @@ test('runOnboard scan happy path writes credentials, pairs the scan user, report
   assert.match(report.text, /管理员/)
   assert.match(report.text, /激活/)
   assert.ok(!report.text.includes('sec_new'), 'secret must not appear in the report text')
+})
+
+test('runOnboard scan branch presents the launcher link through the ask card', async () => {
+  const asks = []
+  const ask = {
+    ask: async request => {
+      asks.push(request)
+      const next = asks.length === 1
+        ? { selected: ['没有 — 扫码一键创建（推荐）'] }
+        : { selected: ['我已完成确认'] }
+      return { answers: request.questions.map(q => ({ id: q.id, selected: next.selected, custom: undefined })) }
+    },
+  }
+  const report = await runOnboard(baseDeps({
+    ask,
+    credentials: fakeCredentials(),
+    store: fakeStore(),
+    verifyImpl: async () => ({ status: 'ok', botName: 'b', botOpenId: undefined }),
+    registerImpl: async deps => {
+      deps.showQr('https://launcher.example/web-card', 600)
+      return { status: 'ok', appId: 'cli_link', appSecret: 'sec_link', operatorOpenId: undefined }
+    },
+  }))
+  assert.equal(report.ok, true)
+  assert.equal(asks.length, 2, 'path question + launcher-link confirmation')
+  assert.match(asks[1].questions[0].detail, /launcher\.example\/web-card/, 'the ask card detail must carry the launcher link')
+  assert.match(asks[1].questions[0].question, /确认/)
+})
+
+test('runOnboard scan branch reports failure when no launcher link arrives in time', async () => {
+  let report
+  const started = Date.now()
+  report = await runOnboard(baseDeps({
+    ask: fakeAsk([{ selected: ['没有 — 扫码一键创建（推荐）'] }]),
+    scanUrlWaitMs: 20,
+    registerImpl: async () => new Promise(() => {}), // never shows a URL, never settles
+  }))
+  assert.equal(report.ok, false)
+  assert.match(report.text, /等待创建链接超时/)
+  assert.ok(Date.now() - started < 5_000, 'the wait must be bounded by scanUrlWaitMs')
+})
+
+test('runOnboard scan branch gives up when confirmation is clicked but registration never settles', async () => {
+  const report = await runOnboard(baseDeps({
+    ask: fakeAsk([
+      { selected: ['没有 — 扫码一键创建（推荐）'] },
+      { selected: ['我已完成确认'] },
+    ]),
+    scanConfirmGraceMs: 20,
+    registerImpl: async deps => {
+      deps.showQr('https://launcher.example/stuck', 600)
+      return new Promise(() => {}) // user "confirmed" but the SDK never observes it
+    },
+  }))
+  assert.equal(report.ok, false)
+  assert.match(report.text, /未检测到创建完成/)
+})
+
+test('runOnboard scan branch stops cleanly when the confirm card cannot be delivered', async () => {
+  const calls = []
+  const report = await runOnboard(baseDeps({
+    ask: {
+      ask: async request => {
+        calls.push(request)
+        if (calls.length === 1) {
+          return { answers: [{ id: request.questions[0].id, selected: ['没有 — 扫码一键创建（推荐）'], custom: undefined }] }
+        }
+        throw new Error('NO_PROVIDER')
+      },
+    },
+    registerImpl: async deps => {
+      deps.showQr('https://launcher.example/orphan', 600)
+      return { status: 'ok', appId: 'cli_x', appSecret: 'sec_x', operatorOpenId: undefined }
+    },
+  }))
+  assert.equal(report.ok, false, 'an undeliverable confirm card must not proceed to an orphan app')
+  assert.match(report.text, /未能送达/)
+  assert.equal(report.credentialsWritten, false)
 })
 
 test('runOnboard no-bot branch still saves credentials and shows the fix list', async () => {

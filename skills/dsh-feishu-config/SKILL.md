@@ -51,13 +51,15 @@ dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
 按优先级：**桌面 `/feishu-onboard` 一键引导 > 手动 6 步（用户自己上控制台）>
 agent 向导兜底细调**。agent 替用户干活时，能跑命令就优先引导路径一。
 
-### 路径一（推荐）：桌面 TUI 运行 /feishu-onboard
+### 路径一（推荐）：TUI / Web UI 运行 /feishu-onboard
 
-让用户在**电脑端 dsh 的 TUI** 输入 `/feishu-onboard`。命令调宿主 ask 逐问引导，
+让用户在 dsh 里输入 `/feishu-onboard`（TUI 或 web 端均可）。命令调宿主 ask 逐问引导，
 按用户现状三选一：
 
-1. **没有应用 → 扫码一键创建**：走飞书官方 SDK registerApp（OAuth 设备码流程），
-   终端渲染二维码，用户用飞书 App 扫码确认后自动创建**企业自建应用**，预置：
+1. **没有应用 → 扫码一键创建**：走飞书官方 SDK registerApp（OAuth 设备码流程）。
+   创建链接以**问询卡**送达（web 端弹在浏览器里；TTY 同时在终端渲染二维码）——
+   用户打开链接（手机 App 扫码或浏览器打开均可）在飞书确认创建后点「我已完成确认」，
+   自动创建**企业自建应用**，预置：
    - 机器人能力；
    - WebSocket 长连接事件订阅 `im.message.receive_v1` + 卡片回调 `card.action.trigger`；
    - 六项权限：`im:message:send_as_bot`、`im:message.p2p_msg:readonly`、

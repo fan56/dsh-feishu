@@ -92,7 +92,7 @@ cd ~/.dsh/profiles/<你的 profile> && pnpm install
 - **绑定已有应用**——见方案 B
 - **手动指南**——见方案 C
 
-扫码路径下，终端渲染二维码 → 用飞书 App 扫码并确认 → 插件基于飞书官方「扫码创建应用」能力（OAuth device flow，官方 SDK registerApp）自动创建企业自建应用，并预置好本插件需要的一切：
+扫码路径下，创建链接会以**问询卡**送达——web 端直接弹在浏览器里（TTY 同时在终端渲染二维码）→ 手机或电脑打开链接、在飞书里确认创建 → 回来点「我已完成确认」→ 插件基于飞书官方「扫码创建应用」能力（OAuth device flow，官方 SDK registerApp）自动创建企业自建应用，并预置好本插件需要的一切：
 
 - 机器人能力
 - 长连接事件：`im.message.receive_v1`、`card.action.trigger`

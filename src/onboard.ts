@@ -192,7 +192,7 @@ export interface RegisterDeps {
  * usable fallback). The SDK itself prints nothing, so this callback owns the
  * entire presentation.
  */
-function defaultShowQr(url: string, expireIn: number): void {
+export function printQrToTerminal(url: string, expireIn: number): void {
   console.log('\n请用「飞书」App（Lark 用户用 Lark App）扫码，并在手机上确认创建：')
   try {
     // qrcode-terminal is CJS-only and ships no type declarations; go through
@@ -225,7 +225,7 @@ function isAbortRejection(error: unknown, signal: AbortSignal | undefined): bool
  */
 export async function registerBotApp(deps: RegisterDeps): Promise<RegisterOutcome> {
   if (deps.signal?.aborted) return { status: 'aborted' }
-  const showQr = deps.showQr ?? defaultShowQr
+  const showQr = deps.showQr ?? printQrToTerminal
   const impl = deps.registerAppImpl ?? (async options => sdkRegisterApp(options as Parameters<typeof sdkRegisterApp>[0]))
   const options = {
     // registerApp expects bare hostnames (baseUrl = `https://${domain}`) — the
@@ -330,6 +330,10 @@ export interface OnboardDeps {
   readonly store: OnboardStoreSeam | undefined
   readonly log: (level: 'info' | 'warn' | 'error', message: string) => void
   readonly signal?: AbortSignal
+  /** Scan-branch: how long to wait for the launcher link (default 60s). */
+  readonly scanUrlWaitMs?: number
+  /** Scan-branch: grace after the confirm click before giving up (default 120s). */
+  readonly scanConfirmGraceMs?: number
   // Test seams.
   readonly verifyImpl?: typeof verifyCredentials
   readonly registerImpl?: typeof registerBotApp
@@ -704,7 +708,92 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
   const runScanBranch = async (): Promise<OnboardReport> => {
     if (aborted()) return ABORTED
     log('info', 'dsh-feishu onboard: starting scan-to-create registration')
-    const registration = await (deps.registerImpl ?? registerBotApp)({ domain: deps.domain, signal })
+    // The launcher link MUST reach the operator through the ask card: on web
+    // profiles the server console is invisible, and a QR printed to stdout
+    // left the command looking stuck forever. The terminal keeps its rendered
+    // QR (TTY surfaces), and the browser gets the same link as the question's
+    // detail — open, confirm in Feishu, then tap "我已完成确认".
+    let resolveUrl: ((url: string) => void) | undefined
+    const urlPromise = new Promise<string>(resolve => { resolveUrl = resolve })
+    const registration = (deps.registerImpl ?? registerBotApp)({
+      domain: deps.domain,
+      signal,
+      showQr: (url, expireIn) => {
+        printQrToTerminal(url, expireIn)
+        resolveUrl?.(url)
+      },
+    })
+    // Every give-up path below abandons this promise — keep rejections handled.
+    registration.catch(() => {})
+    const urlWaitMs = deps.scanUrlWaitMs ?? 60_000
+    const confirmGraceMs = deps.scanConfirmGraceMs ?? 120_000
+    const delayRace = (ms: number): Promise<{ kind: 'timeout' }> =>
+      new Promise(resolve => { const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms); (timer as { unref?: () => void }).unref?.() })
+
+    const arrived = await Promise.race([
+      urlPromise.then(value => ({ kind: 'url' as const, value })),
+      registration.then(value => ({ kind: 'registration' as const, value })),
+      delayRace(urlWaitMs),
+    ])
+    if (aborted()) return ABORTED
+    if (arrived.kind === 'timeout') {
+      log('error', `dsh-feishu onboard: no launcher link within ${urlWaitMs}ms`)
+      return {
+        ok: false,
+        text: '❌ 创建会话未能建立（等待创建链接超时，可能是网络问题）。请重跑 /feishu-onboard 重试。',
+        credentialsWritten: false,
+        operatorsPaired: [],
+        appId: undefined,
+      }
+    }
+    if (arrived.kind === 'registration') return settleScan(await registration)
+
+    const answer = await askOne({
+      id: 'scan-confirm',
+      header: '扫码创建',
+      question: '请打开下面的链接完成应用创建确认（飞书 App 扫码，或手机/电脑浏览器打开后登录确认）；完成后点「我已完成确认」：',
+      detail: arrived.value,
+      options: [{ label: '我已完成确认' }],
+    })
+    if (answer.kind === 'aborted') return ABORTED
+    if (answer.kind === 'guide') {
+      // The card never landed — continuing would risk an orphan app (created
+      // on Feishu but its credentials never captured). Stop and tell the user.
+      return {
+        ok: false,
+        text: [
+          '❓ 确认问询卡未能送达，已中止扫码流程（未创建任何应用）。',
+          '请重跑 /feishu-onboard 重试；或选择「只要手动申请指南」。',
+        ].join('\n'),
+        credentialsWritten: false,
+        operatorsPaired: [],
+        appId: undefined,
+      }
+    }
+    const observed = await Promise.race([
+      registration.then(value => ({ kind: 'registration' as const, value })),
+      delayRace(confirmGraceMs),
+    ])
+    if (aborted()) return ABORTED
+    if (observed.kind === 'timeout') {
+      return {
+        ok: false,
+        text: [
+          '❌ 已点击确认，但未检测到创建完成：',
+          '- 若飞书里还没确认：请完成确认后重跑 /feishu-onboard（选「已有应用」或重新扫码）；',
+          '- 若已确认但本命令拿不到结果：多半是创建页超时，请重跑并重新扫码。',
+        ].join('\n'),
+        credentialsWritten: false,
+        operatorsPaired: [],
+        appId: undefined,
+      }
+    }
+    return settleScan(observed.value)
+  }
+
+  /** Common tail of the scan branch: turn a settled registration into a report. */
+  const settleScan = async (registrationOutcome: Awaited<ReturnType<typeof registerBotApp>>): Promise<OnboardReport> => {
+    const registration = registrationOutcome
     if (registration.status === 'aborted') return ABORTED
     if (registration.status === 'failed') {
       log('error', `dsh-feishu onboard: registration failed: ${registration.detail}`)

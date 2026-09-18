@@ -89,8 +89,10 @@ you:
 - **Bind an app you already have** — see Option B
 - **Manual guide** — see Option C
 
-On the scan path the terminal renders a QR code → scan it with the Feishu app
-and confirm → the plugin creates an enterprise custom app for you via Feishu's
+On the scan path the launcher link arrives as a question card — web: right
+in the browser (TTY also renders a QR code) → open it on your phone or
+desktop, confirm in Feishu, then tap 「我已完成确认」 → the plugin creates an
+enterprise custom app for you via Feishu's
 official scan-to-create flow (OAuth device flow, official SDK `registerApp`),
 pre-provisioned with everything this plugin needs:
 
