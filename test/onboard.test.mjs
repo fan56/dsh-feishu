@@ -461,3 +461,45 @@ test('runOnboard reports aborted when the signal is already aborted', async () =
   assert.equal(report.credentialsWritten, false)
   assert.equal(report.appId, undefined)
 })
+
+// ------------------------------------------------- ask agent-scoped dispatch --
+
+test('runOnboard threads deps.agent into every ask request (web bridge requires it)', async () => {
+  const agent = { id: 'agent-live-root' }
+  const ask = fakeAsk([{ selected: ['只要手动申请指南'] }])
+  const report = await runOnboard(baseDeps({ ask, agent }))
+  assert.equal(report.ok, true)
+  assert.equal(ask.calls.length, 1)
+  assert.equal(ask.calls[0].agent, agent, 'the live root agent must ride the ask request')
+})
+
+test('runOnboard omits the agent from ask requests when none is supplied', async () => {
+  const ask = fakeAsk([{ selected: ['只要手动申请指南'] }])
+  const report = await runOnboard(baseDeps({ ask }))
+  assert.equal(report.ok, true)
+  assert.equal(ask.calls.length, 1)
+  assert.equal(ask.calls[0].agent, undefined)
+})
+
+test('runOnboard retries ask once without the agent when the scoped ask throws', async () => {
+  const agent = { id: 'agent-live-root' }
+  const calls = []
+  const ask = {
+    ask: async request => {
+      calls.push(request)
+      if (request.agent !== undefined) throw new Error('CALLER_NOT_LIVE')
+      return { answers: [{ id: request.questions[0].id, selected: ['只要手动申请指南'], custom: undefined }] }
+    },
+  }
+  const report = await runOnboard(baseDeps({ ask, agent }))
+  assert.equal(report.ok, true)
+  assert.match(report.text, /手动/)
+  assert.deepEqual(calls.map(call => call.agent), [agent, undefined], 'agent-less retry must follow the failed scoped ask')
+})
+
+test('runOnboard degrades to the guide when both agent-scoped and plain ask fail', async () => {
+  const ask = { ask: async () => { throw new Error('NO_PROVIDER') } }
+  const report = await runOnboard(baseDeps({ ask, agent: { id: 'a' } }))
+  assert.equal(report.ok, true)
+  assert.match(report.text, /交互问询不可用/)
+})

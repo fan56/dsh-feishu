@@ -282,8 +282,18 @@ export interface OnboardQuestion {
 }
 
 export interface AskSeam {
-  ask(request: { questions: OnboardQuestion[]; signal?: AbortSignal }):
-    Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
+  ask(request: {
+    questions: OnboardQuestion[]
+    signal?: AbortSignal
+    /**
+     * The calling agent (live runtime root). The host requires it for
+     * agent-scoped dispatch — the ONLY path the web UI's answerer (which
+     * registers per agent scope and receives forwarded scoped waterfalls)
+     * actually sees; an agent-less request dies as NO_PROVIDER there.
+     * Structural: mirrors `AskUserQuestionRequest.agent`.
+     */
+    agent?: unknown
+  }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
 }
 
 /** Credentials service seam — the host handles file locking and chmod. */
@@ -307,6 +317,15 @@ export interface OnboardDeps {
   readonly credentialsSource: CredentialsSource
   /** Host ask service; undefined or throwing degrades to guide-only mode. */
   readonly ask: AskSeam | undefined
+  /**
+   * The invoking command's receiving agent (live runtime root), threaded into
+   * every ask request. With it, asks ride the agent-scoped waterfall and the
+   * web profile's browser answerer receives them (its bridge declines
+   * agent-less requests). An ask that fails WITH the agent is retried once
+   * without it — the fallback path global-only answerers (e.g. this plugin's
+   * own phone cards) can still claim.
+   */
+  readonly agent?: unknown
   readonly credentials: CredentialsWriteSeam | undefined
   readonly store: OnboardStoreSeam | undefined
   readonly log: (level: 'info' | 'warn' | 'error', message: string) => void
@@ -442,19 +461,28 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
   const askOne = async (question: OnboardQuestion): Promise<AskOutcome> => {
     if (deps.ask === undefined) return { kind: 'guide' }
     if (aborted()) return { kind: 'aborted' }
-    try {
-      const result = await deps.ask.ask({ questions: [question], signal })
-      if (aborted()) return { kind: 'aborted' }
-      const answer = result.answers[0]
-      if (answer === undefined) return { kind: 'guide' }
-      const label = answer.selected[0] ?? ''
-      // Free-text answers ride `custom`; option answers ride `selected`.
-      const text = (answer.custom ?? '').trim() || label
-      return { kind: 'answer', label, text }
-    } catch {
-      // NO_PROVIDER and friends — degrade to guide mode.
-      return { kind: 'guide' }
+    // Agent-scoped first (the web answerer only sees scoped requests), then a
+    // single agent-less retry for global-only answerer setups (validation
+    // rejected the agent, or the surface registers at the root).
+    const attempts: ReadonlyArray<{ agent?: unknown }> = deps.agent !== undefined
+      ? [{ agent: deps.agent }, {}]
+      : [{}]
+    for (const attempt of attempts) {
+      try {
+        const result = await deps.ask.ask({ questions: [question], signal, ...attempt })
+        if (aborted()) return { kind: 'aborted' }
+        const answer = result.answers[0]
+        if (answer === undefined) return { kind: 'guide' }
+        const label = answer.selected[0] ?? ''
+        // Free-text answers ride `custom`; option answers ride `selected`.
+        const text = (answer.custom ?? '').trim() || label
+        return { kind: 'answer', label, text }
+      } catch {
+        // NO_PROVIDER / CALLER_NOT_LIVE and friends — try the next shape,
+        // then degrade to guide mode.
+      }
     }
+    return { kind: 'guide' }
   }
   const safeVerify = async (creds: CredentialsPair): Promise<VerifyOutcome> => {
     try {

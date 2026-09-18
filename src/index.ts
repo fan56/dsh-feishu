@@ -247,6 +247,15 @@ export function stripFrontmatter(raw: string): string {
 interface CommandInvocationLike {
   readonly rawInput: string
   readonly signal: AbortSignal
+  /**
+   * The exact receiving agent (live runtime root) the host executes this
+   * command against. Carried into the ask requests so they dispatch on the
+   * AGENT-scoped waterfall — the only surface the web bridge forwards to the
+   * browser (a plain agent-less ask is declined by the bridge and dies as
+   * NO_PROVIDER, since the web answerer registers per agent scope). Optional:
+   * host invocations always supply it, test mocks may not.
+   */
+  readonly agent?: unknown
 }
 
 /** dsh-commands CommandResult (structural). */
@@ -454,6 +463,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       existingCredentials,
       credentialsSource,
       ask: askSeamOf(ctx),
+      // The invoking session's live root agent: ask requests carry it so the
+      // host dispatches them on the agent-scoped waterfall — how the web UI
+      // (browser answerer, per-agent scope) actually receives them.
+      agent: invocation.agent !== null && typeof invocation.agent === 'object'
+        ? invocation.agent
+        : undefined,
       credentials: await activeCredentials(ctx),
       store,
       log: (level, message) => ctx.logger[level]('dsh-feishu[onboard]: %s', message),

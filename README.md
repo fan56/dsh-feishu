@@ -79,9 +79,11 @@ three options below mirror the three paths the command offers.
 
 #### Option A — `/feishu-onboard` (recommended, ≈2 min, no Feishu console needed)
 
-Run `/feishu-onboard` in the desktop TUI. It asks a handful of questions one
-by one (no ask provider configured? it degrades to a plain printed guide) and
-picks the path with you:
+Run `/feishu-onboard` — in the TUI or the web UI. It asks a handful of
+questions one by one through dsh's native ask prompt (web: the question card
+pops right in the browser, scoped to your open session; no ask provider or no
+live session? it degrades to a plain printed guide) and picks the path with
+you:
 
 - **Scan to create the app** — zero Feishu console work
 - **Bind an app you already have** — see Option B

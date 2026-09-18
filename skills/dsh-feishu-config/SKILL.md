@@ -74,7 +74,10 @@ agent 向导兜底细调**。agent 替用户干活时，能跑命令就优先引
    - 验证通过后可选填 open_id 加入管理员名单。
 3. **只要手动指南**：命令直接输出下面路径二的 6 步操作指南。
 
-桌面无 ask 提供方（如 headless 环境）时，命令自动降级为纯指南输出。
+问询走 dsh 宿主原生 ask（`ctx.userQuestions`，锚定命令所在会话的 live root
+agent）：**web 端问询卡直接弹在浏览器里**（agent-scoped waterfall 是 web 桥接
+唯一转发的形态，无 agent 的 ask 在 web 端必死 NO_PROVIDER）；TUI 弹桌面面板；
+无 ask 提供方（如 headless）或没有活跃会话时，命令自动降级为纯指南输出。
 
 注意事项：
 
