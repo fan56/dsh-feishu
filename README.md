@@ -47,6 +47,14 @@ https://github.com/user-attachments/assets/c0d7092f-deda-4443-b75a-2bc93bd30d86
 
 ### Step 1: Install the plugin into your profile (≈2 min)
 
+**From npm (recommended):**
+
+```bash
+dsh plugin --profile <your-profile> add @aiwayds/dsh-feishu
+```
+
+**Or from a git checkout** (when hacking on the plugin itself):
+
 ```bash
 git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu
 cd ~/github/dsh-feishu && npm install && npm run link-closure

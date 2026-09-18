@@ -56,6 +56,14 @@ https://github.com/user-attachments/assets/c0d7092f-deda-4443-b75a-2bc93bd30d86
 
 ### 第一步：安装插件到 profile（≈2 分钟）
 
+**从 npm 安装（推荐）：**
+
+```bash
+dsh plugin --profile <你的 profile> add @aiwayds/dsh-feishu
+```
+
+**或从 git 检出安装**（需要改插件源码时）：
+
 ```bash
 git clone git@github.com:fan56/dsh-feishu.git ~/github/dsh-feishu
 cd ~/github/dsh-feishu && npm install && npm run link-closure
