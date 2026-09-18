@@ -727,14 +727,39 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
     registration.catch(() => {})
     const urlWaitMs = deps.scanUrlWaitMs ?? 60_000
     const confirmGraceMs = deps.scanConfirmGraceMs ?? 120_000
-    const delayRace = (ms: number): Promise<{ kind: 'timeout' }> =>
-      new Promise(resolve => { const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms); (timer as { unref?: () => void }).unref?.() })
+    // Race `promise` against a plain timeout. The timer is REFERENCED (never
+    // unref'd): when it is the only pending work an unref'd timer empties the
+    // event loop and the process exits mid-await — which on CI's Node killed
+    // the test runner with "Promise resolution is still pending". The clear
+    // on settle keeps a losing timer from outliving the await.
+    const raceWithTimeout = async <T>(promise: Promise<T>, ms: number): Promise<{ kind: 'settled'; value: T } | { kind: 'timeout' }> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timeout = new Promise<{ kind: 'timeout' }>(resolve => {
+        timer = setTimeout(() => resolve({ kind: 'timeout' }), ms)
+      })
+      try {
+        return await Promise.race([
+          promise.then(value => ({ kind: 'settled' as const, value })),
+          timeout,
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
 
-    const arrived = await Promise.race([
+    const arrived = await raceWithTimeout(Promise.any([
       urlPromise.then(value => ({ kind: 'url' as const, value })),
-      registration.then(value => ({ kind: 'registration' as const, value })),
-      delayRace(urlWaitMs),
-    ])
+      // Map a rejected registration (user denied on the phone, SDK error)
+      // into a settled failure so it surfaces as 扫码创建失败 instead of
+      // hanging Promise.any until the URL timeout.
+      registration.then(
+        value => ({ kind: 'registration' as const, value }),
+        (error): { kind: 'registration'; value: RegisterOutcome } => ({
+          kind: 'registration',
+          value: { status: 'failed', detail: describeError(error) },
+        }),
+      ),
+    ]), urlWaitMs)
     if (aborted()) return ABORTED
     if (arrived.kind === 'timeout') {
       log('error', `dsh-feishu onboard: no launcher link within ${urlWaitMs}ms`)
@@ -746,13 +771,14 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
         appId: undefined,
       }
     }
-    if (arrived.kind === 'registration') return settleScan(await registration)
+    const first = arrived.value
+    if (first.kind === 'registration') return settleScan(first.value)
 
     const answer = await askOne({
       id: 'scan-confirm',
       header: '扫码创建',
       question: '请打开下面的链接完成应用创建确认（飞书 App 扫码，或手机/电脑浏览器打开后登录确认）；完成后点「我已完成确认」：',
-      detail: arrived.value,
+      detail: first.value,
       options: [{ label: '我已完成确认' }],
     })
     if (answer.kind === 'aborted') return ABORTED
@@ -770,10 +796,13 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
         appId: undefined,
       }
     }
-    const observed = await Promise.race([
-      registration.then(value => ({ kind: 'registration' as const, value })),
-      delayRace(confirmGraceMs),
-    ])
+    const observed = await raceWithTimeout(
+      registration.then(
+        (value): RegisterOutcome => value,
+        (error): RegisterOutcome => ({ status: 'failed', detail: describeError(error) }),
+      ),
+      confirmGraceMs,
+    )
     if (aborted()) return ABORTED
     if (observed.kind === 'timeout') {
       return {
