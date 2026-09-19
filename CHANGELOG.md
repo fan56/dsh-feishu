@@ -3,6 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.1] - 2026-09-19
+
+### Fixed
+- **Default credential ref names are now valid for the host credentials service.** The host grammar (`REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`) rejects hyphenated names — and while `/feishu-onboard` could *write* the v0.13.0 defaults (`dsh-feishu-app-id` / `dsh-feishu-app-secret`) at runtime, the next dsh boot died parsing the credentials document (`plugin tree failed to load`). Defaults are now `DSH_FEISHU_APP_ID` / `DSH_FEISHU_APP_SECRET`; configured ref names outside the host grammar are swapped for the legal defaults instead of being written. **Migration for 0.13.0 users:** rename the two keys in `~/.dsh/.credentials.yaml` to `DSH_FEISHU_APP_ID:` / `DSH_FEISHU_APP_SECRET:` (values unchanged) — the previous spelling prevents dsh from booting.
+
 ## [0.13.0] - 2026-09-18
 
 ### Added

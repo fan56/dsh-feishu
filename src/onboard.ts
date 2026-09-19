@@ -352,8 +352,8 @@ export interface OnboardReport {
   readonly appId: string | undefined
 }
 
-const APP_ID_REF = 'dsh-feishu-app-id'
-const APP_SECRET_REF = 'dsh-feishu-app-secret'
+const APP_ID_REF = 'DSH_FEISHU_APP_ID'
+const APP_SECRET_REF = 'DSH_FEISHU_APP_SECRET'
 const CREDENTIALS_FILE = '~/.dsh/.credentials.yaml'
 const ACTIVATION_NOTE = '无需重启：正在尝试在本进程直接激活机器人…'
 const GUIDE_UNAVAILABLE_PREFIX = '交互问询不可用，以下为手动指南。'

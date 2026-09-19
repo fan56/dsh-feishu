@@ -29,9 +29,9 @@ export interface Config {
    * sources: credentials service ref or DSH_FEISHU_APP_SECRET.
    */
   appSecret?: string
-  /** Credentials-service ref for the app id (default `dsh-feishu-app-id`). */
+  /** Credentials-service ref for the app id (default `DSH_FEISHU_APP_ID`). */
   appIdRef?: string
-  /** Credentials-service ref for the app secret (default `dsh-feishu-app-secret`). */
+  /** Credentials-service ref for the app secret (default `DSH_FEISHU_APP_SECRET`). */
   appSecretRef?: string
   /** Status-card update beat in ms (default 5000 — pseudo-streaming; clamped to [5000, 600000]). */
   statusIntervalMs?: number
@@ -78,8 +78,8 @@ export const Config = z.object({
   operators: z.array(z.string()).default([]),
   appId: z.string().default(''),
   appSecret: z.string().default(''),
-  appIdRef: z.string().default('dsh-feishu-app-id'),
-  appSecretRef: z.string().default('dsh-feishu-app-secret'),
+  appIdRef: z.string().default('DSH_FEISHU_APP_ID'),
+  appSecretRef: z.string().default('DSH_FEISHU_APP_SECRET'),
   statusIntervalMs: z.number().min(5000).max(600000).step(1).default(5000),
   bodySegmentChars: z.number().min(500).max(30000).step(1).default(3500),
   resumeListStyle: z.union([z.const('auto'), z.const('table'), z.const('list')]).default('auto'),
@@ -160,6 +160,18 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
   const envOperatorList = envOperators === undefined || envOperators.trim() === ''
     ? []
     : envOperators.split(',').map(id => id.trim()).filter(id => id !== '')
+  // Ref names must be valid environment-variable-style identifiers — the host
+  // credentials service rejects anything else (dsh-credentials REF_PATTERN),
+  // and a ref written under an invalid name bricks the NEXT dsh boot with a
+  // parse error. The v0.13.0 defaults carried hyphens (`dsh-feishu-app-id`);
+  // any configured ref outside the grammar is swapped for the legal default.
+  const REF_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+  const appIdRef = config?.appIdRef !== undefined && REF_NAME.test(config.appIdRef)
+    ? config.appIdRef
+    : 'DSH_FEISHU_APP_ID'
+  const appSecretRef = config?.appSecretRef !== undefined && REF_NAME.test(config.appSecretRef)
+    ? config.appSecretRef
+    : 'DSH_FEISHU_APP_SECRET'
   return Object.freeze({
     mode: config?.mode === 'off' ? 'off' : 'on',
     domain,
@@ -168,8 +180,8 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     appSecret: configAppSecret && configAppSecret !== ''
       ? configAppSecret
       : envString(env, 'DSH_FEISHU_APP_SECRET'),
-    appIdRef: config?.appIdRef ?? 'dsh-feishu-app-id',
-    appSecretRef: config?.appSecretRef ?? 'dsh-feishu-app-secret',
+    appIdRef,
+    appSecretRef,
     statusIntervalMs,
     bodySegmentChars,
     resumeListStyle,

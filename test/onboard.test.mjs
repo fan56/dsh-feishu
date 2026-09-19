@@ -312,8 +312,8 @@ test('runOnboard existing-app happy path writes both refs, pairs the open_id, le
   assert.equal(report.credentialsWritten, true)
   assert.equal(report.appId, 'cli_myapp')
   assert.deepEqual([...credentials.values.entries()], [
-    ['dsh-feishu-app-id', 'cli_myapp'],
-    ['dsh-feishu-app-secret', 'sec_myapp'],
+    ['DSH_FEISHU_APP_ID', 'cli_myapp'],
+    ['DSH_FEISHU_APP_SECRET', 'sec_myapp'],
   ])
   assert.deepEqual(store.ops, ['ou_me1'])
   assert.deepEqual(report.operatorsPaired, ['ou_me1'])
@@ -359,8 +359,8 @@ test('runOnboard scan happy path writes credentials, pairs the scan user, report
   assert.equal(report.ok, true)
   assert.equal(registerDeps.domain, 'feishu')
   assert.deepEqual([...credentials.values.entries()], [
-    ['dsh-feishu-app-id', 'cli_new'],
-    ['dsh-feishu-app-secret', 'sec_new'],
+    ['DSH_FEISHU_APP_ID', 'cli_new'],
+    ['DSH_FEISHU_APP_SECRET', 'sec_new'],
   ])
   assert.deepEqual(store.ops, ['ou_scan'])
   assert.deepEqual(report.operatorsPaired, ['ou_scan'])
@@ -466,8 +466,8 @@ test('runOnboard no-bot branch still saves credentials and shows the fix list', 
   }))
   assert.equal(report.ok, true)
   assert.equal(report.credentialsWritten, true)
-  assert.equal(credentials.values.get('dsh-feishu-app-id'), 'cli_nb')
-  assert.equal(credentials.values.get('dsh-feishu-app-secret'), 'sec_nb')
+  assert.equal(credentials.values.get('DSH_FEISHU_APP_ID'), 'cli_nb')
+  assert.equal(credentials.values.get('DSH_FEISHU_APP_SECRET'), 'sec_nb')
   assert.deepEqual(report.operatorsPaired, [])
   assert.match(report.text, /修复/)
   assert.match(report.text, /「机器人」/)
@@ -489,8 +489,8 @@ test('runOnboard falls back to YAML instructions when the credentials service is
   assert.equal(report.ok, true)
   assert.equal(report.credentialsWritten, false)
   assert.match(report.text, /\.credentials\.yaml/)
-  assert.match(report.text, /dsh-feishu-app-id: cli_sm/)
-  assert.match(report.text, /dsh-feishu-app-secret: sec_sm/)
+  assert.match(report.text, /DSH_FEISHU_APP_ID: cli_sm/)
+  assert.match(report.text, /DSH_FEISHU_APP_SECRET: sec_sm/)
   assert.match(report.text, /轮换/, 'the exposed-secret rotation warning is mandatory here')
 })
 
@@ -515,7 +515,7 @@ test('runOnboard retries once after bad credentials and then succeeds', async ()
   }))
   assert.equal(report.ok, true)
   assert.deepEqual(verifyCalls, ['sec_bad', 'sec_good'])
-  assert.equal(credentials.values.get('dsh-feishu-app-secret'), 'sec_good')
+  assert.equal(credentials.values.get('DSH_FEISHU_APP_SECRET'), 'sec_good')
 })
 
 test('runOnboard falls back to the guide when the ask call throws (NO_PROVIDER)', async () => {

@@ -108,7 +108,7 @@ cd ~/.dsh/profiles/<你的 profile> && pnpm install
   `im:message.group_at_msg:readonly`、`im:message.resources:readonly`、
   `im:message.reactions:write`、`im:chat:readonly`
 
-随后一步到位：`app_id`/`app_secret` 自动写入 dsh 凭据服务（refs：`dsh-feishu-app-id` / `dsh-feishu-app-secret`），扫码用户自动设为管理员（operators），插件在**同一进程内热激活**——不用重启 dsh。扫码、私聊机器人，配置就此完成。
+随后一步到位：`app_id`/`app_secret` 自动写入 dsh 凭据服务（refs：`DSH_FEISHU_APP_ID` / `DSH_FEISHU_APP_SECRET`），扫码用户自动设为管理员（operators），插件在**同一进程内热激活**——不用重启 dsh。扫码、私聊机器人，配置就此完成。
 
 > 小字：预置权限依赖平台灰度。灰度未覆盖时，命令会自动验证并用「权限预选深链」引导补开。要让**其他同事**使用机器人，还需到开放平台「版本管理与发布」创建版本并发布（自己用不需要）。
 
@@ -121,8 +121,8 @@ cd ~/.dsh/profiles/<你的 profile> && pnpm install
 
 ```yaml
 # ~/.dsh/.credentials.yaml （权限 600；改完重启 dsh 生效）
-dsh-feishu-app-id: cli_xxxxxxxxxx
-dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
+DSH_FEISHU_APP_ID: cli_xxxxxxxxxx
+DSH_FEISHU_APP_SECRET: xxxxxxxxxxxxxxxx
 ```
 
 只有白名单内的飞书用户能使用 bot，其余人私聊完全隐身：

@@ -31,14 +31,14 @@ description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置�
 
 ### 凭据三种途径
 
-推荐把凭据存进 dsh credentials 服务（refs 默认名即 `dsh-feishu-app-id` /
-`dsh-feishu-app-secret`，无需额外配置）；`/feishu-onboard` 扫码路径会自动写入，
+推荐把凭据存进 dsh credentials 服务（refs 默认名即 `DSH_FEISHU_APP_ID` /
+`DSH_FEISHU_APP_SECRET`，无需额外配置）；`/feishu-onboard` 扫码路径会自动写入，
 手工路径见下：
 
 ```yaml
 # ~/.dsh/.credentials.yaml （chmod 600；改完重启 dsh 生效）
-dsh-feishu-app-id: cli_xxxxxxxxxx
-dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
+DSH_FEISHU_APP_ID: cli_xxxxxxxxxx
+DSH_FEISHU_APP_SECRET: xxxxxxxxxxxxxxxx
 ```
 
 运行时解析优先级：**patch config 明文 `appId`/`appSecret` > `DSH_FEISHU_APP_ID` /
@@ -67,7 +67,7 @@ agent 向导兜底细调**。agent 替用户干活时，能跑命令就优先引
      `im:message.reactions:write`、`im:chat:readonly`。
 
    创建后返回 app_id/app_secret 与扫码用户 open_id：插件自动把凭据写进
-   credentials 服务（refs 默认 `dsh-feishu-app-id`/`dsh-feishu-app-secret`）、把扫码
+   credentials 服务（refs 默认 `DSH_FEISHU_APP_ID`/`DSH_FEISHU_APP_SECRET`）、把扫码
    用户写进管理员名单，然后**同进程直接热激活，无需重启 dsh**。
 2. **已有应用**：用户提供 App ID / App Secret（只写本地凭据文件，不进会话日志）→
    插件调 API 验证（tenant_access_token + `bot/v3/info`）：
@@ -135,8 +135,8 @@ settings.yaml 的 `dsh-feishu:` 段。
 | `operators` | `[]` | open_id 白名单；空 + 凭据已配 = 配对模式（见上节），无凭据则保持休眠 |
 | `appId` | `""` | 明文 App ID（逃生口，优先用 refs/env） |
 | `appSecret` | `""` | 明文 App Secret（逃生口，仅限本地测试） |
-| `appIdRef` | `"dsh-feishu-app-id"` | credentials 服务里 App ID 的 ref 名 |
-| `appSecretRef` | `"dsh-feishu-app-secret"` | credentials 服务里 App Secret 的 ref 名 |
+| `appIdRef` | `"DSH_FEISHU_APP_ID"` | credentials 服务里 App ID 的 ref 名 |
+| `appSecretRef` | `"DSH_FEISHU_APP_SECRET"` | credentials 服务里 App Secret 的 ref 名 |
 | `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式）；超出 [5000, 600000] 报错停用 |
 | `bodySegmentChars` | `3500` | 长正文分段阈值，兼作嵌入上限——落定轮次的正文不超过它就直接嵌进该轮 Round 卡（`💬 Round 回复` 段），不再单独发消息；超出 [500, 30000] 报错停用 |
 | `resumeListStyle` | `"auto"` | `/resume` 列表渲染：`auto`（表格卡，失败回退 markdown 列表）/ `table` / `list` |

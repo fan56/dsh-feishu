@@ -111,7 +111,7 @@ pre-provisioned with everything this plugin needs:
   `im:message.reactions:write`, `im:chat:readonly`
 
 Then it finishes the job: `app_id`/`app_secret` are written into the dsh
-credentials service (refs `dsh-feishu-app-id` / `dsh-feishu-app-secret`), the
+credentials service (refs `DSH_FEISHU_APP_ID` / `DSH_FEISHU_APP_SECRET`), the
 scanning user is added as an operator, and the plugin **hot-activates in the
 same process** — no dsh restart. Scan, then DM the bot; that's the whole
 setup.
@@ -136,8 +136,8 @@ Two ways to hand the credentials to the plugin:
 
 ```yaml
 # ~/.dsh/.credentials.yaml (chmod 600; restart dsh after changing)
-dsh-feishu-app-id: cli_xxxxxxxxxx
-dsh-feishu-app-secret: xxxxxxxxxxxxxxxx
+DSH_FEISHU_APP_ID: cli_xxxxxxxxxx
+DSH_FEISHU_APP_SECRET: xxxxxxxxxxxxxxxx
 ```
 
 Only allowlisted Feishu users can use the bot — everyone else is invisible:

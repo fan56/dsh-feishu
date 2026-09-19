@@ -9,8 +9,8 @@ test('defaults apply for an empty config', () => {
   assert.deepEqual(resolved.operators, [])
   assert.equal(resolved.statusIntervalMs, 5000)
   assert.equal(resolved.bodySegmentChars, 3500)
-  assert.equal(resolved.appIdRef, 'dsh-feishu-app-id')
-  assert.equal(resolved.appSecretRef, 'dsh-feishu-app-secret')
+  assert.equal(resolved.appIdRef, 'DSH_FEISHU_APP_ID')
+  assert.equal(resolved.appSecretRef, 'DSH_FEISHU_APP_SECRET')
   assert.equal(resolved.appId, undefined)
   assert.equal(resolved.appSecret, undefined)
 })
@@ -125,4 +125,18 @@ test('DSH_FEISHU_OPERATORS absent/blank leaves the config list untouched', () =>
   assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: '' }).operators, [])
   assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: '   ' }).operators, [])
   assert.deepEqual(resolveConfig({ operators: ['ou_a'] }, {}).operators, ['ou_a'])
+})
+
+test('resolveConfig keeps legal custom ref names', () => {
+  const resolved = resolveConfig({ appIdRef: 'MY_CUSTOM_REF', appSecretRef: 'MY_OTHER_REF' })
+  assert.equal(resolved.appIdRef, 'MY_CUSTOM_REF')
+  assert.equal(resolved.appSecretRef, 'MY_OTHER_REF')
+})
+
+test('resolveConfig swaps invalid ref names (host credentials grammar) for the defaults', () => {
+  // Host REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/ — hyphenated names brick the
+  // next boot when the credentials service parses the document.
+  const resolved = resolveConfig({ appIdRef: 'dsh-feishu-app-id', appSecretRef: 'dsh-feishu-app-secret' })
+  assert.equal(resolved.appIdRef, 'DSH_FEISHU_APP_ID')
+  assert.equal(resolved.appSecretRef, 'DSH_FEISHU_APP_SECRET')
 })
