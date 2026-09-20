@@ -312,6 +312,11 @@ npm test         # build + node --test (230+ pure-logic unit tests)
 
 ## Boundaries
 
+- dsh 0.1.6 compatibility (upstream B-21): resuming a session saved under
+  dsh 0.1.5-rc.2 whose subagent completion notices carried reasoning content
+  fails to serialize the first model request (host-side data issue, not a
+  plugin defect). When `/resume` of an rc.2-era session fails this way, run
+  `/new` and start a fresh session instead.
 - Single-writer guarantee (host-native since dsh 0.1.5): cold-resuming a
   session another process is driving is refused by the host's kernel write
   lease (`SessionAlreadyOwnedError`) instead of silently forking the log into

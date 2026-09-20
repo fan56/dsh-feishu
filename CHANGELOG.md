@@ -3,6 +3,14 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Compatibility note (README): `/resume` of a session saved under dsh 0.1.5-rc.2
+  with reasoning content in subagent completion notices fails to serialize the
+  first model request on a dsh 0.1.6 host (upstream B-21, host-side data issue) —
+  when a remote resume fails this way, start a new session (`/new`).
+
 ## [0.13.1] - 2026-09-19
 
 ### Fixed
