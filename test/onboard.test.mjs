@@ -68,6 +68,25 @@ function fakeCredentials() {
   }
 }
 
+/**
+ * runScanBranch hard-wires printQrToTerminal into its showQr wrapper
+ * (lib/onboard.js has no injection point), so the scan-branch fakes cannot stub
+ * the QR render. Its bulk console output shares the child stdout stream the
+ * node:test runner frames its IPC events on; under CI pipe backpressure the
+ * writes interleave and the parent's readHeader() throws "Unable to deserialize
+ * cloned data". The QR render is synchronous, so muting console for the call
+ * keeps it off the runner stream without touching production behavior.
+ */
+function withQuietConsole(fn) {
+  const log = console.log
+  console.log = () => {}
+  try {
+    return fn()
+  } finally {
+    console.log = log
+  }
+}
+
 function baseDeps(overrides = {}) {
   return {
     domain: 'feishu',
@@ -352,7 +371,7 @@ test('runOnboard scan happy path writes credentials, pairs the scan user, report
     verifyImpl: async () => ({ status: 'ok', botName: '新机器人', botOpenId: 'ou_newbot' }),
     registerImpl: async deps => {
       registerDeps = deps
-      deps.showQr('https://launcher.example/scan-1', 600)
+      withQuietConsole(() => deps.showQr('https://launcher.example/scan-1', 600))
       return { status: 'ok', appId: 'cli_new', appSecret: 'sec_new', operatorOpenId: 'ou_scan' }
     },
   }))
@@ -388,7 +407,7 @@ test('runOnboard scan branch presents the launcher link through the ask card', a
     store: fakeStore(),
     verifyImpl: async () => ({ status: 'ok', botName: 'b', botOpenId: undefined }),
     registerImpl: async deps => {
-      deps.showQr('https://launcher.example/web-card', 600)
+      withQuietConsole(() => deps.showQr('https://launcher.example/web-card', 600))
       return { status: 'ok', appId: 'cli_link', appSecret: 'sec_link', operatorOpenId: undefined }
     },
   }))
@@ -419,7 +438,7 @@ test('runOnboard scan branch gives up when confirmation is clicked but registrat
     ]),
     scanConfirmGraceMs: 20,
     registerImpl: async deps => {
-      deps.showQr('https://launcher.example/stuck', 600)
+      withQuietConsole(() => deps.showQr('https://launcher.example/stuck', 600))
       return new Promise(() => {}) // user "confirmed" but the SDK never observes it
     },
   }))
@@ -440,7 +459,7 @@ test('runOnboard scan branch stops cleanly when the confirm card cannot be deliv
       },
     },
     registerImpl: async deps => {
-      deps.showQr('https://launcher.example/orphan', 600)
+      withQuietConsole(() => deps.showQr('https://launcher.example/orphan', 600))
       return { status: 'ok', appId: 'cli_x', appSecret: 'sec_x', operatorOpenId: undefined }
     },
   }))
