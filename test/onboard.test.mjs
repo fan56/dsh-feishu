@@ -68,25 +68,6 @@ function fakeCredentials() {
   }
 }
 
-/**
- * runScanBranch hard-wires printQrToTerminal into its showQr wrapper
- * (lib/onboard.js has no injection point), so the scan-branch fakes cannot stub
- * the QR render. Its bulk console output shares the child stdout stream the
- * node:test runner frames its IPC events on; under CI pipe backpressure the
- * writes interleave and the parent's readHeader() throws "Unable to deserialize
- * cloned data". The QR render is synchronous, so muting console for the call
- * keeps it off the runner stream without touching production behavior.
- */
-function withQuietConsole(fn) {
-  const log = console.log
-  console.log = () => {}
-  try {
-    return fn()
-  } finally {
-    console.log = log
-  }
-}
-
 function baseDeps(overrides = {}) {
   return {
     domain: 'feishu',
@@ -360,6 +341,7 @@ test('runOnboard manual-guide option returns the guide without writing anything'
 test('runOnboard scan happy path writes credentials, pairs the scan user, reports the bot name', async () => {
   const credentials = fakeCredentials()
   const store = fakeStore()
+  const qrShown = []
   let registerDeps
   const report = await runOnboard(baseDeps({
     ask: fakeAsk([
@@ -368,15 +350,17 @@ test('runOnboard scan happy path writes credentials, pairs the scan user, report
     ]),
     credentials,
     store,
+    showQr: (url, expireIn) => { qrShown.push([url, expireIn]) },
     verifyImpl: async () => ({ status: 'ok', botName: '新机器人', botOpenId: 'ou_newbot' }),
     registerImpl: async deps => {
       registerDeps = deps
-      withQuietConsole(() => deps.showQr('https://launcher.example/scan-1', 600))
+      deps.showQr('https://launcher.example/scan-1', 600)
       return { status: 'ok', appId: 'cli_new', appSecret: 'sec_new', operatorOpenId: 'ou_scan' }
     },
   }))
   assert.equal(report.ok, true)
   assert.equal(registerDeps.domain, 'feishu')
+  assert.deepEqual(qrShown, [['https://launcher.example/scan-1', 600]], 'scan branch must route QR presentation through the injected showQr, not the terminal render')
   assert.deepEqual([...credentials.values.entries()], [
     ['DSH_FEISHU_APP_ID', 'cli_new'],
     ['DSH_FEISHU_APP_SECRET', 'sec_new'],
@@ -405,9 +389,10 @@ test('runOnboard scan branch presents the launcher link through the ask card', a
     ask,
     credentials: fakeCredentials(),
     store: fakeStore(),
+    showQr: () => {},
     verifyImpl: async () => ({ status: 'ok', botName: 'b', botOpenId: undefined }),
     registerImpl: async deps => {
-      withQuietConsole(() => deps.showQr('https://launcher.example/web-card', 600))
+      deps.showQr('https://launcher.example/web-card', 600)
       return { status: 'ok', appId: 'cli_link', appSecret: 'sec_link', operatorOpenId: undefined }
     },
   }))
@@ -437,8 +422,9 @@ test('runOnboard scan branch gives up when confirmation is clicked but registrat
       { selected: ['我已完成确认'] },
     ]),
     scanConfirmGraceMs: 20,
+    showQr: () => {},
     registerImpl: async deps => {
-      withQuietConsole(() => deps.showQr('https://launcher.example/stuck', 600))
+      deps.showQr('https://launcher.example/stuck', 600)
       return new Promise(() => {}) // user "confirmed" but the SDK never observes it
     },
   }))
@@ -458,8 +444,9 @@ test('runOnboard scan branch stops cleanly when the confirm card cannot be deliv
         throw new Error('NO_PROVIDER')
       },
     },
+    showQr: () => {},
     registerImpl: async deps => {
-      withQuietConsole(() => deps.showQr('https://launcher.example/orphan', 600))
+      deps.showQr('https://launcher.example/orphan', 600)
       return { status: 'ok', appId: 'cli_x', appSecret: 'sec_x', operatorOpenId: undefined }
     },
   }))

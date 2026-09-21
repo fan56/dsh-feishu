@@ -334,6 +334,8 @@ export interface OnboardDeps {
   readonly scanUrlWaitMs?: number
   /** Scan-branch: grace after the confirm click before giving up (default 120s). */
   readonly scanConfirmGraceMs?: number
+  /** Scan-branch: QR presentation (defaults to terminal rendering). */
+  readonly showQr?: (url: string, expireIn: number) => void
   // Test seams.
   readonly verifyImpl?: typeof verifyCredentials
   readonly registerImpl?: typeof registerBotApp
@@ -715,11 +717,16 @@ export async function runOnboard(deps: OnboardDeps): Promise<OnboardReport> {
     // detail — open, confirm in Feishu, then tap "我已完成确认".
     let resolveUrl: ((url: string) => void) | undefined
     const urlPromise = new Promise<string>(resolve => { resolveUrl = resolve })
+    // Presentation seam: an injected showQr (tests no-op it so its bulk
+    // console writes never ride the node:test runner stream) replaces the
+    // terminal render; resolving the launcher link is presentation-independent
+    // and always runs below.
+    const printQr = deps.showQr ?? printQrToTerminal
     const registration = (deps.registerImpl ?? registerBotApp)({
       domain: deps.domain,
       signal,
       showQr: (url, expireIn) => {
-        printQrToTerminal(url, expireIn)
+        printQr(url, expireIn)
         resolveUrl?.(url)
       },
     })
