@@ -1084,8 +1084,11 @@ function modelBot(llm, selectionRef, bound = 'fresh-1') {
   return { bot, sends, patches, state }
 }
 
+// ASCII provider names on purpose: handleModel sorts names via localeCompare,
+// and mixed-script names (CJK + Latin) reorder under zh_CN collation — ASCII
+// keeps the hardcoded order assertion below deterministic in every locale.
 const modelProviders = [
-  { id: 'zhipu', name: '智谱' },
+  { id: 'zhipu', name: 'Zhipu' },
   { id: 'openrouter', name: 'OpenRouter' },
 ]
 
