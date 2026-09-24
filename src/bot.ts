@@ -363,6 +363,13 @@ export class FeishuBot {
       },
       buildSnapshot: () => {
         const agent = this.binder.getAgent()
+        // 0.1.7 audit: `session.snapshotEvents()` is SOFT-deprecated (runtime
+        // intact). The official replacements — message projections or a
+        // persistence cold-read — both rebuild a rolling conversation window
+        // from state we do not track today, so this single call site stays
+        // until the dedicated projection migration (the same backlog the
+        // tui-pi / subagent-registry / topics-memory call sites share; new
+        // code must not add snapshotEvents).
         return agent === undefined
           ? []
           : buildBtwSnapshot(agent.session.snapshotEvents(), this.config.btwContextMessages)
@@ -1196,8 +1203,13 @@ export class FeishuBot {
       // Registry unavailable — the dropdown is omitted, cwd falls back.
     }
     try {
+      // dsh 0.1.7 reimplements the presets service as agent-preset-registry
+      // under the SAME context key with a compatible in-process surface —
+      // remoteExportList() still answers the roster (id/name/isDefault),
+      // minus the removed `trust` dimension (user-authored rows no longer
+      // distinguishable, so the label shows the shipped roster only).
       const presets = this.ctx.get('agentPresets') as
-        | { remoteExportList?: () => Promise<{ presets: Array<{ id: string; name?: string; isDefault?: boolean; broken?: boolean; trust?: string }> }> }
+        | { remoteExportList?: () => Promise<{ presets: Array<{ id: string; name?: string; isDefault?: boolean; broken?: boolean }> }> }
         | undefined
       if (presets?.remoteExportList !== undefined) {
         const roster = await presets.remoteExportList()
@@ -1205,9 +1217,7 @@ export class FeishuBot {
           .filter(preset => preset.broken !== true)
           .map(preset => ({
             value: preset.id,
-            // User-authored presets are marked so the picker reads as
-            // "shipped roster + your own" — same roster the host picker shows.
-            label: `${preset.name ?? preset.id}${preset.isDefault === true ? ' ★' : ''}${preset.trust === 'user' ? ' · 自定义' : ''}`,
+            label: `${preset.name ?? preset.id}${preset.isDefault === true ? ' ★' : ''}`,
           }))
         if (choices.length > 0) {
           spec.presets = choices

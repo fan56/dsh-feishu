@@ -1,18 +1,29 @@
 /**
  * Persisted bot state (bound session, think-display preference, last chat,
- * pairing admins). Preferred backend: the dsh settings service, under this
- * plugin's own `dsh-feishu` namespace (schema-validated, survives restarts,
- * visible in dsh's settings surfaces). Degrades to an in-memory copy when no
- * settings provider is mounted — the bot still works, it just re-binds after a
- * restart.
+ * pairing admins) — a small JSON file in the dsh home
+ * (`<dsh home>/dsh-feishu-state.json`).
+ *
+ * Why not the settings service (the pre-0.1.7 backend): dsh 0.1.7 replaced
+ * the settings registry with plugin `static Config` projections where ONLY
+ * user-editable `.volatile()` fields are writable at runtime — machine state
+ * (pickers, cursors, pairing claims) is exactly what must NOT be volatile
+ * (it would surface on the settings page and rewrite the profile patch on
+ * every bot event). So the state moved to its own file: same in-memory
+ * mirror + write-through semantics as before, zero settings dependency.
+ *
+ * Upgrade path: a fresh install (no state file yet) absorbs the 0.1.5-era
+ * remnants from `<dsh home>/settings.yaml.imported` (or `settings.yaml`)
+ * — the host renames the old document on first 0.1.7 boot — by reading the
+ * `dsh-feishu:` section with a deliberately conservative flat-scalar parser
+ * (anything nested, folded across lines or otherwise unexpected is skipped;
+ * the decoders below fail closed). Without it, pairing claims would not
+ * survive the upgrade and the bot would re-open pairing mode.
  */
 
+import { readFile, rename, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
-// Type-only: alpha.3 removed the settingsNamespace() runtime helper this file
-// used to import; the namespace is a plain literal below (register()
-// brand-checks it at the type level and parse-checks it at runtime).
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import type { ResumeRow } from './resume-table.ts'
 
 /** A persisted /resume selection awaiting its index reply. */
@@ -63,24 +74,68 @@ const DEFAULT_STATE: BotState = {
   pairedOperators: [],
 }
 
+/** On-disk shape: native JSON values (versioned for future migrations). */
+const STATE_FILE_VERSION = 1
+
+/** The state file, relative to the resolved dsh home. */
+export const STATE_FILENAME = 'dsh-feishu-state.json'
+
+/** The old settings document the 0.1.5 host kept bot state in. */
+const LEGACY_SETTINGS_FILENAME = 'settings.yaml'
+
+/** What the host renames that document to on first 0.1.7 boot. */
+const LEGACY_IMPORTED_FILENAME = 'settings.yaml.imported'
+
+/** Constructor options — tests inject an explicit `path` to stay off the real home. */
+export interface StateStoreOptions {
+  /** Full state-file path. Default: `<dsh home>/dsh-feishu-state.json`. */
+  path?: string
+}
+
+/**
+ * Resolve the dsh home the same way the host does, without importing it:
+ * the profile context's home when mounted (structural read — absent in
+ * tests/minimal hosts), else `$DSH_HOME`, else `~/.dsh`.
+ */
+export function resolveDshHome(ctx?: Context): string {
+  const fromProfile = (ctx as { profileContext?: { home?: unknown } } | undefined)?.profileContext?.home
+  if (typeof fromProfile === 'string' && fromProfile !== '') return fromProfile
+  const fromEnv = process.env.DSH_HOME
+  if (fromEnv !== undefined && fromEnv.trim() !== '') {
+    return fromEnv === '~' ? homedir()
+      : fromEnv.startsWith('~/') ? join(homedir(), fromEnv.slice(2))
+      : fromEnv
+  }
+  return join(homedir(), '.dsh')
+}
+
 /**
  * Decode a persisted picker payload. Defensive: the stored JSON is only as
  * trustworthy as the last writer — anything malformed, empty or missing its
- * expiry degrades to "no picker" rather than surfacing garbage rows.
+ * expiry degrades to "no picker" rather than surfacing garbage rows. Accepts
+ * the native object shape and the pre-0.1.7 JSON-string encoding alike.
  */
 function decodePicker(raw: unknown): StoredPicker | undefined {
-  if (typeof raw !== 'string' || raw === '') return undefined
+  const parsed = typeof raw === 'string' && raw !== ''
+    ? tryParseJson(raw)
+    : raw !== null && typeof raw === 'object' ? raw : undefined
+  if (parsed === undefined || typeof parsed !== 'object') return undefined
+  const record = parsed as { id?: unknown; rows?: unknown; expiresAt?: unknown }
+  if (typeof record.id !== 'string' || record.id === '' || !Array.isArray(record.rows) || typeof record.expiresAt !== 'number') {
+    return undefined
+  }
+  const rows = record.rows.filter((row): row is ResumeRow =>
+    row !== null && typeof row === 'object'
+    && typeof (row as ResumeRow).index === 'number'
+    && typeof (row as ResumeRow).sessionId === 'string')
+  if (rows.length === 0) return undefined
+  return { id: record.id, rows, expiresAt: record.expiresAt }
+}
+
+/** tryParseJson: undefined on any failure — callers never see thrown syntax errors. */
+function tryParseJson(text: string): unknown {
   try {
-    const parsed = JSON.parse(raw) as { id?: unknown; rows?: unknown; expiresAt?: unknown }
-    if (typeof parsed.id !== 'string' || parsed.id === '' || !Array.isArray(parsed.rows) || typeof parsed.expiresAt !== 'number') {
-      return undefined
-    }
-    const rows = parsed.rows.filter((row): row is ResumeRow =>
-      row !== null && typeof row === 'object'
-      && typeof (row as ResumeRow).index === 'number'
-      && typeof (row as ResumeRow).sessionId === 'string')
-    if (rows.length === 0) return undefined
-    return { id: parsed.id, rows, expiresAt: parsed.expiresAt }
+    return JSON.parse(text) as unknown
   } catch {
     return undefined
   }
@@ -88,22 +143,21 @@ function decodePicker(raw: unknown): StoredPicker | undefined {
 
 /** Decode a persisted phone-selected default model (effort optional). */
 function decodePhoneModel(raw: unknown): { provider: string; model: string; reasoningEffort?: string } | undefined {
-  if (typeof raw !== 'string' || raw === '') return undefined
-  try {
-    const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
-    if (typeof parsed.provider === 'string' && parsed.provider !== '' && typeof parsed.model === 'string' && parsed.model !== '') {
-      return {
-        provider: parsed.provider,
-        model: parsed.model,
-        ...(typeof parsed.reasoningEffort === 'string' && parsed.reasoningEffort !== ''
-          ? { reasoningEffort: parsed.reasoningEffort }
-          : {}),
-      }
+  const parsed = typeof raw === 'string' && raw !== ''
+    ? tryParseJson(raw)
+    : raw !== null && typeof raw === 'object' ? raw : undefined
+  if (parsed === undefined || typeof parsed !== 'object') return undefined
+  const record = parsed as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+  if (typeof record.provider === 'string' && record.provider !== '' && typeof record.model === 'string' && record.model !== '') {
+    return {
+      provider: record.provider,
+      model: record.model,
+      ...(typeof record.reasoningEffort === 'string' && record.reasoningEffort !== ''
+        ? { reasoningEffort: record.reasoningEffort }
+        : {}),
     }
-    return undefined
-  } catch {
-    return undefined
   }
+  return undefined
 }
 
 /**
@@ -112,29 +166,12 @@ function decodePhoneModel(raw: unknown): { provider: string; model: string; reas
  * list or [] rather than surfacing garbage into the authorization gate.
  */
 function decodePairedOperators(raw: unknown): readonly string[] {
-  if (typeof raw !== 'string' || raw === '') return []
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
-  } catch {
-    return []
-  }
+  const parsed = typeof raw === 'string' && raw !== ''
+    ? tryParseJson(raw)
+    : Array.isArray(raw) ? raw : undefined
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
 }
-
-// dsh-settings 0.1.2-alpha.3 removed the runtime settingsNamespace() helper:
-// a plain literal is the supported spelling (same adaptation as
-// dsh-model-sync / dsh-cron / dsh-vault).
-const STATE_NAMESPACE = 'dsh-feishu'
-
-const STATE_SCHEMA = z.object({
-  boundSessionId: z.string().default(''),
-  displayThink: z.boolean().default(true),
-  lastChatId: z.string().default(''),
-  picker: z.string().default(''),
-  phoneModel: z.string().default(''),
-  pairedOperators: z.string().default(''),
-}) as unknown as z<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string; pairedOperators: string }>
 
 function fromSection(section: unknown): BotState {
   const value = (section ?? {}) as Partial<Record<keyof BotState, unknown>>
@@ -153,64 +190,120 @@ function fromSection(section: unknown): BotState {
   }
 }
 
-/**
- * Settings-backed state store. Construction registers the namespace through
- * `ctx.inject(['settings'])` (no-op without the service); `ready()` resolves
- * once registration settled so early reads see the persisted values.
- */
-export class StateStore {
-  private readonly memory: BotState = { ...DEFAULT_STATE }
-  private scope: SettingsScope<{ boundSessionId: string; displayThink: boolean; lastChatId: string; picker: string; phoneModel: string; pairedOperators: string }> | undefined
-  private readonly registration: Promise<void>
+// ------------------------------------------------------------- legacy import --
 
-  constructor(ctx: Context) {
-    this.registration = new Promise<void>(resolve => {
-      let settled = false
-      const finish = () => {
-        if (!settled) {
-          settled = true
-          resolve()
+/**
+ * Decode one YAML scalar of the old settings document — the shapes the 0.1.5
+ * writer actually produced for this section (plain strings, booleans, and
+ * single-quoted JSON-string payloads). A value that opens a quote it does not
+ * close on the same line is a FOLDED long scalar (the yaml package wraps at
+ * 80 columns): unparseable here by design, so the key is skipped and the
+ * decoder's own defaults apply — never a half-read value.
+ */
+function decodeLegacyScalar(raw: string): unknown {
+  const value = raw.trim()
+  if (value === '' || value === 'null' || value === '~') return undefined
+  if (value === 'true') return true
+  if (value === 'false') return false
+  const quote = value[0]
+  const closed = value.length >= 2 && value[value.length - 1] === quote
+  if (quote === "'" || quote === '"') {
+    if (!closed || value.length < 2) return undefined // folded / unterminated — skip
+    if (quote === '"') return tryParseJson(value) // JSON-compatible escapes; else undefined
+    return value.slice(1, -1).replace(/''/g, "'")
+  }
+  const hash = value.indexOf(' #')
+  return hash >= 0 ? value.slice(0, hash).trim() : value
+}
+
+/**
+ * Extract the top-level `dsh-feishu:` section of the old settings document.
+ * Conservative on purpose: flat `key: value` lines only — nested maps,
+ * lists, comments and blank-line runs never decode (the section this plugin
+ * ever wrote WAS flat). undefined = no section found.
+ */
+export function legacyFeishuSection(text: string): Record<string, unknown> | undefined {
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => /^dsh-feishu:\s*(#.*)?$/.test(line))
+  if (start < 0) return undefined
+  const section: Record<string, unknown> = {}
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() === '') continue
+    if (/^\S/.test(line)) break // the next top-level key ends the section
+    if (/^\s*#/.test(line)) continue
+    const match = /^\s+([A-Za-z][A-Za-z0-9_-]*):[ \t]?(.*)$/.exec(line)
+    if (match === null) continue // nested shape we do not model — skip the line
+    section[match[1]] = decodeLegacyScalar(match[2])
+  }
+  return section
+}
+
+/**
+ * Best-effort read of the 0.1.5 state remnants: the imported (preferred —
+ * the host renamed it there) then the live old settings document. Any
+ * failure (absent file, unreadable, garbage) resolves undefined — a bot
+ * upgrade must never be blocked by a cleanup nicety.
+ */
+async function readLegacyState(home: string): Promise<BotState | undefined> {
+  for (const name of [LEGACY_IMPORTED_FILENAME, LEGACY_SETTINGS_FILENAME]) {
+    let text: string
+    try {
+      text = await readFile(join(home, name), 'utf8')
+    } catch {
+      continue
+    }
+    try {
+      const section = legacyFeishuSection(text)
+      if (section !== undefined) {
+        const state = fromSection(section)
+        // Only a section that decoded to SOMETHING counts; an empty shell
+        // (e.g. the folded-everything edge) leaves defaults untouched.
+        if (state.pairedOperators.length > 0 || state.boundSessionId !== undefined
+          || state.lastChatId !== undefined || state.picker !== undefined
+          || state.phoneModel !== undefined || state.displayThink === false) {
+          return state
         }
       }
-      ctx.inject(['settings'], sctx => {
-        try {
-          if (!sctx.settings.describe().some(d => d.ns === STATE_NAMESPACE)) {
-            this.scope = sctx.settings.register(STATE_NAMESPACE, STATE_SCHEMA, {
-              base: { boundSessionId: '', displayThink: true, lastChatId: '', picker: '', phoneModel: '', pairedOperators: '' },
-              applies: 'live',
-            })
-          }
-          // Already-registered (plugin reload / second mount): the provider
-          // hands a scope only to the registrant, so this instance degrades
-          // to the in-memory copy — binding survives, persistence does not.
-        } catch {
-          // Registration failed — degrade to memory.
-        }
-        finish()
-        return () => {
-          this.scope = undefined
-        }
-      })
-      // The injection rides the settings fiber; do not block state reads
-      // forever when it never fires (no settings service in this profile).
-      setTimeout(finish, 2000).unref?.()
-    })
+    } catch {
+      // Unreadable legacy document — treat as absent.
+    }
+  }
+  return undefined
+}
+
+// -------------------------------------------------------------------- store --
+
+/**
+ * File-backed state store. Construction starts the load (state file first,
+ * legacy settings remnants on a fresh install); `ready()` resolves once the
+ * load settled so early reads see the persisted values. Every mutation
+ * mirrors into memory immediately and writes the file through a serialized
+ * tmp+rename queue — persistence failures degrade to the in-memory copy
+ * (the bot still works, it just re-binds after a restart), exactly the old
+ * no-settings-service behavior.
+ */
+export class StateStore {
+  private memory: BotState = { ...DEFAULT_STATE }
+  private readonly path: string
+  /** The directory the state file (and the legacy document) live in. */
+  private readonly home: string
+  private readonly loading: Promise<void>
+  private writes: Promise<void> = Promise.resolve()
+
+  constructor(ctx: Context, options: StateStoreOptions = {}) {
+    this.path = options.path ?? join(resolveDshHome(ctx), STATE_FILENAME)
+    this.home = options.path !== undefined ? dirname(options.path) : resolveDshHome(ctx)
+    this.loading = this.load()
   }
 
-  /** Wait (bounded) for the settings registration so first reads see disk. */
+  /** Wait for the initial load (a file read — settles on its own) so first reads see disk. */
   async ready(): Promise<void> {
-    await this.registration
+    await this.loading
   }
 
   /** Current snapshot. */
   get(): BotState {
-    if (this.scope !== undefined) {
-      try {
-        return fromSection(this.scope.get())
-      } catch {
-        return { ...this.memory }
-      }
-    }
     return { ...this.memory }
   }
 
@@ -218,19 +311,7 @@ export class StateStore {
   async update(patch: Partial<BotState>): Promise<void> {
     const next = { ...this.get(), ...patch }
     Object.assign(this.memory, next)
-    if (this.scope === undefined) return
-    try {
-      await this.scope.update({
-        boundSessionId: next.boundSessionId ?? '',
-        displayThink: next.displayThink,
-        lastChatId: next.lastChatId ?? '',
-        picker: next.picker === undefined ? '' : JSON.stringify(next.picker),
-        phoneModel: next.phoneModel === undefined ? '' : JSON.stringify(next.phoneModel),
-        pairedOperators: JSON.stringify([...next.pairedOperators]),
-      })
-    } catch {
-      // Persistence failed — the in-memory copy still serves this run.
-    }
+    await this.persist()
   }
 
   /**
@@ -248,5 +329,54 @@ export class StateStore {
     const current = this.getPairedOperators()
     if (current.includes(value)) return
     await this.update({ pairedOperators: [...current, value] })
+  }
+
+  /** Initial load: the state file, else one absorption pass over the legacy document. */
+  private async load(): Promise<void> {
+    let text: string | undefined
+    try {
+      text = await readFile(this.path, 'utf8')
+    } catch {
+      text = undefined
+    }
+    if (text !== undefined) {
+      try {
+        this.memory = fromSection(tryParseJson(text))
+      } catch {
+        // Corrupt state file — defaults apply; the next write replaces it.
+      }
+      return
+    }
+    const legacy = await readLegacyState(this.home)
+    if (legacy !== undefined) {
+      this.memory = { ...this.memory, ...legacy }
+    }
+  }
+
+  /** Serialized write-through: one tmp+rename at a time, failures swallowed. */
+  private persist(): Promise<void> {
+    const task = this.writes.then(() => this.writeNow())
+    this.writes = task.then(() => undefined, () => undefined)
+    return task
+  }
+
+  private async writeNow(): Promise<void> {
+    const value = this.memory
+    const payload = `${JSON.stringify({
+      version: STATE_FILE_VERSION,
+      boundSessionId: value.boundSessionId ?? null,
+      displayThink: value.displayThink,
+      lastChatId: value.lastChatId ?? null,
+      picker: value.picker ?? null,
+      phoneModel: value.phoneModel ?? null,
+      pairedOperators: [...value.pairedOperators],
+    }, null, 2)}\n`
+    const tmp = `${this.path}.tmp`
+    try {
+      await writeFile(tmp, payload, 'utf8')
+      await rename(tmp, this.path)
+    } catch {
+      // Persistence failed — the in-memory copy still serves this run.
+    }
   }
 }

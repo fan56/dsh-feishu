@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { mkdtemp } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { FeishuBot } from '../lib/bot.js'
 import {
@@ -112,8 +116,9 @@ test('pairingActionContextOf reads nested context ids with root fallbacks', () =
 
 // ------------------------------------------------- StateStore.pairedOperators --
 
-test('pairedOperators roundtrip in memory mode with dedup-merge', async () => {
-  const store = new StateStore({ inject() {} }) // no settings service → memory
+test('pairedOperators roundtrip on the file store with dedup-merge', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  const store = new StateStore({ inject() {} }, { path: join(dir, 'dsh-feishu-state.json') })
   assert.deepEqual(store.getPairedOperators(), [])
   await store.update({ pairedOperators: ['ou_a'] })
   assert.deepEqual(store.getPairedOperators(), ['ou_a'])
@@ -124,43 +129,102 @@ test('pairedOperators roundtrip in memory mode with dedup-merge', async () => {
   assert.deepEqual(store.getPairedOperators(), ['ou_a', 'ou_b', 'ou_c'])
 })
 
-test('pairedOperators decode defensively: invalid JSON → [], junk entries filtered', async () => {
+test('pairedOperators decode defensively: invalid JSON → [], junk entries filtered (legacy strings still read)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
   for (const raw of ['{not json', JSON.stringify({ nope: 1 }), '5', 'null']) {
-    const { store } = settingsBackedStore({ pairedOperators: raw })
+    // The 0.1.5 settings.yaml era encoded the list as a JSON STRING; the
+    // decoders must keep accepting that shape (and fail closed on garbage).
+    await writeFile(join(dir, 'state.json'), JSON.stringify({ version: 1, pairedOperators: raw }))
+    const store = new StateStore({ inject() {} }, { path: join(dir, 'state.json') })
     await store.ready()
     assert.deepEqual(store.getPairedOperators(), [], `raw ${JSON.stringify(raw)} must decode to []`)
   }
-  const { store } = settingsBackedStore({ pairedOperators: JSON.stringify(['ou_a', '', 42, null, 'ou_b']) })
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ version: 1, pairedOperators: JSON.stringify(['ou_a', '', 42, null, 'ou_b']) }))
+  const store = new StateStore({ inject() {} }, { path: join(dir, 'state.json') })
   await store.ready()
   assert.deepEqual(store.getPairedOperators(), ['ou_a', 'ou_b'])
 })
 
-test('pairedOperators persist as a JSON string (settings.yaml shape)', async () => {
-  const { store, updates } = settingsBackedStore({})
+test('pairedOperators persist as a native JSON array in the state file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  const path = join(dir, 'dsh-feishu-state.json')
+  const store = new StateStore({ inject() {} }, { path })
   await store.ready()
   await store.addPairedOperator('ou_x')
-  assert.equal(updates.length, 1)
-  assert.equal(updates[0].pairedOperators, JSON.stringify(['ou_x']))
+  const onDisk = JSON.parse(await readFile(path, 'utf8'))
+  assert.deepEqual(onDisk.pairedOperators, ['ou_x'])
 })
 
-/** A StateStore over a fake settings service whose section starts at `section`. */
-function settingsBackedStore(section) {
-  const updates = []
-  const scope = {
-    get: () => section,
-    update: async (patch) => {
-      updates.push(patch)
-      section = { ...section, ...patch }
-    },
-  }
-  const ctx = {
-    inject(_services, cb) {
-      cb({ settings: { describe: () => [], register: () => scope } })
-      return () => {}
-    },
-  }
-  return { store: new StateStore(ctx), updates }
-}
+test('state survives a restart: a fresh store instance reads the previous writes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  const path = join(dir, 'dsh-feishu-state.json')
+  const first = new StateStore({ inject() {} }, { path })
+  await first.ready()
+  await first.update({ boundSessionId: 'sess-1', picker: { id: 'p1', rows: [{ index: 1, sessionId: 's' }], expiresAt: 99 } })
+  const second = new StateStore({ inject() {} }, { path })
+  await second.ready()
+  assert.equal(second.get().boundSessionId, 'sess-1')
+  assert.deepEqual(second.get().picker, { id: 'p1', rows: [{ index: 1, sessionId: 's' }], expiresAt: 99 })
+  assert.equal(second.get().displayThink, true) // absent means default (on)
+})
+
+test('a corrupt state file degrades to defaults, then the next write replaces it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  const path = join(dir, 'dsh-feishu-state.json')
+  await writeFile(path, '{not json at all')
+  const store = new StateStore({ inject() {} }, { path })
+  await store.ready()
+  assert.deepEqual(store.getPairedOperators(), [])
+  await store.update({ displayThink: false })
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).displayThink, false)
+})
+
+test('legacy 0.1.5 settings.yaml.imported dsh-feishu section is absorbed on first run', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  await writeFile(join(dir, 'settings.yaml.imported'), [
+    'other-plugin:',
+    '  someKey: value',
+    'dsh-feishu:',
+    '  boundSessionId: sess-legacy',
+    '  displayThink: false',
+    "  picker: '{\"id\":\"p\",\"rows\":[],\"expiresAt\":1}'", // jsonl-era JSON-string payload
+    "  pairedOperators: '[\"ou_legacy\", \"ou_2\"]'",
+    'another-plugin:',
+    '  key: 1',
+    ].join('\n'))
+  const store = new StateStore({ inject() {} }, { path: join(dir, 'dsh-feishu-state.json') })
+  await store.ready()
+  assert.equal(store.get().boundSessionId, 'sess-legacy')
+  assert.equal(store.get().displayThink, false)
+  assert.deepEqual(store.getPairedOperators(), ['ou_legacy', 'ou_2'])
+})
+
+test('a folded (line-wrapped) legacy scalar is skipped, not half-read; plain settings.yaml is a fallback source', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  // A pairedOperators payload long enough that the yaml writer FOLDS it at 80
+  // columns decodes to NOTHING (the opening line's quote never closes → the
+  // key is skipped; continuation lines match no `key:` shape), while the
+  // short plain scalars on the SAME section still land.
+  await writeFile(join(dir, 'settings.yaml'), [
+    'dsh-feishu:',
+    '  boundSessionId: sess-fold',
+    "  pairedOperators: '[\"ou_xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    `    ${' '.repeat(17)}yyy\"]'`,
+    ].join('\n'))
+  const store = new StateStore({ inject() {} }, { path: join(dir, 'dsh-feishu-state.json') })
+  await store.ready()
+  assert.equal(store.get().boundSessionId, 'sess-fold')
+  assert.deepEqual(store.getPairedOperators(), []) // folded JSON string → skipped, not truncated
+})
+
+test('no legacy document anywhere → plain defaults (fresh install)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-store-'))
+  const store = new StateStore({ inject() {} }, { path: join(dir, 'dsh-feishu-state.json') })
+  await store.ready()
+  assert.equal(store.get().boundSessionId, undefined)
+  assert.equal(store.get().displayThink, true)
+  assert.deepEqual(store.getPairedOperators(), [])
+})
 
 // ------------------------------------------------------ bot-level pairing flow --
 

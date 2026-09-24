@@ -151,7 +151,7 @@ Only allowlisted Feishu users can use the bot — everyone else is invisible:
 ```
 
 The effective allowlist is a union: `operators` here ∪
-`dsh-feishu.pairedOperators` in `~/.dsh/settings.yaml` (written by pairing
+`pairedOperators` in the dsh-home `dsh-feishu-state.json` state file (written by pairing
 mode and `/feishu-onboard`) ∪ the `DSH_FEISHU_OPERATORS` env var
 (comma-separated open_ids — handy for quick local tests without editing the
 patch).
@@ -197,7 +197,7 @@ text to dispatch work.
 valid credentials and no operators it stays connected in **pairing mode** —
 anyone who DMs it receives an **admin pairing** confirmation card, and one tap
 claims admin (first come, first served; persisted to
-`dsh-feishu.pairedOperators` in `~/.dsh/settings.yaml`, effective immediately,
+`pairedOperators` in the dsh-home `dsh-feishu-state.json` state file, effective immediately,
 no restart). Group chats never trigger it, and once the list has an admin,
 everyone outside it is invisible again. On a shared tenant that means the
 first colleague to DM the bot becomes its admin — if that's not what you
@@ -227,7 +227,7 @@ The host reconciles the profile automatically: the `dsh.profile.bundles` entry i
 
 What stays on disk (kept on purpose — deleting data is destructive; a reinstall reuses it):
 
-- `~/.dsh/settings.yaml` `dsh-feishu:` section — bound session id, picker style, phone-model preference, and `pairedOperators` (the paired-admin list written by pairing mode / `/feishu-onboard`). Delete the section to reset the pairing — admins included.
+- The dsh-home `dsh-feishu-state.json` state file — bound session id, picker style, phone-model preference, and `pairedOperators` (the paired-admin list written by pairing mode / `/feishu-onboard`). Delete the file to reset the pairing — admins included.
 - Repair artifacts inside session dirs: `*.corrupt-bak*` is the only pre-repair copy of a damaged session log — keep it; `*.repaired.*` is the rewritten log the repair produced.
 - `/tmp/dsh-feishu-bot.lock` can linger after a SIGKILL; the stale-pid check steals it on the next start, so no manual step is needed.
 
@@ -268,7 +268,7 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 
 | key | default | description |
 | --- | --- | --- |
-| `operators` | `[]` | open_id allowlist — the effective list is the union of this, `dsh-feishu.pairedOperators` (settings.yaml) and `DSH_FEISHU_OPERATORS` (comma-separated open_ids); an empty list boots the bot into pairing mode |
+| `operators` | `[]` | open_id allowlist — the effective list is the union of this, `pairedOperators` (the dsh-feishu-state.json state file) and `DSH_FEISHU_OPERATORS` (comma-separated open_ids); an empty list boots the bot into pairing mode |
 | `mode` | `"on"` | `"off"` disables the plugin entirely |
 | `domain` | `"feishu"` | `"feishu"` (CN) or `"lark"` (international) |
 | `statusIntervalMs` | `5000` | round-card refresh beat (pseudo-streaming), range [5000, 600000] |
@@ -289,7 +289,7 @@ prerequisites (Feishu app, credentials), collects the operators allowlist and
 the `backgroundPush` mode via `ask_user_question`, writes the `config:` block
 above for you, and walks the phone-side pairing. It also documents the full
 config key table, the `DSH_FEISHU_*` env vars, and the runtime-state
-(`settings.yaml` `dsh-feishu:` section) vs config distinction.
+(the dsh-home `dsh-feishu-state.json` state file) vs config distinction.
 
 ## 🧯 Troubleshooting
 

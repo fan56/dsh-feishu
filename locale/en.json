@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-feishu",
+    "description": "Drive an existing dsh session from Feishu/Lark: round cards, interactive resume, ask-user cards, steering via an outbound-only WebSocket bot."
+  }
+}

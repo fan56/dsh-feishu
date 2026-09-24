@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-feishu",
+    "description": "从飞书/Lark 驾驭既有 dsh 会话：回合卡片、交互式恢复、提问卡片与转向，纯出站 WebSocket bot。"
+  }
+}

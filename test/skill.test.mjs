@@ -110,7 +110,7 @@ test('SKILL.md body keeps the onboarding key-fact anchors', async () => {
   const markdown = await readFile(new URL('../skills/dsh-feishu-config/SKILL.md', import.meta.url), 'utf8')
   const body = stripFrontmatter(markdown)
   assert.match(body, /\/feishu-onboard/, 'desktop one-shot onboarding command')
-  assert.match(body, /pairedOperators/, 'runtime pairing admin list in settings.yaml')
+  assert.match(body, /pairedOperators/, 'runtime pairing admin list in the state file')
   assert.match(body, /card\.action\.trigger/, 'card callback subscription')
   assert.match(body, /长连接/, 'WebSocket long-connection event subscription mode')
   assert.match(body, /版本管理与发布/, 'version publishing step (most common blocker)')

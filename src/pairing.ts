@@ -142,7 +142,7 @@ export function buildPairingRejectedCard(): Schema2Card {
 }
 
 /** The user-visible note sent right after a successful claim. */
-export const PAIRING_PERSIST_NOTE = '配置已持久化（settings.yaml dsh-feishu.pairedOperators），立即生效，无需重启。'
+export const PAIRING_PERSIST_NOTE = '配置已持久化（dsh 主目录 dsh-feishu-state.json），立即生效，无需重启。'
 
 /**
  * Recognize OUR pairing button in a `card.action.trigger` payload; undefined

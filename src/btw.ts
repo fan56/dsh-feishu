@@ -156,13 +156,23 @@ export function buildBtwSnapshot(events: readonly BtwSnapshotEvent[], limit: num
 /**
  * The side-call message list: the snapshot in order, then the question as a
  * plugin-sourced user message (it is not a real user turn of any session).
+ * dsh 0.1.7 removed the shared catch-all `plugin` source kind — every
+ * producer declares its OWN kind through the merge-extensible
+ * `MessageSourceMap` (the same move `dsh-schedule`/`dsh-tool-jobs` make);
+ * consumers that switch on `kind` fall through unknown values by contract.
  */
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-feishu': { kind: 'dsh-feishu' }
+  }
+}
+
 export function buildBtwMessages(snapshot: readonly Message[], question: string): Message[] {
   return [
     ...snapshot,
     createUserMessage({
       content: [{ type: 'text', text: question }],
-      source: { kind: 'plugin', plugin: 'dsh-feishu:btw' },
+      source: { kind: 'dsh-feishu' },
     }),
   ]
 }

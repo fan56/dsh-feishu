@@ -1,6 +1,6 @@
 ---
 name: dsh-feishu-config
-description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置指南。凡涉及飞书/Lark 接入、机器人申请/创建、手机端控制 dsh、卡片交互、后台推送，或要配置 feishu 时先读本指南：首次配置优先引导桌面 TUI 运行 /feishu-onboard（扫码一键创建应用并自动写入凭据与 operators）；手动路径见指南：cordis.patch.yml 挂载块 config: 段 12 键（mode/domain/operators/appId/appSecret/凭据 refs/statusIntervalMs/bodySegmentChars/resumeListStyle/btwContextMessages/backgroundPush）、DSH_FEISHU_* 环境变量、ask_user_question 配置向导、operators 空=配对模式（首个私聊者点卡成为管理员）、settings.yaml dsh-feishu: 段是运行态非配置。触发词：飞书、feishu、lark、机器人、operators、配对、绑定、backgroundPush。"
+description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置指南。凡涉及飞书/Lark 接入、机器人申请/创建、手机端控制 dsh、卡片交互、后台推送，或要配置 feishu 时先读本指南：首次配置优先引导桌面 TUI 运行 /feishu-onboard（扫码一键创建应用并自动写入凭据与 operators）；手动路径见指南：cordis.patch.yml 挂载块 config: 段 12 键（mode/domain/operators/appId/appSecret/凭据 refs/statusIntervalMs/bodySegmentChars/resumeListStyle/btwContextMessages/backgroundPush）、DSH_FEISHU_* 环境变量、ask_user_question 配置向导、operators 空=配对模式（首个私聊者点卡成为管理员）、dsh-feishu-state.json 是运行态非配置。触发词：飞书、feishu、lark、机器人、operators、配对、绑定、backgroundPush。"
 ---
 
 # dsh-feishu 使用指南（飞书 / Lark 手机端驾驶 dsh）
@@ -10,7 +10,7 @@ description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置�
 > 飞书（feishu.cn）与 Lark（国际版）双域支持。首次配置优先走桌面命令
 > `/feishu-onboard`（扫码一键创建应用并自动写入凭据与管理员）。
 
-## 配置入口（不是 settings.yaml）
+## 配置入口（不是运行态文件）
 
 功能配置只认 **`~/.dsh/cordis.patch.yml` 挂载块的 `config:` 段**（未知键会直接报错、
 插件停用，宁报错不静默）：
@@ -25,9 +25,10 @@ description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置�
     # backgroundPush: cron     # off | cron | all
 ```
 
-**`~/.dsh/settings.yaml` 的 `dsh-feishu:` 段不是配置**——那是 StateStore 运行态
+**dsh 主目录的 `dsh-feishu-state.json` 不是配置**——那是 StateStore 运行态
 （绑定的会话 id、手机端模型/思考档位偏好、picker 状态，以及配对产生的
-`pairedOperators` 管理员名单）。想重置手机配对就删掉这一段，不要往这里写功能配置。
+`pairedOperators` 管理员名单）。想重置手机配对就删掉这个文件，不要往这里写功能配置；
+也不要把运行态写进插件设置页（0.1.7 起可热更字段仅限用户配置，机器状态一律不进 settings）。
 
 ### 凭据三种途径
 
@@ -114,17 +115,17 @@ agent 按步指导用户在控制台操作：
 
 ## 配对模式（operators 为空时的激活态）
 
-凭据已配但 operators（`config.operators` ∪ settings.yaml `dsh-feishu.pairedOperators`）
+凭据已配但 operators（`config.operators` ∪ `dsh-feishu-state.json` 的 `pairedOperators`）
 为空时，bot 不再完全休眠——会连接并以**配对模式**运行：
 
 - 任何人**私聊** bot 会收到「管理员配对」确认卡，点按钮即成为管理员；
-- **先到先得**：第一个点卡的人拿走管理员名额，写入 settings.yaml
-  `dsh-feishu.pairedOperators`，立即生效、无需重启；
+- **先到先得**：第一个点卡的人拿走管理员名额，写入 dsh 主目录
+  `dsh-feishu-state.json` 的 `pairedOperators`，立即生效、无需重启；
 - 群聊永不触发配对；已配满后，非名单成员依旧完全隐身。
 
 安全提示：配对窗口期内任何给 bot 发私聊的人都可能**抢先**成为管理员（先到先得）——
 请在可信环境完成配对，配好后核对 `pairedOperators` 是否符合预期；要重新配对就删掉
-settings.yaml 的 `dsh-feishu:` 段。
+dsh 主目录的 `dsh-feishu-state.json`。
 
 ## config 全键表
 

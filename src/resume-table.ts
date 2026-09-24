@@ -187,6 +187,10 @@ export async function loadSessionLastUpdates(root: string = sessionLogRoot()): P
  * Whether a persisted header is a resumable ROOT session — the exact filter
  * dsh-tui-pi applies (value test on delegationDepth; presence test would drop
  * every jsonl-restored header which materialises `delegationDepth: 0`).
+ * Semantics note for dsh 0.1.7: the host dropped the subagent depth default
+ * from 8 to 1, which changes nothing here — the test reads the header's OWN
+ * effective `delegationDepth` (roots are 0 / absent at ANY max depth), never
+ * a hardcoded default.
  */
 export function isResumableSessionHeader(header: SessionHeader): boolean {
   return header.origin !== 'subagent' && (header.delegationDepth ?? 0) === 0

@@ -5,11 +5,19 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **dsh 0.1.7-rc.1 compatibility.** Dependency floor raised to `@deepseek-ai/dsh-skill >=0.1.7-rc.1` (devDeps pinned `0.1.7-rc.1`).
+  - **Bot state moved out of settings.** The pre-0.1.7 backend (`settings.register('dsh-feishu', …)`) no longer exists in dsh 0.1.7 — the settings system only projects user-editable plugin `Config` fields, and machine state (pickers, cursors, pairing claims) must never be volatile. `StateStore` now persists to a small JSON file in the dsh home, `<home>/dsh-feishu-state.json` (`$DSH_HOME` / profile home aware), with the same in-memory mirror + write-through semantics and atomic tmp+rename writes. **Upgrade path:** on first run with no state file, the 0.1.5-era remnants are absorbed from `settings.yaml.imported` (or `settings.yaml`) — the host renames the old document on first 0.1.7 boot — via a deliberately conservative flat-scalar reader (folded/long JSON payloads degrade to defaults rather than half-read: a very long `pairedOperators` list may need a one-time re-pair). Pairing/reset instructions and README/skill wording now point at the state file.
+  - **`/btw` question messages carry a first-class producer source.** dsh 0.1.7 removed the shared catch-all `plugin` source kind; the plugin now declares its own `'dsh-feishu'` entry in the merge-extensible `MessageSourceMap` (the same pattern the host's `dsh-schedule`/`dsh-tool-jobs` use).
+  - **/new preset picker label.** The roster's removed `trust` dimension no longer renders (0.1.7 agent-preset-registry dropped it); the picker shows the shipped roster with the default marker only.
+  - No preset-mechanics changes required: the binder's `agentPresets` resolve/mount seams, the `agentPreset` session-projection read, and the `meta.agentPreset` create path are byte-compatible with the 0.1.7 registry (regression-tested: /new card preset pick, cold-resume preset rejoin, and the bare-degradation paths all green).
+
 ### Added
 - Compatibility note (README): `/resume` of a session saved under dsh 0.1.5-rc.2
   with reasoning content in subagent completion notices fails to serialize the
   first model request on a dsh 0.1.6 host (upstream B-21, host-side data issue) —
   when a remote resume fails this way, start a new session (`/new`).
+- **Plugin Manager metadata.** Added `icon.svg` and `locale/{en,zh}.json` (`meta.title`/`meta.description` per the official `readPluginMeta` contract); `package.json` now declares the `icon` and ships both in the tarball.
 
 ## [0.13.1] - 2026-09-19
 

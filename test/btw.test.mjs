@@ -146,9 +146,9 @@ test('buildBtwSnapshot: agent.inject synthetic context never crowds the dialog',
   // source (file notices, skill content, cron pings) — those must be
   // filtered out, the real prompts kept.
   const events = [
-    { type: 'user/message', data: { id: 'inj1', role: 'user', content: [{ type: 'text', text: 'FILE CHANGED: a.ts' }], source: { kind: 'plugin', plugin: 'dsh-fs' } } },
+    { type: 'user/message', data: { id: 'inj1', role: 'user', content: [{ type: 'text', text: 'FILE CHANGED: a.ts' }], source: { kind: 'dsh-fs' } } },
     userEvent('u1', 'real question'),
-    { type: 'user/message', data: { id: 'inj2', role: 'user', content: [{ type: 'text', text: 'skill content' }], source: { kind: 'plugin', plugin: 'dsh-tool-skill' } } },
+    { type: 'user/message', data: { id: 'inj2', role: 'user', content: [{ type: 'text', text: 'skill content' }], source: { kind: 'dsh-tool-skill' } } },
     { type: 'assistant/message', data: { turn: 1, step: 1, message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'model' } } } },
   ]
   assert.deepEqual(buildBtwSnapshot(events, 6).map(m => m.id), ['u1', 'a1'])
@@ -191,7 +191,7 @@ test('buildBtwMessages: appends the question as a plugin-sourced user message', 
   assert.deepEqual(messages[0], snapshot[0])
   assert.equal(messages[1].role, 'user')
   assert.deepEqual(messages[1].content, [{ type: 'text', text: '那是什么？' }])
-  assert.deepEqual(messages[1].source, { kind: 'plugin', plugin: 'dsh-feishu:btw' })
+  assert.deepEqual(messages[1].source, { kind: 'dsh-feishu' })
 })
 
 test('buildBtwMessages: works on an empty snapshot', () => {
@@ -367,7 +367,7 @@ test('controller: submit starts a run, streams, settles into the slot', async ()
   assert.equal(rig.calls.streamOptions[0].model, 'm')
   assert.equal(rig.calls.streamOptions[0].system.length > 0, true)
   assert.equal(rig.calls.streamOptions[0].messages.length, 2)
-  assert.deepEqual(rig.calls.streamOptions[0].messages[1].source, { kind: 'plugin', plugin: 'dsh-feishu:btw' })
+  assert.deepEqual(rig.calls.streamOptions[0].messages[1].source, { kind: 'dsh-feishu' })
 
   const last = rig.controller.last
   assert.deepEqual(last, { question: 'q?', answer: 'hello world', modelLabel: 'p/m' })

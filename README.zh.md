@@ -135,7 +135,7 @@ DSH_FEISHU_APP_SECRET: xxxxxxxxxxxxxxxx
       - ou_xxxxxxxxxxxxxx     # 你的 open_id（管理后台成员详情页可查）
 ```
 
-生效白名单是三者并集：这里的 `operators` ∪ `~/.dsh/settings.yaml` 的
+生效白名单是三者并集：这里的 `operators` ∪ dsh 主目录 `dsh-feishu-state.json` 的
 `dsh-feishu.pairedOperators`（配对模式与 `/feishu-onboard` 写入）∪ 环境变量
 `DSH_FEISHU_OPERATORS`（逗号分隔 open_id，本地快速测试免改 patch）。
 
@@ -159,7 +159,7 @@ dsh --profile <你的 profile>
 
 私聊 bot 发 `/help` → 回命令清单；`/resume` 看会话列表；发文本即派活。
 
-**管理员名单还是空的？** bot 不再完全休眠：有凭证但没有 operators 时，它保持在线进入**配对模式**——任何私聊它的人都会收到一张「管理员配对」确认卡，点一下即成为管理员（先到先得；持久化到 `~/.dsh/settings.yaml` 的 `dsh-feishu.pairedOperators`，立即生效、无需重启）。群聊永不触发配对；名单里有了管理员之后，名单外的人依旧完全隐身。共享租户下这意味着：第一个私聊 bot 的同事就会成为它的管理员——不希望如此的话，自己先私聊点卡，或按方案 B 预先配好 `operators`。
+**管理员名单还是空的？** bot 不再完全休眠：有凭证但没有 operators 时，它保持在线进入**配对模式**——任何私聊它的人都会收到一张「管理员配对」确认卡，点一下即成为管理员（先到先得；持久化到 dsh 主目录 `dsh-feishu-state.json` 的 `pairedOperators`，立即生效、无需重启）。群聊永不触发配对；名单里有了管理员之后，名单外的人依旧完全隐身。共享租户下这意味着：第一个私聊 bot 的同事就会成为它的管理员——不希望如此的话，自己先私聊点卡，或按方案 B 预先配好 `operators`。
 
 ## 🔀 推荐加装 ask-router（多端问询）
 
@@ -183,7 +183,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 
 以下内容有意保留在磁盘上（删除数据是破坏性的；重装后会继续复用）：
 
-- `~/.dsh/settings.yaml` 的 `dsh-feishu:` 段 —— 绑定的会话 id、picker 样式、手机端偏好，以及 `pairedOperators`（配对管理员名单，由配对模式 / `/feishu-onboard` 写入）；想重置配对（含管理员名单）就删掉这一段。
+- dsh 主目录的 `dsh-feishu-state.json` 运行态文件 —— 绑定的会话 id、picker 样式、手机端偏好，以及 `pairedOperators`（配对管理员名单，由配对模式 / `/feishu-onboard` 写入）；想重置配对（含管理员名单）就删掉这个文件。
 - 会话目录里的修复产物：`*.corrupt-bak*` 是损坏日志修复前的唯一副本 —— 请保留；`*.repaired.*` 是修复后重写的日志。
 - `/tmp/dsh-feishu-bot.lock` 只在 SIGKILL 后可能残留；下次启动的 stale-pid 检查会自动接管，无需手动处理。
 
@@ -226,7 +226,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 
 | key | 默认 | 说明 |
 | --- | --- | --- |
-| `operators` | `[]` | open_id 白名单——生效名单为三者并集：本项 ∪ settings.yaml `dsh-feishu.pairedOperators` ∪ 环境变量 `DSH_FEISHU_OPERATORS`（逗号分隔 open_id）；为空时 bot 以配对模式启动 |
+| `operators` | `[]` | open_id 白名单——生效名单为三者并集：本项 ∪ `dsh-feishu-state.json` 的 `pairedOperators` ∪ 环境变量 `DSH_FEISHU_OPERATORS`（逗号分隔 open_id）；为空时 bot 以配对模式启动 |
 | `mode` | `"on"` | `"off"` 完全停用 |
 | `domain` | `"feishu"` | `"feishu"`（国内）或 `"lark"`（国际版） |
 | `statusIntervalMs` | `5000` | round 卡刷新节拍（伪流式），范围 [5000, 600000] |
@@ -244,7 +244,7 @@ dsh plugin --profile <name> remove @aiwayds/dsh-feishu
 feishu」，指南会自动加载——先核查前置条件（飞书应用、凭证），再用 ask_user_question
 逐项收集（operators 白名单、backgroundPush 档位），代写上面的 `config:` 段，并引导
 手机端配对。指南还覆盖 config 全键表、`DSH_FEISHU_*` 环境变量，以及运行态
-（`settings.yaml` 的 `dsh-feishu:` 段）与配置的区别。
+（dsh 主目录 `dsh-feishu-state.json` 运行态文件）与配置的区别。
 
 ## 🧯 故障排查
 
