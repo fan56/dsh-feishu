@@ -227,7 +227,7 @@ The host reconciles the profile automatically: the `dsh.profile.bundles` entry i
 
 What stays on disk (kept on purpose — deleting data is destructive; a reinstall reuses it):
 
-- The dsh-home `dsh-feishu-state.json` state file — bound session id, picker style, phone-model preference, and `pairedOperators` (the paired-admin list written by pairing mode / `/feishu-onboard`). Delete the file to reset the pairing — admins included.
+- The dsh-home `dsh-feishu-state.json` state file — bound session id, picker style, phone-model preference, and `pairedOperators` (the paired-admin list written by pairing mode / `/feishu-onboard`). Delete the file to reset the pairing — admins included. Upgrading from 0.1.5: the first 0.1.7 boot automatically absorbs the `dsh-feishu:` section of the renamed `settings.yaml.imported` (or `settings.yaml`) into this file and writes it immediately, logging what was absorbed — folded/unreadable legacy values are skipped and logged instead (those keys may need a one-time re-pair).
 - Repair artifacts inside session dirs: `*.corrupt-bak*` is the only pre-repair copy of a damaged session log — keep it; `*.repaired.*` is the rewritten log the repair produced.
 - `/tmp/dsh-feishu-bot.lock` can linger after a SIGKILL; the stale-pid check steals it on the next start, so no manual step is needed.
 

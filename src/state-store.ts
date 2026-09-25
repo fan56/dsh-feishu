@@ -17,7 +17,10 @@
  * `dsh-feishu:` section with a deliberately conservative flat-scalar parser
  * (anything nested, folded across lines or otherwise unexpected is skipped;
  * the decoders below fail closed). Without it, pairing claims would not
- * survive the upgrade and the bot would re-open pairing mode.
+ * survive the upgrade and the bot would re-open pairing mode. The absorption
+ * is one-shot and self-evidencing: what was absorbed (and what degraded)
+ * is logged once, and the state file is written IMMEDIATELY — the upgrade
+ * must not wait for the first mutation to become visible on disk.
  */
 
 import { readFile, rename, writeFile } from 'node:fs/promises'
@@ -86,10 +89,39 @@ const LEGACY_SETTINGS_FILENAME = 'settings.yaml'
 /** What the host renames that document to on first 0.1.7 boot. */
 const LEGACY_IMPORTED_FILENAME = 'settings.yaml.imported'
 
+/**
+ * The minimal logger seam the store needs. Structural on purpose: any cordis
+ * logger (printf-style) or a test double satisfies it.
+ */
+export interface StateStoreLogger {
+  info(format: string, ...values: readonly unknown[]): void
+  warn(format: string, ...values: readonly unknown[]): void
+}
+
 /** Constructor options — tests inject an explicit `path` to stay off the real home. */
 export interface StateStoreOptions {
   /** Full state-file path. Default: `<dsh home>/dsh-feishu-state.json`. */
   path?: string
+  /**
+   * Where the legacy-absorption summary lines go. Default: the plugin
+   * context's logger when it carries one, else silent — a store built with a
+   * bare test context (`{ inject }`) must stay quiet, not crash.
+   */
+  logger?: StateStoreLogger
+}
+
+/** The silent logger a context without one degrades to. */
+const NOOP_LOGGER: StateStoreLogger = { info() {}, warn() {} }
+
+/** Structural read of `ctx.logger` — absent in minimal hosts/tests. */
+function contextLogger(ctx?: Context): StateStoreLogger {
+  const candidate = (ctx as { logger?: unknown } | undefined)?.logger
+  if (candidate !== null && typeof candidate === 'object'
+    && typeof (candidate as StateStoreLogger).info === 'function'
+    && typeof (candidate as StateStoreLogger).warn === 'function') {
+    return candidate as StateStoreLogger
+  }
+  return NOOP_LOGGER
 }
 
 /**
@@ -240,12 +272,67 @@ export function legacyFeishuSection(text: string): Record<string, unknown> | und
 }
 
 /**
+ * What one legacy-absorption pass found. `state` stays undefined when a
+ * section existed but nothing survived decoding (the folded-everything edge)
+ * — still reported, so the operator learns WHY the pairing is gone instead
+ * of discovering it at the first unauthorized DM.
+ */
+interface LegacyScan {
+  /** The decoded state when the section carried anything; undefined otherwise. */
+  readonly state: BotState | undefined
+  /** Which document the section came from (`settings.yaml.imported` preferred). */
+  readonly source: string
+  /** Section keys whose value degraded to the default (folded / unparseable). */
+  readonly skipped: readonly string[]
+}
+
+/** The section keys this plugin ever wrote, in report order. */
+const KNOWN_SECTION_KEYS = [
+  'pairedOperators', 'boundSessionId', 'displayThink', 'lastChatId', 'picker', 'phoneModel',
+] as const
+
+/**
+ * Which of the section's PRESENT keys degraded to the default. A key the
+ * section never mentions is not "skipped" (nothing was lost); a key it does
+ * mention but whose decoded value is the default is (the operator wrote
+ * something there the conservative reader could not carry).
+ */
+function skippedLegacyKeys(section: Record<string, unknown>, state: BotState): readonly string[] {
+  const skipped: string[] = []
+  for (const key of KNOWN_SECTION_KEYS) {
+    if (!(key in section)) continue
+    const carried = key === 'pairedOperators' ? state.pairedOperators.length > 0
+      : key === 'boundSessionId' ? state.boundSessionId !== undefined
+      : key === 'lastChatId' ? state.lastChatId !== undefined
+      : key === 'picker' ? state.picker !== undefined
+      : key === 'phoneModel' ? state.phoneModel !== undefined
+      : true // displayThink: absent-or-truthy means the default (on) — nothing to lose
+    if (!carried) skipped.push(key)
+  }
+  return skipped
+}
+
+/** One `key=value` pair per absorbed key, for the absorption summary line. */
+function absorptionSummary(state: BotState): string {
+  const parts: string[] = []
+  if (state.pairedOperators.length > 0) parts.push(`pairedOperators=${state.pairedOperators.length}`)
+  if (state.boundSessionId !== undefined) parts.push('boundSessionId=yes')
+  if (state.lastChatId !== undefined) parts.push('lastChatId=yes')
+  if (state.picker !== undefined) parts.push('picker=yes')
+  if (state.phoneModel !== undefined) parts.push('phoneModel=yes')
+  parts.push(`displayThink=${state.displayThink ? 'yes' : 'no'}`)
+  return parts.join(', ')
+}
+
+/**
  * Best-effort read of the 0.1.5 state remnants: the imported (preferred —
  * the host renamed it there) then the live old settings document. Any
- * failure (absent file, unreadable, garbage) resolves undefined — a bot
- * upgrade must never be blocked by a cleanup nicety.
+ * failure (absent file, unreadable, garbage) moves on silently — a bot
+ * upgrade must never be blocked by a cleanup nicety. Resolves undefined
+ * when no document carries a `dsh-feishu:` section at all.
  */
-async function readLegacyState(home: string): Promise<BotState | undefined> {
+async function readLegacyState(home: string): Promise<LegacyScan | undefined> {
+  let shell: LegacyScan | undefined
   for (const name of [LEGACY_IMPORTED_FILENAME, LEGACY_SETTINGS_FILENAME]) {
     let text: string
     try {
@@ -257,19 +344,22 @@ async function readLegacyState(home: string): Promise<BotState | undefined> {
       const section = legacyFeishuSection(text)
       if (section !== undefined) {
         const state = fromSection(section)
+        const skipped = skippedLegacyKeys(section, state)
         // Only a section that decoded to SOMETHING counts; an empty shell
-        // (e.g. the folded-everything edge) leaves defaults untouched.
+        // (e.g. the folded-everything edge) leaves defaults untouched —
+        // but is remembered for the report.
         if (state.pairedOperators.length > 0 || state.boundSessionId !== undefined
           || state.lastChatId !== undefined || state.picker !== undefined
           || state.phoneModel !== undefined || state.displayThink === false) {
-          return state
+          return { state, source: name, skipped }
         }
+        shell ??= { state: undefined, source: name, skipped }
       }
     } catch {
       // Unreadable legacy document — treat as absent.
     }
   }
-  return undefined
+  return shell
 }
 
 // -------------------------------------------------------------------- store --
@@ -288,12 +378,14 @@ export class StateStore {
   private readonly path: string
   /** The directory the state file (and the legacy document) live in. */
   private readonly home: string
+  private readonly logger: StateStoreLogger
   private readonly loading: Promise<void>
   private writes: Promise<void> = Promise.resolve()
 
   constructor(ctx: Context, options: StateStoreOptions = {}) {
     this.path = options.path ?? join(resolveDshHome(ctx), STATE_FILENAME)
     this.home = options.path !== undefined ? dirname(options.path) : resolveDshHome(ctx)
+    this.logger = options.logger ?? contextLogger(ctx)
     this.loading = this.load()
   }
 
@@ -331,7 +423,15 @@ export class StateStore {
     await this.update({ pairedOperators: [...current, value] })
   }
 
-  /** Initial load: the state file, else one absorption pass over the legacy document. */
+  /**
+   * Initial load: the state file, else one absorption pass over the legacy
+   * document. An absorption persists IMMEDIATELY (before any mutation) — the
+   * file must exist as soon as the state was taken over, so an operator (or
+   * a support session) can SEE the claims survived the upgrade instead of
+   * waiting for the first write to happen to land. Degraded keys and the
+   * empty-shell edge each get one log line: the folded-scalar skips are
+   * exactly the cases where the operator may need to re-pair.
+   */
   private async load(): Promise<void> {
     let text: string | undefined
     try {
@@ -348,8 +448,24 @@ export class StateStore {
       return
     }
     const legacy = await readLegacyState(this.home)
-    if (legacy !== undefined) {
-      this.memory = { ...this.memory, ...legacy }
+    if (legacy === undefined) return // fresh install — nothing to absorb, nothing to say
+    if (legacy.state !== undefined) {
+      this.memory = { ...this.memory, ...legacy.state }
+      this.logger.info('dsh-feishu: absorbed legacy settings state (%s): %s', legacy.source, absorptionSummary(legacy.state))
+      await this.persist()
+      if (legacy.skipped.length > 0) {
+        this.logger.warn(
+          'dsh-feishu: legacy settings keys not absorbed from %s (folded across lines): %s — re-pairing may be required',
+          legacy.source, legacy.skipped.join(', '),
+        )
+      }
+    } else {
+      // Empty shell: the section existed but nothing survived the conservative
+      // reader — one line naming the degenerated keys, not silence.
+      this.logger.warn(
+        'dsh-feishu: legacy settings section in %s carried no readable state (folded/unparseable: %s) — re-pairing may be required',
+        legacy.source, legacy.skipped.length > 0 ? legacy.skipped.join(', ') : 'no known keys',
+      )
     }
   }
 
