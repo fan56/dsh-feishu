@@ -23,18 +23,14 @@ import {
 
 // ------------------------------------------------------------------ helpers --
 
-const userEvent = (id, text) => ({
-  type: 'user/message',
-  data: { id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } },
+// Derived-history inputs (the `session.deriveMessages()` shape — dsh 0.1.7's
+// surface read that replaces the soft-deprecated raw snapshotEvents scan).
+const userMsg = (id, text, source = { kind: 'user' }) => ({
+  id, role: 'user', content: [{ type: 'text', text }], source,
 })
 
-const assistantEvent = (id, text, extra = []) => ({
-  type: 'assistant/message',
-  data: {
-    turn: 1,
-    step: 1,
-    message: { id, role: 'assistant', content: [{ type: 'text', text }, ...extra], source: { kind: 'model' } },
-  },
+const assistantMsg = (id, text, extra = []) => ({
+  id, role: 'assistant', content: [{ type: 'text', text }, ...extra], source: { kind: 'model' },
 })
 
 async function* chunksOf(list) {
@@ -113,61 +109,63 @@ test('parseBtwInput: a bare --model token is a question, not a flag', () => {
 
 // ------------------------------------------------------------ buildBtwSnapshot --
 
-test('buildBtwSnapshot: chronological order, text-only, last N wins', () => {
-  const events = [
-    { type: 'turn/start', data: { turn: 1 } },
-    userEvent('u1', 'first'),
-    assistantEvent('a1', 'one', [{ type: 'toolCall', id: 'c1', name: 'bash' }]),
-    { type: 'tool/result', data: { callId: 'c1' } },
-    userEvent('u2', 'second'),
-    assistantEvent('a2', 'two'),
-    { type: 'assistant/chunk', data: { chunk: {} } },
-    userEvent('u3', 'third'),
+test('buildBtwSnapshot: chronological order, dialog roles only, last N wins', () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'system prompt' }] },
+    userMsg('u1', 'first'),
+    assistantMsg('a1', 'one', [{ type: 'toolCall', id: 'c1', name: 'bash' }]),
+    { id: 't1', role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'tool output' }] },
+    userMsg('u2', 'second'),
+    assistantMsg('a2', 'two'),
+    userMsg('u3', 'third'),
   ]
-  const snapshot = buildBtwSnapshot(events, 2)
+  const snapshot = buildBtwSnapshot(messages, 2)
   assert.deepEqual(snapshot.map(m => m.content[0].text), ['two', 'third'])
   assert.deepEqual(snapshot.map(m => m.id), ['a2', 'u3'])
 })
 
 test('buildBtwSnapshot: content is rebuilt as one fresh text block', () => {
-  const snapshot = buildBtwSnapshot([assistantEvent('a1', 'text only', [{ type: 'toolCall', id: 'c' }])], 5)
+  const snapshot = buildBtwSnapshot([assistantMsg('a1', 'text only', [{ type: 'toolCall', id: 'c' }])], 5)
   assert.equal(snapshot.length, 1)
   assert.deepEqual(snapshot[0].content, [{ type: 'text', text: 'text only' }])
   assert.equal(snapshot[0].source.kind, 'model')
 })
 
 test('buildBtwSnapshot: empty and whitespace-only texts are skipped', () => {
-  const events = [userEvent('u1', '   '), assistantEvent('a1', ''), userEvent('u2', 'real')]
-  assert.deepEqual(buildBtwSnapshot(events, 10).map(m => m.id), ['u2'])
+  const messages = [userMsg('u1', '   '), assistantMsg('a1', ''), userMsg('u2', 'real')]
+  assert.deepEqual(buildBtwSnapshot(messages, 10).map(m => m.id), ['u2'])
 })
 
 test('buildBtwSnapshot: agent.inject synthetic context never crowds the dialog', () => {
-  // agent.inject() rides the 'user/message' event type with a non-user
-  // source (file notices, skill content, cron pings) — those must be
-  // filtered out, the real prompts kept.
-  const events = [
-    { type: 'user/message', data: { id: 'inj1', role: 'user', content: [{ type: 'text', text: 'FILE CHANGED: a.ts' }], source: { kind: 'dsh-fs' } } },
-    userEvent('u1', 'real question'),
-    { type: 'user/message', data: { id: 'inj2', role: 'user', content: [{ type: 'text', text: 'skill content' }], source: { kind: 'dsh-tool-skill' } } },
-    { type: 'assistant/message', data: { turn: 1, step: 1, message: { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'model' } } } },
+  // agent.inject() rides the user role with a non-user source (file notices,
+  // skill content, cron pings) — those must be filtered out, the real
+  // prompts kept.
+  const messages = [
+    userMsg('inj1', 'FILE CHANGED: a.ts', { kind: 'dsh-fs' }),
+    userMsg('u1', 'real question'),
+    userMsg('inj2', 'skill content', { kind: 'dsh-tool-skill' }),
+    assistantMsg('a1', 'reply'),
   ]
-  assert.deepEqual(buildBtwSnapshot(events, 6).map(m => m.id), ['u1', 'a1'])
+  assert.deepEqual(buildBtwSnapshot(messages, 6).map(m => m.id), ['u1', 'a1'])
 })
 
-test('buildBtwSnapshot: malformed event data is skipped, never thrown', () => {
-  const events = [
-    { type: 'user/message', data: null },
-    { type: 'user/message', data: undefined },
-    { type: 'assistant/message', data: {} },
-    { type: 'user/message', data: { nope: true } },
-    userEvent('u1', 'ok'),
+test('buildBtwSnapshot: tool results and developer messages are not dialog turns', () => {
+  const messages = [
+    { id: 't1', role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'very long tool output' }] },
+    { id: 'd1', role: 'developer', content: [{ type: 'tool-addition', name: 'bash' }] },
+    userMsg('u1', 'ok'),
   ]
-  assert.deepEqual(buildBtwSnapshot(events, 10).map(m => m.id), ['u1'])
+  assert.deepEqual(buildBtwSnapshot(messages, 10).map(m => m.id), ['u1'])
+})
+
+test('buildBtwSnapshot: defensive — odd entries are skipped, never thrown', () => {
+  const messages = [null, undefined, { role: 'user' }, userMsg('u1', 'ok')]
+  assert.deepEqual(buildBtwSnapshot(messages, 10).map(m => m.id), ['u1'])
 })
 
 test('buildBtwSnapshot: per-message cap with truncation suffix', () => {
   const long = 'x'.repeat(BTW_MAX_MESSAGE_CHARS + 100)
-  const snapshot = buildBtwSnapshot([userEvent('u1', long)], 5)
+  const snapshot = buildBtwSnapshot([userMsg('u1', long)], 5)
   const text = snapshot[0].content[0].text
   assert.ok(text.length < long.length)
   assert.ok(text.endsWith('…[截断]'))
@@ -175,17 +173,17 @@ test('buildBtwSnapshot: per-message cap with truncation suffix', () => {
 })
 
 test('buildBtwSnapshot: limit 0 disables the snapshot entirely', () => {
-  assert.deepEqual(buildBtwSnapshot([userEvent('u1', 'hi')], 0), [])
+  assert.deepEqual(buildBtwSnapshot([userMsg('u1', 'hi')], 0), [])
 })
 
-test('buildBtwSnapshot: an empty event log yields an empty snapshot', () => {
+test('buildBtwSnapshot: an empty history yields an empty snapshot', () => {
   assert.deepEqual(buildBtwSnapshot([], 6), [])
 })
 
 // ------------------------------------------------------------- buildBtwMessages --
 
 test('buildBtwMessages: appends the question as a plugin-sourced user message', () => {
-  const snapshot = buildBtwSnapshot([userEvent('u1', 'hi')], 5)
+  const snapshot = buildBtwSnapshot([userMsg('u1', 'hi')], 5)
   const messages = buildBtwMessages(snapshot, '那是什么？')
   assert.equal(messages.length, 2)
   assert.deepEqual(messages[0], snapshot[0])

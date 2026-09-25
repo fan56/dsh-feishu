@@ -363,16 +363,13 @@ export class FeishuBot {
       },
       buildSnapshot: () => {
         const agent = this.binder.getAgent()
-        // 0.1.7 audit: `session.snapshotEvents()` is SOFT-deprecated (runtime
-        // intact). The official replacements — message projections or a
-        // persistence cold-read — both rebuild a rolling conversation window
-        // from state we do not track today, so this single call site stays
-        // until the dedicated projection migration (the same backlog the
-        // tui-pi / subagent-registry / topics-memory call sites share; new
-        // code must not add snapshotEvents).
+        // dsh 0.1.7: the surface-driven derived history replaces the
+        // soft-deprecated raw `snapshotEvents()` scan — compaction-replaced
+        // turns drop off, so the side call sees the history the main agent
+        // actually holds (see buildBtwSnapshot for the role/source filter).
         return agent === undefined
           ? []
-          : buildBtwSnapshot(agent.session.snapshotEvents(), this.config.btwContextMessages)
+          : buildBtwSnapshot(agent.session.deriveMessages(), this.config.btwContextMessages)
       },
       isMainRunning: () => this.binder.getAgent()?.status === 'running',
       isReadOnlyView: () => this.binder.isReadOnlyView(),

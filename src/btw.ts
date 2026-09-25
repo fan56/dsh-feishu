@@ -70,12 +70,6 @@ export function parseBtwInput(rawInput: string | undefined): ParsedBtwInput {
 
 // ------------------------------------------------------------------ 快照组装 --
 
-/** Structural input event — the subset of SessionEvent the snapshot needs. */
-export interface BtwSnapshotEvent {
-  readonly type: string
-  readonly data: unknown
-}
-
 /** Default recent-conversation messages carried into a side call. */
 export const BTW_SNAPSHOT_DEFAULT_MESSAGES = 6
 /** Hard ceiling for the configurable snapshot size (config/env clamp). */
@@ -121,34 +115,32 @@ function clipMessage(text: string): string {
 }
 
 /**
- * Project the last `limit` user/assistant text exchanges out of the session
- * event log, oldest first. Tool calls, reasoning, usage and every
- * non-message event are dropped; the user side keeps REAL prompts only
+ * Project the last `limit` user/assistant text exchanges out of the derived
+ * message history, oldest first. Tool results, developer and system messages
+ * are not dialog turns and are dropped; the user side keeps REAL prompts only
  * (`source.kind === 'user'`) — `agent.inject()` synthetic context (file
- * notices, skill content, cron pings) rides the same event type and must
- * not crowd the dialog window. Malformed event data is skipped, never
- * thrown.
+ * notices, skill content, cron pings) rides the same role and must not crowd
+ * the dialog window. Malformed content is skipped, never thrown.
+ *
+ * Input is `session.deriveMessages()` — the surface-driven history (dsh
+ * 0.1.7), which replaces the soft-deprecated raw `snapshotEvents()` scan:
+ * compaction-replaced turns correctly drop off, so the side call sees the
+ * history the main agent actually holds.
  */
-export function buildBtwSnapshot(events: readonly BtwSnapshotEvent[], limit: number): Message[] {
+export function buildBtwSnapshot(messages: readonly Message[], limit: number): Message[] {
   const picked: Message[] = []
   if (limit <= 0) return picked
-  for (let index = events.length - 1; index >= 0 && picked.length < limit; index -= 1) {
-    const event = events[index]
-    if (event?.type !== 'user/message' && event?.type !== 'assistant/message') continue
-    const data = event.data as { content?: unknown; message?: { content?: unknown } } | null
-    if (data === null || typeof data !== 'object') continue
-    const content = event.type === 'user/message' ? data.content : data.message?.content
-    const text = textOf(content).trim()
+  for (let index = messages.length - 1; index >= 0 && picked.length < limit; index -= 1) {
+    const message = messages[index]
+    if (message === null || message === undefined) continue
+    if (message.role === 'user') {
+      if (message.source?.kind !== 'user') continue
+    } else if (message.role !== 'assistant') {
+      continue
+    }
+    const text = textOf(message.content).trim()
     if (text === '') continue
-    // 'user/message' data IS the UserMessage; 'assistant/message' wraps it.
-    const source = event.type === 'user/message'
-      ? typeof (data as { id?: unknown }).id === 'string' &&
-        (data as { source?: { kind?: unknown } }).source?.kind === 'user'
-        ? data as unknown as Message
-        : undefined
-      : (data as { message?: Message }).message
-    if (source === undefined) continue
-    picked.push({ ...source, content: [{ type: 'text', text: clipMessage(text) }] })
+    picked.push({ ...message, content: [{ type: 'text', text: clipMessage(text) }] })
   }
   return picked.reverse()
 }
