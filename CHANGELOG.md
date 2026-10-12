@@ -29,6 +29,7 @@ Both fixes came from real-device testing (Windows + dsh 0.2.0-rc.2 + the Feishu 
   - No preset-mechanics changes required: the binder's `agentPresets` resolve/mount seams, the `agentPreset` session-projection read, and the `meta.agentPreset` create path are byte-compatible with the 0.1.7 registry (regression-tested: /new card preset pick, cold-resume preset rejoin, and the bare-degradation paths all green).
 
 ### Added
+- **多群镜像（`mirrorChatIds`）—— 一份会话，多个群。** run 卡（状态 / round / 回合结束 / 解绑）现在会同时发到**当前活跃群**和 `mirrorChatIds` 里的每个群，其后的每一次改卡都落到所有副本上；会话仍然只属于 `lastChatId` 那个群（谁最近 @机器人 谁驱动）。副本是同一份卡片构建，且**逐群隔离**：某个群被踢出/改卡失败只记一条 warn，永远不影响主卡；命令回复、配对卡等一次性消息**故意不镜像**（镜像的是"同一会话的另一个窗口"，不是聊天记录转发）。配置 `mirrorChatIds: [oc_…]` 或 `DSH_FEISHU_MIRROR_CHAT_IDS`（逗号分隔，追加），默认 `[]` = 与今天完全一致的单群行为。测试见 `test/multi-chat-mirror.test.mjs`（8 例：镜像投递、活跃群去重、坏群隔离、改卡跟着走、回合结束/解绑/重置清理、命令回复不镜像）。
 - Compatibility note (README): `/resume` of a session saved under dsh 0.1.5-rc.2
   with reasoning content in subagent completion notices fails to serialize the
   first model request on a dsh 0.1.6 host (upstream B-21, host-side data issue) —

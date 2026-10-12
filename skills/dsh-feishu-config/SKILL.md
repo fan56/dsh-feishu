@@ -1,6 +1,6 @@
 ---
 name: dsh-feishu-config
-description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置指南。凡涉及飞书/Lark 接入、机器人申请/创建、手机端控制 dsh、卡片交互、后台推送，或要配置 feishu 时先读本指南：首次配置优先引导桌面 TUI 运行 /feishu-onboard（扫码一键创建应用并自动写入凭据与 operators）；手动路径见指南：cordis.patch.yml 挂载块 config: 段 13 键（mode/domain/operators/appId/appSecret/凭据 refs/statusIntervalMs/bodySegmentChars/resumeListStyle/btwContextMessages/backgroundPush）、DSH_FEISHU_* 环境变量、ask_user_question 配置向导、operators 空=配对模式（首个私聊者点卡成为管理员）、dsh-feishu-state.json 是运行态非配置。触发词：飞书、feishu、lark、机器人、operators、配对、绑定、backgroundPush。"
+description: "dsh 飞书机器人插件（@aiwayds/dsh-feishu）使用与配置指南。凡涉及飞书/Lark 接入、机器人申请/创建、手机端控制 dsh、卡片交互、后台推送，或要配置 feishu 时先读本指南：首次配置优先引导桌面 TUI 运行 /feishu-onboard（扫码一键创建应用并自动写入凭据与 operators）；手动路径见指南：cordis.patch.yml 挂载块 config: 段 15 键（mode/domain/operators/appId/appSecret/凭据 refs/statusIntervalMs/bodySegmentChars/resumeListStyle/btwContextMessages/backgroundPush/roundButtons/toolDetail/mirrorChatIds）、DSH_FEISHU_* 环境变量、ask_user_question 配置向导、operators 空=配对模式（首个私聊者点卡成为管理员）、dsh-feishu-state.json 是运行态非配置。触发词：飞书、feishu、lark、机器人、operators、配对、绑定、backgroundPush。"
 ---
 
 # dsh-feishu 使用指南（飞书 / Lark 手机端驾驶 dsh）
@@ -144,6 +144,9 @@ dsh 主目录的 `dsh-feishu-state.json`。
 | `resumeListStyle` | `"auto"` | `/resume` 列表渲染：`auto`（表格卡，失败回退 markdown 列表）/ `table` / `list` |
 | `btwContextMessages` | `6` | `/btw` 侧问携带的最近对话条数，[0, 50]；0 = 不带快照 |
 | `backgroundPush` | `"off"` | 手机未绑定会话的完成推送（发到最后活跃聊天）：`off` / `cron`（带 cron 投递或子代理结算的回合）/ `all`（所有回合） |
+| `mirrorChatIds` | `[]` | **多群镜像**：额外接收同一份 run 卡（状态/round/回合结束/解绑）的群/聊天 id 列表。会话仍只有一个、由最后活跃的那个群驱动（`lastChatId` 的群持有主卡），镜像群收到同内容副本并跟着一起刷新；每个群的发送/改卡失败各自隔离（被踢出的群不会影响主卡）。命令回复、配对卡等一次性消息**不**镜像。也支持 `DSH_FEISHU_MIRROR_CHAT_IDS`（逗号分隔，追加到列表） |
+
+> **多群怎么用**：把机器人拉进每个群，把群 id（`oc_…`）写进 `mirrorChatIds`。谁 @机器人 说话，谁的群就成为当前驱动群（主卡在那里），其余镜像群同步看到同样的卡片。想让某个群变成只读观察点，就不要在那个群 @机器人（不 @ 就不会夺取主卡）。
 
 ### 环境变量（`DSH_FEISHU_*`）
 
@@ -153,6 +156,7 @@ dsh 主目录的 `dsh-feishu-state.json`。
 | `DSH_FEISHU_APP_ID` | App ID（patch 未给明文 `appId` 时生效；优先级高于凭据文件） |
 | `DSH_FEISHU_APP_SECRET` | App Secret（patch 未给明文 `appSecret` 时生效；优先级高于凭据文件） |
 | `DSH_FEISHU_BACKGROUND_PUSH` | `cron` / `all`，其它值视为 `off`；patch config 显式配置优先于 env |
+| `DSH_FEISHU_MIRROR_CHAT_IDS` | 逗号分隔的群/聊天 id，**追加**进 `mirrorChatIds`（多群镜像；配合 config 一起用） |
 
 注意：代码注释里出现过 `DSH_FEISHU_BTW_CONTEXT_MESSAGES`，但当前版本运行时**不读取**
 它——`/btw` 快照大小只认 config 键 `btwContextMessages`。

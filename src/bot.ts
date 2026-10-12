@@ -233,6 +233,15 @@ export class FeishuBot {
   private cardChain: Promise<unknown> = Promise.resolve()
   private pendingPicker: PendingPicker | undefined
   private cardMessageId: string | undefined
+  /**
+   * Mirror copies of the CURRENT run card (chatId → messageId) for the chats in
+   * `mirrorChatIds`: one session, several groups. Populated when the card is
+   * opened, patched alongside the primary on every beat/settle/finalize, and
+   * cleared together with the primary so `cardMessageId === undefined` keeps
+   * meaning "no live card". Best effort per chat — a group the bot was removed
+   * from can never break the primary card.
+   */
+  private cardMirrors = new Map<string, string>()
   private cardHash: string | undefined
   /** Session id whose route facts were already backfilled from its log. */
   private routeBackfilledFor: string | undefined
@@ -1882,6 +1891,58 @@ export class FeishuBot {
     return op === 'stop' ? { stop: true } : { continue: true }
   }
 
+  /**
+   * The chats that mirror the live run card: `mirrorChatIds` minus the ACTIVE
+   * chat (which owns the primary card) and minus duplicates. Recomputed on
+   * every card open, so the set follows `lastChatId` as the operator moves.
+   */
+  private mirrorChats(): string[] {
+    const active = this.store.get().lastChatId
+    const chats: string[] = []
+    for (const chatId of this.config.mirrorChatIds ?? []) {
+      if (chatId === active || chats.includes(chatId)) continue
+      chats.push(chatId)
+    }
+    return chats
+  }
+
+  /** Send a freshly opened card to every mirror chat (isolated, best effort). */
+  private async mirrorRunCard(card: Schema2Card): Promise<void> {
+    this.cardMirrors.clear()
+    const chats = this.mirrorChats()
+    if (chats.length === 0) return
+    await Promise.all(chats.map(async chatId => {
+      try {
+        const messageId = await this.lark.sendCard(chatId, card)
+        if (messageId === undefined) this.ctx.logger.warn('dsh-feishu: mirror card to %s was not delivered', chatId)
+        else this.cardMirrors.set(chatId, messageId)
+      } catch (error) {
+        this.ctx.logger.warn('dsh-feishu: mirror card to %s threw: %o', chatId, error)
+      }
+    }))
+  }
+
+  /** Patch every mirror copy of the live card (isolated, best effort). */
+  private async patchMirrorCards(card: Schema2Card): Promise<void> {
+    if (this.cardMirrors.size === 0) return
+    await Promise.all([...this.cardMirrors].map(async ([chatId, messageId]) => {
+      try {
+        if (!(await this.lark.patchCard(messageId, card))) {
+          this.ctx.logger.warn('dsh-feishu: mirror card patch failed (chat %s)', chatId)
+        }
+      } catch (error) {
+        this.ctx.logger.warn('dsh-feishu: mirror card patch threw (chat %s): %o', chatId, error)
+      }
+    }))
+  }
+
+  /** Forget the live run card everywhere (primary + mirrors + rendered hash). */
+  private clearRunCard(): void {
+    this.cardMessageId = undefined
+    this.cardMirrors.clear()
+    this.cardHash = undefined
+  }
+
   /** Open the per-turn card (bound session's agent is mid-turn). */
   private async openCard(): Promise<void> {
     const chatId = this.store.get().lastChatId
@@ -1897,6 +1958,10 @@ export class FeishuBot {
     if (messageId !== undefined) {
       this.cardMessageId = messageId
       this.cardHash = hash
+      // Mirror chats only get a copy once the primary landed — otherwise they
+      // would hold a card that never updates (the beat/finalize guards key off
+      // the primary id).
+      await this.mirrorRunCard(card)
     } else {
       // sendCard swallows the API error; without this warn an open failure is
       // invisible (no card, no beat, finalize skips) — exactly how a rejected
@@ -1933,7 +1998,10 @@ export class FeishuBot {
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
-    void this.chain(() => this.lark.patchCard(this.cardMessageId!, card))
+    void this.chain(async () => {
+      await this.lark.patchCard(this.cardMessageId!, card)
+      await this.patchMirrorCards(card)
+    })
   }
 
   /**
@@ -1953,7 +2021,10 @@ export class FeishuBot {
     })
     if (hash === this.cardHash) return
     this.cardHash = hash
-    void this.chain(() => this.lark.patchCard(this.cardMessageId!, card))
+    void this.chain(async () => {
+      await this.lark.patchCard(this.cardMessageId!, card)
+      await this.patchMirrorCards(card)
+    })
   }
 
   /**
@@ -1991,6 +2062,10 @@ export class FeishuBot {
       } else {
         settleCardLost = (await this.lark.sendCard(chatId, card)) === undefined
       }
+      // Mirrors ride the same settle card. Their own failures stay contained:
+      // the primary keeps the verbatim fallback below, a mirror that lost its
+      // card just keeps the previous content (never a duplicate per round).
+      await this.patchMirrorCards(card)
       // A body too big for the embed still ships verbatim (code blocks,
       // tables) — the card's activity line is only a clipped preview of it.
       // An embedded body whose settle card was lost falls back to that same
@@ -2001,8 +2076,7 @@ export class FeishuBot {
         await this.replyLong(roundText)
       }
     }
-    this.cardMessageId = undefined
-    this.cardHash = undefined
+    this.clearRunCard()
     beginRound(this.runState)
     if (chatId !== undefined) {
       await this.openCard()
@@ -2013,7 +2087,7 @@ export class FeishuBot {
   private async finalizeTurn(): Promise<void> {
     const chatId = this.store.get().lastChatId
     if (chatId === undefined) {
-      this.cardMessageId = undefined
+      this.clearRunCard()
       return
     }
     const { card } = buildStatusCard(this.runState, {
@@ -2036,8 +2110,9 @@ export class FeishuBot {
       // vanishing entirely. Round bodies already went out per round.
       await this.lark.sendCard(chatId, card)
     }
-    this.cardMessageId = undefined
-    this.cardHash = undefined
+    // The end-of-turn card mirrors like every other card state.
+    await this.patchMirrorCards(card)
+    this.clearRunCard()
     if (this.turnOriginMessageId !== undefined) {
       const origin = this.turnOriginMessageId
       this.turnOriginMessageId = undefined
@@ -2048,9 +2123,10 @@ export class FeishuBot {
   /** Patch the open card into a detached state and forget it (/new). */
   private async closeCardAsDetached(): Promise<void> {
     const messageId = this.cardMessageId
-    this.cardMessageId = undefined
-    this.cardHash = undefined
-    if (messageId === undefined) return
+    if (messageId === undefined) {
+      this.clearRunCard()
+      return
+    }
     const card: Schema2Card = {
       schema: '2.0',
       config: { width_mode: 'fill' },
@@ -2061,6 +2137,9 @@ export class FeishuBot {
       body: { elements: [{ tag: 'markdown', content: '⏏️ 会话已解绑（/resume 可重新进入）' }] },
     }
     await this.lark.patchCard(messageId, card)
+    // The mirrors must not keep showing a live card for a session nobody drives.
+    await this.patchMirrorCards(card)
+    this.clearRunCard()
   }
 
   /** Clear the run view (new binding / detach) — no history replay. */
@@ -2069,8 +2148,7 @@ export class FeishuBot {
     Object.assign(this.runState, fresh)
     this.runState.subagents = fresh.subagents
     this.runState.runSeqToChild = fresh.runSeqToChild
-    this.cardMessageId = undefined
-    this.cardHash = undefined
+    this.clearRunCard()
     this.resumeCardMessageId = undefined
     this.modelFlow = undefined
     this.turnOriginMessageId = undefined

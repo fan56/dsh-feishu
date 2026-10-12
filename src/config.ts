@@ -77,6 +77,20 @@ export interface Config {
    * Override: DSH_FEISHU_TOOL_DETAIL.
    */
   toolDetail?: 'off' | 'brief' | 'full'
+  /**
+   * Extra chats that see the SAME run cards as the active chat — one session,
+   * several groups (default `[]` = single-chat behaviour, no change).
+   *
+   * The active chat stays `lastChatId` (the operator's most recent one) and is
+   * the only one that drives the session; every run card addressed to it is
+   * mirrored here, and each later patch lands on all of them. Per-chat
+   * failures are logged and skipped, so a group the bot was removed from can
+   * never break the primary card. Command replies, pairing cards and other
+   * one-off messages are NOT mirrored — only the run card (status / round /
+   * turn-end / detached), which is what "another window on the same session"
+   * means. Override: DSH_FEISHU_MIRROR_CHAT_IDS (comma-separated).
+   */
+  mirrorChatIds?: string[]
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -95,6 +109,7 @@ export const Config = z.object({
   backgroundPush: z.union([z.const('off'), z.const('cron'), z.const('all')]).default('off'),
   roundButtons: z.union([z.const('on'), z.const('off')]).default('off'),
   toolDetail: z.union([z.const('off'), z.const('brief'), z.const('full')]).default('off'),
+  mirrorChatIds: z.array(z.string()).default([]),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -113,12 +128,13 @@ export interface ResolvedConfig {
   readonly backgroundPush: 'off' | 'cron' | 'all'
   readonly roundButtons: 'on' | 'off'
   readonly toolDetail: 'off' | 'brief' | 'full'
+  readonly mirrorChatIds: readonly string[]
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
   'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle', 'btwContextMessages',
-  'backgroundPush', 'roundButtons', 'toolDetail',
+  'backgroundPush', 'roundButtons', 'toolDetail', 'mirrorChatIds',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
@@ -168,6 +184,15 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     throw new Error('dsh-feishu: toolDetail must be one of "off", "brief", "full"')
   }
   const toolDetail = toolDetailValue ?? 'off'
+  // DSH_FEISHU_MIRROR_CHAT_IDS (comma-separated oc_ ids) EXTENDS the config
+  // list, same rule as DSH_FEISHU_OPERATORS: trimmed, empties dropped, and the
+  // active chat is filtered out at delivery time (never here — the active chat
+  // moves).
+  const envMirror = env.DSH_FEISHU_MIRROR_CHAT_IDS
+  const envMirrorList = envMirror === undefined || envMirror.trim() === ''
+    ? []
+    : envMirror.split(',').map(id => id.trim()).filter(id => id !== '')
+  const mirrorChatIds = Object.freeze([...(config?.mirrorChatIds ?? []).map(id => id.trim()).filter(id => id !== ''), ...envMirrorList])
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   // DSH_FEISHU_OPERATORS (comma-separated open_ids) EXTENDS the config list —
@@ -206,5 +231,6 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     backgroundPush,
     roundButtons,
     toolDetail,
+    mirrorChatIds,
   })
 }
