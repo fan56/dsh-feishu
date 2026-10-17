@@ -3,6 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- **0.2.1 wave verification (`chore(deps)`)**: devDependency `@deepseek-ai/dsh-skill` re-pinned `0.2.0-rc.2` → `0.2.1-rc.2`; peer-dependency floor `>=0.2.0-rc.2` untouched. CI dsh install restored to newest-of(latest/next) runtime resolution (reverting the 2026-10-17 pin). Verified against an isolated 0.2.1-rc.2 host closure via `DSH_CLOSURE_DIR` (`dsh-skill` .d.ts surface unchanged on the rc.2 line): tsc check clean, 509 pass / 0 fail, real-host smoke boot PASS.
+
 ## [0.16.0] - 2026-10-12
 
 ### Added
