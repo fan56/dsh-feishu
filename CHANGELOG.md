@@ -5,6 +5,11 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-30
+
+### Fixed
+- **A single read-only degrade no longer poisons every later session.** When the host's single-writer guard refused a cold resume (`SessionAlreadyOwnedError` — the session was live in another dsh process), the bot degraded to the read-only remote view, and NOTHING ever cleared that view again: `isReadOnlyView()` is backed by the watcher tail, which only `detach()`/teardown stopped, while every successful `bind()`/`createNew()` left it running. From then on every drive was refused with 「当前为只读旁观（该会话正由另一进程驱动）」 — resuming ANY session (even ones nobody held) and even a freshly `/new`-created session all stayed read-only until the plugin reloaded. Both bind arms and the create arm now stop the remote watch first (the promote path already did), so resuming the watched session is the takeover, resuming anything else is a clean switch away, and `/new` starts unpoisoned. Regression tests cover the takeover arm, the switch arm, and the `/new` arm. Verified: full unit suite (511 pass), typecheck, and the real-host boot smoke.
+
 ### Changed
 - **0.2.1 wave verification (`chore(deps)`)**: devDependency `@deepseek-ai/dsh-skill` re-pinned `0.2.0-rc.2` → `0.2.1-rc.2`; peer-dependency floor `>=0.2.0-rc.2` untouched. CI dsh install restored to newest-of(latest/next) runtime resolution (reverting the 2026-10-17 pin). Verified against an isolated 0.2.1-rc.2 host closure via `DSH_CLOSURE_DIR` (`dsh-skill` .d.ts surface unchanged on the rc.2 line): tsc check clean, 509 pass / 0 fail, real-host smoke boot PASS.
 
