@@ -411,6 +411,9 @@ export class SessionBinder {
   }
 
   private async createNewInner(cwd: string, selection?: ModelSelection, presetId?: string): Promise<BindResult> {
+    // Same exit rule as bindInner: /new must not inherit a stale read-only
+    // view from an earlier degrade — the fresh session is locally owned.
+    await this.stopWatchRemote()
     await this.releaseOwned()
     const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
     // A fresh UUID cannot collide: no other process knows this id, and the
@@ -459,6 +462,13 @@ export class SessionBinder {
   }
 
   private async bindInner(id: string, agentOptions?: { provider?: string; model?: string }): Promise<BindResult> {
+    // A successful local bind IS the exit from a read-only remote view.
+    // Without this, one SessionAlreadyOwnedError degrade poisons every later
+    // surface: resuming ANY session (even a fresh /new one) keeps reporting
+    // 只读旁观 because isReadOnlyView() only ever cleared on detach. Resuming
+    // the watched session is the takeover; anything else is a switch away.
+    // No-op when no watch is active.
+    await this.stopWatchRemote()
     const live = this.agents.get(SessionId(id))
     if (live !== undefined) {
       if (this.owned !== undefined && this.owned.agent === live) {

@@ -270,6 +270,65 @@ test('watchRemote backfills durable rows and detach clears the view', async () =
   }
 })
 
+test('a successful bind exits the read-only remote view', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  const log = [
+    '{"type":"session","id":"sess-view"}',
+    '{"type":"turn/end","seq":3,"data":{}}',
+  ].join('\n')
+  const binder = new SessionBinder(
+    makeGuardContext({ headers: [{ id: 'sess-view', cwd: '/proj/v' }], registry: reg }),
+    { viewerOptions: { intervalMs: 60_000, decode: async () => log } },
+  )
+  try {
+    await binder.watchRemote('sess-view', () => {})
+    assert.equal(binder.isReadOnlyView(), true)
+    // Takeover arm: resuming the watched session itself must lift the view —
+    // otherwise every later drive is refused with 只读旁观 forever.
+    await binder.bind('sess-view')
+    assert.equal(binder.isReadOnlyView(), false, 'resuming the watched session exits the view')
+    // Switch arm: an active watch must not poison a different session either.
+    await binder.watchRemote('sess-view', () => {})
+    assert.equal(binder.isReadOnlyView(), true)
+    await binder.bind('sess-other')
+    assert.equal(binder.isReadOnlyView(), false, 'resuming another session exits the view')
+    assert.equal(binder.getSessionId(), 'sess-other')
+  } finally {
+    // The unfixed binder leaves the tail's ref'd timer alive — without this
+    // cleanup the test PROCESS would hang instead of failing the assertion.
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('createNew exits the read-only remote view', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  const log = [
+    '{"type":"session","id":"sess-view"}',
+    '{"type":"turn/end","seq":3,"data":{}}',
+  ].join('\n')
+  const binder = new SessionBinder(
+    makeGuardContext({ headers: [{ id: 'sess-view', cwd: '/proj/v' }], registry: reg }),
+    { viewerOptions: { intervalMs: 60_000, decode: async () => log } },
+  )
+  try {
+    await binder.watchRemote('sess-view', () => {})
+    assert.equal(binder.isReadOnlyView(), true)
+    const created = await binder.createNew('/tmp/work')
+    assert.equal(binder.isReadOnlyView(), false, 'a fresh /new session must not inherit the view')
+    assert.equal(binder.getSessionId(), created.sessionId)
+  } finally {
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Agent-preset composition (issue #2): a bare create/resume composes against
 // the empty global layer — web/headless profiles load their tool plugins
