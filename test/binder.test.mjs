@@ -35,6 +35,8 @@ function makeRegistry() {
           session: { id: String(options.resumeSessionId) },
           status: 'idle',
           disposed: false,
+          followups: [],
+          followup(message) { this.followups.push(message) },
         }
         const handle = {
           agent,
@@ -322,6 +324,131 @@ test('createNew exits the read-only remote view', async () => {
     const created = await binder.createNew('/tmp/work')
     assert.equal(binder.isReadOnlyView(), false, 'a fresh /new session must not inherit the view')
     assert.equal(binder.getSessionId(), created.sessionId)
+  } finally {
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Queue-and-take-over: typed-while-spectating follow-ups drain into the
+// session the moment a bind wins the lease — via the promote poll (hook) or
+// an explicit /resume takeover. Restores the 3c39cda contract whose wiring
+// the host-lease refactor orphaned.
+
+const VIEW_LOG = [
+  '{"type":"session","id":"sess-view"}',
+  '{"type":"turn/end","seq":3,"data":{}}',
+].join('\n')
+
+function makeViewBinder(reg, promoteIntervalMs) {
+  return new SessionBinder(
+    makeGuardContext({ headers: [{ id: 'sess-view', cwd: '/proj/v' }], registry: reg }),
+    { viewerOptions: { intervalMs: 60_000, promoteIntervalMs, decode: async () => VIEW_LOG } },
+  )
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+test('a won promote invokes the hook; the queue drains into the fresh agent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  const realResume = reg.agents.resume
+  const binder = makeViewBinder(reg, 10)
+  try {
+    reg.agents.resume = async () => { throw new SessionAlreadyOwnedError('sess-view') }
+    const seen = []
+    await binder.watchRemote('sess-view', events => seen.push(...events.map(e => e.type)))
+    assert.equal(binder.isReadOnlyView(), true)
+    const hooks = []
+    binder.setOnPromotable(async () => { hooks.push(binder.getSessionId()) })
+    binder.queueRemoteFollowup('first')
+    binder.queueRemoteFollowup('second')
+    assert.equal(binder.outboxSize(), 2, 'queueing armed the promote poll')
+    // The owner releases: the poll's bind probe now wins.
+    reg.agents.resume = realResume
+    await sleep(150)
+    assert.equal(hooks.length, 1, 'the registered takeover hook fired exactly once')
+    assert.equal(hooks[0], 'sess-view', 'the hook ran after the bind — the session is ours')
+    assert.equal(binder.isReadOnlyView(), false)
+    assert.equal(binder.getSessionId(), 'sess-view')
+    assert.equal(binder.outboxSize(), 2, 'draining is the hook\'s job (bot side), the binder only hands over')
+    binder.drainOutboxIntoAgent()
+    const agent = binder.getAgent()
+    assert.equal(agent.followups.length, 2, 'both queued follow-ups reached the fresh agent')
+    assert.equal(binder.outboxSize(), 0)
+  } finally {
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a lost promote keeps watching through the ORIGINAL view callback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  const binder = makeViewBinder(reg, 10)
+  try {
+    reg.agents.resume = async () => { throw new SessionAlreadyOwnedError('sess-view') }
+    const seen = []
+    await binder.watchRemote('sess-view', events => seen.push(...events.map(e => e.type)))
+    const baseline = seen.length
+    const hooks = []
+    binder.setOnPromotable(async () => { hooks.push(1) })
+    binder.queueRemoteFollowup('x')
+    await sleep(150)
+    assert.equal(hooks.length, 0, 'the bind never won against the live owner')
+    assert.equal(binder.isReadOnlyView(), true, 'back to spectating, not a dead view')
+    assert.ok(seen.length > baseline, 'the re-watch reuses the original onEvents (backfill reflows)')
+  } finally {
+    // detach also stops the retry poll — its ref'd timer would hang the
+    // test PROCESS after the (always-failing) assertions.
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an explicit resume of the watched session reports the takeover and keeps the queue', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  // 60s promote interval: the poll must not win the race this test drives.
+  const binder = makeViewBinder(reg, 60_000)
+  try {
+    await binder.watchRemote('sess-view', () => {})
+    binder.queueRemoteFollowup('a')
+    const result = await binder.bind('sess-view')
+    assert.equal(result.tookOverWatch, true)
+    assert.equal(binder.isReadOnlyView(), false)
+    assert.equal(binder.outboxSize(), 1, 'the explicit takeover leaves the drain to the caller')
+    binder.drainOutboxIntoAgent()
+    assert.equal(binder.getAgent().followups.length, 1)
+  } finally {
+    await binder.detach()
+    delete process.env.DSH_SESSION_ROOT
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('resuming a DIFFERENT session drops the queue as stale', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-feishu-view-'))
+  process.env.DSH_SESSION_ROOT = root
+  const reg = makeRegistry()
+  const binder = makeViewBinder(reg, 60_000)
+  try {
+    await binder.watchRemote('sess-view', () => {})
+    binder.queueRemoteFollowup('a')
+    binder.queueRemoteFollowup('b')
+    const result = await binder.bind('sess-other')
+    assert.equal(result.tookOverWatch, undefined)
+    assert.equal(result.droppedQueued, 2)
+    assert.equal(binder.outboxSize(), 0)
+    assert.equal(binder.isReadOnlyView(), false)
+    assert.equal(binder.getSessionId(), 'sess-other')
   } finally {
     await binder.detach()
     delete process.env.DSH_SESSION_ROOT

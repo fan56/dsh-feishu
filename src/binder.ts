@@ -55,6 +55,13 @@ export interface BindResult {
   readonly agent: Agent
   /** Created sessions only: the bot-owned selection ref (/model live-switch). */
   readonly selectionRef?: ModelSelectionRef
+  /** The bound session was the one under an active read-only remote watch —
+   * an explicit takeover; the caller drains the queued follow-ups into the
+   * freshly bound agent. */
+  readonly tookOverWatch?: boolean
+  /** Queued follow-ups dropped because they addressed a DIFFERENT watched
+   * session (the user switched away). */
+  readonly droppedQueued?: number
 }
 
 /**
@@ -120,6 +127,9 @@ export class SessionBinder {
   private remoteTail: RemoteSessionTail | undefined
   /** Id of the session watched right now. */
   private remoteWatchId: string | undefined
+  /** onEvents of the active watch — a failed promote re-watches with it
+   * (a no-op callback would leave the phone painting nothing). */
+  private remoteOnEvents: ((events: Array<Record<string, unknown>>) => void) | undefined
   /** Follow-ups typed while watching — sent once promotion wins the lock. */
   private readonly outbox: string[] = []
   private promotingRemote = false
@@ -141,6 +151,10 @@ export class SessionBinder {
 
   queueRemoteFollowup(text: string): void {
     this.outbox.push(text)
+    // The watch may predate the first queued message (the poll only starts
+    // at watch time when the outbox is already non-empty) — arm it now so
+    // the takeover actually gets probed.
+    if (this.remoteWatchId !== undefined) this.startPromotePoll(this.remoteWatchId)
   }
 
   takeOutbox(): string[] {
@@ -149,6 +163,10 @@ export class SessionBinder {
 
   hasOutbox(): boolean {
     return this.outbox.length > 0
+  }
+
+  outboxSize(): number {
+    return this.outbox.length
   }
 
   private opChain: Promise<void> = Promise.resolve()
@@ -176,6 +194,9 @@ export class SessionBinder {
     if (this.promotingRemote || !this.hasOutbox()) return
     const hook = this.hook
     if (hook === undefined) return
+    // Saved BEFORE stopWatchRemote: the failure path re-watches with the
+    // SAME view callback — a no-op would leave the phone painting nothing.
+    const onEvents0 = this.remoteOnEvents
     this.promotingRemote = true
     try {
       // Stop spectating FIRST so bot-side folds during binding stay sane.
@@ -186,10 +207,21 @@ export class SessionBinder {
       await this.bind(watchId)
     } catch {
       this.promotingRemote = false
-      try { await this.watchRemoteInner(watchId, () => {}) } catch { /* log gone */ }
+      try { await this.watchRemoteInner(watchId, onEvents0 ?? (() => {})) } catch { /* log gone */ }
       return
     }
     this.promotingRemote = false
+    // Takeover WON: the bind holds the host lease. Finalize through the
+    // registered bot hook (store binding, reset run view, drain the outbox
+    // into the fresh agent, settle the cards + takeover announce).
+    // Best-effort — a failed Lark reply must NOT re-enter the watch (the
+    // lease is already ours; re-watching would fight our own binding).
+    try {
+      await hook(watchId)
+    } catch (error) {
+      const logger = (this.ctx as { logger?: { warn(format: string, ...values: readonly unknown[]): void } }).logger
+      logger?.warn('dsh-feishu: promote finalize hook failed: %o', error)
+    }
   }
 
   /** Send the drained follow-ups into the freshly bound local agent. */
@@ -222,6 +254,13 @@ export class SessionBinder {
     onEvents: (events: Array<Record<string, unknown>>) => void,
   ): Promise<void> {
     await this.stopWatchRemote()
+    // Kept for the promote-failure re-watch (same view, not a blank one).
+    this.remoteOnEvents = onEvents
+    // The watched id — the queue arm (queueRemoteFollowup) and the explicit
+    // takeover detection (bindInner) both key off this. It was NEVER assigned
+    // before (stopWatchRemote cleared a field nothing set) — one more wire
+    // the dead channel was missing.
+    this.remoteWatchId = sessionId
     const cwd = await this.headerCwdOf(sessionId)
     if (cwd === undefined) throw new Error(`cannot locate the log of ${sessionId} for read-only viewing`)
     this.sessionId = sessionId
@@ -257,6 +296,7 @@ export class SessionBinder {
   private async stopWatchRemote(): Promise<void> {
     this.stopPromotePoll()
     this.remoteWatchId = undefined
+    this.remoteOnEvents = undefined
     if (this.remoteTail === undefined) return
     this.remoteTail.stop()
     this.remoteTail = undefined
@@ -414,6 +454,13 @@ export class SessionBinder {
     // Same exit rule as bindInner: /new must not inherit a stale read-only
     // view from an earlier degrade — the fresh session is locally owned.
     await this.stopWatchRemote()
+    // Queued follow-ups addressed the previously watched session; a deliberate
+    // fresh start strands them (logged-only drop — no announce surface here).
+    const stranded = this.takeOutbox()
+    if (stranded.length > 0) {
+      const logger = (this.ctx as { logger?: { warn(format: string, ...values: readonly unknown[]): void } }).logger
+      logger?.warn('dsh-feishu: /new dropped %d queued follow-up(s) from the watched session', stranded.length)
+    }
     await this.releaseOwned()
     const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
     // A fresh UUID cannot collide: no other process knows this id, and the
@@ -468,19 +515,28 @@ export class SessionBinder {
     // 只读旁观 because isReadOnlyView() only ever cleared on detach. Resuming
     // the watched session is the takeover; anything else is a switch away.
     // No-op when no watch is active.
+    const watchTarget = this.remoteWatchId
     await this.stopWatchRemote()
+    // Queued follow-ups address the WATCHED session: switching to a different
+    // one strands them — drop (the count rides back to the caller's announce)
+    // instead of leaking them into an unrelated session later.
+    const droppedQueued = watchTarget !== undefined && watchTarget !== id ? this.takeOutbox().length : 0
+    const watchNote = {
+      ...(watchTarget === id ? { tookOverWatch: true } : {}),
+      ...(droppedQueued > 0 ? { droppedQueued } : {}),
+    }
     const live = this.agents.get(SessionId(id))
     if (live !== undefined) {
       if (this.owned !== undefined && this.owned.agent === live) {
         // The live agent IS our own resumed handle — keep ownership as is.
         this.sessionId = id
-        return { sessionId: id, mode: 'resumed', agent: live }
+        return { sessionId: id, mode: 'resumed', agent: live, ...watchNote }
       }
       // Someone else owns the live agent — release any handle of OURS (for
       // another session, or a stale duplicate) and attach to theirs.
       await this.releaseOwned()
       this.sessionId = id
-      return { sessionId: id, mode: 'attached', agent: live }
+      return { sessionId: id, mode: 'attached', agent: live, ...watchNote }
     }
     // Resume arm: load the persisted session; we own the handle.
     const previous = this.owned
@@ -516,7 +572,7 @@ export class SessionBinder {
     // the old agent stays live and adoptable by other surfaces.
     this.owned = handle
     this.sessionId = id
-    return { sessionId: id, mode: 'resumed', agent: handle.agent }
+    return { sessionId: id, mode: 'resumed', agent: handle.agent, ...watchNote }
   }
 
   /** Drop the binding (detach). Only OUR handle is disposed — never an attached one. */

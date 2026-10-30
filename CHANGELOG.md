@@ -5,6 +5,11 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-10-30
+
+### Fixed
+- **The queue-and-take-over channel actually works now.** The 3c39cda feature ("phone follow-ups queue and take over") shipped as machinery with no wiring: `queueRemoteFollowup` was never called by any commit (spectating prompts bounced off the read-only notice), the promote-success hook was registered but never invoked (the takeover announce + queue drain were unreachable), `remoteWatchId` was cleared but never assigned (so nothing could arm the poll or detect an explicit takeover), and a lost promote re-watched with a blank callback (the phone would have stopped painting). The full contract is now live: a prompt typed while spectating QUEUES (with a 第 N 条 notice + seen-reaction) instead of bouncing; the poll probes the bind every second and, on winning, fires the registered hook (store binding, reset run view, drain the queue into the fresh agent, 「已自动接管」announce); a lost probe re-enters the watch with the ORIGINAL view callback; an explicit `/resume` of the watched session is the takeover (reports 「排队 N 条已随接管发送」) and `/resume` of a different session drops the stale queue with a note (`droppedQueued` on `BindResult`); `/new` drops the stranded queue with a log line. The degrade announce wording now matches the behavior. Tests cover the won promote (hook + drain into the fresh agent), the lost promote (original callback preserved), the explicit takeover, the stale-queue drop, and the queueing prompt. Verified: typecheck, the full unit suite (516 pass), and the real-host boot smoke.
+
 ## [0.16.1] - 2026-10-30
 
 ### Fixed

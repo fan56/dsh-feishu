@@ -904,7 +904,7 @@ export class FeishuBot {
       await this.reply(
         `已进入只读旁观：${row.preview}\n`
         + '该会话正由另一个进程驱动，为避免日志分叉不能从这里派活；\n'
-        + '对面的最终回复会同步到这里，对面退出该会话后排队消息会自动接管。/resume 或 /new 可切换。',
+        + '对面的最终回复会同步到这里，此时发消息会先排队，对面释放后自动接管并发出。/resume 或 /new 可切换。',
       )
     } catch (watchError: unknown) {
       this.ctx.logger.warn('dsh-feishu: watch remote %s failed: %o', row.sessionId, watchError)
@@ -925,6 +925,17 @@ export class FeishuBot {
     this.btw.cancelAll()
     const bound = await this.binder.bind(row.sessionId, await this.resolveResumeRoute(row.sessionId))
     void this.learnPreset(row.sessionId)
+    // An explicit resume can itself be the takeover the promote poll waits
+    // for (0.16.1 made bind clear the view) — drain what the operator queued
+    // while spectating. Switching to a DIFFERENT session drops their queue.
+    let queueNote = ''
+    if (bound.tookOverWatch === true) {
+      const queued = this.binder.outboxSize()
+      this.binder.drainOutboxIntoAgent()
+      if (queued > 0) queueNote = `\n（排队 ${queued} 条已随接管发送）`
+    } else if (typeof bound.droppedQueued === 'number' && bound.droppedQueued > 0) {
+      queueNote = `\n（已丢弃 ${bound.droppedQueued} 条排队消息——它们属于之前被旁观的会话）`
+    }
     await this.store.update({ boundSessionId: row.sessionId, picker: undefined })
     this.pendingPicker = undefined
     this.resetRunView()
@@ -932,7 +943,8 @@ export class FeishuBot {
     await this.reply(
       (notice === undefined ? '' : `${notice}\n`)
       + `已进入会话：${row.preview}\n`
-      + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）\n`
+      + `（${bound.mode === 'attached' ? '附着正在运行的会话' : '已从持久化恢复'} · ${row.sessionId.slice(0, 8)}）`
+      + `${queueNote}\n`
       + '直接发消息即可派活；/help 查看全部命令。',
     )
     // Settle the interactive picker card (best-effort; absent after restart).
@@ -1553,14 +1565,24 @@ export class FeishuBot {
 
   private async handlePrompt(message: InboundMessage, text: string): Promise<void> {
     if (text === '') return
-    const readOnly = this.binder.isReadOnlyView()
+    if (this.binder.isReadOnlyView()) {
+      // Lockless viewer: never bounce — QUEUE. The promote poll re-binds the
+      // moment the other driver releases the lease and fires the registered
+      // takeover hook (drain + announce), completing the queue-and-take-over
+      // contract the degrade announce promises.
+      this.binder.queueRemoteFollowup(text)
+      await this.lark.react(message.messageId, EMOJI_SEEN)
+      await this.reply(
+        `已排队（第 ${this.binder.outboxSize()} 条）：该会话正由另一进程驱动，`
+        + '对面释放后自动接管并发出；/resume 或 /new 可切换。',
+      )
+      return
+    }
     const outcome = await this.injectPrompt(text)
     if (outcome === 'refused') {
-      if (readOnly) {
-        await this.reply('当前为只读旁观（该会话正由另一进程驱动）。发 /resume 切换会话，或在那边直接派活。')
-      } else {
-        await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')
-      }
+      // Watching can no longer reach here (queued above); refusal means no
+      // live binding.
+      await this.reply('尚未绑定会话。发 /resume 查看并进入一个会话；/help 查看命令。')
       return
     }
     if (outcome === 'opened') {

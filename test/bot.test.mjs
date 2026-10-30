@@ -213,6 +213,25 @@ test('handlePrompt steers into the running turn, follows up when idle', async ()
   assert.equal(bot.turnOriginMessageId, 'om_2')
 })
 
+test('handlePrompt queues while spectating instead of bouncing off the read-only notice', async () => {
+  const queued = []
+  const replies = []
+  const reactions = []
+  const bot = roundBot({
+    async sendCard(_chatId, card) { replies.push(card.body.elements[0].content); return 'm1' },
+    async react(id, emoji) { reactions.push([id, emoji]) },
+  }, {
+    getSessionId: () => 's1',
+    isReadOnlyView: () => true,
+    queueRemoteFollowup(text) { queued.push(text) },
+    outboxSize: () => queued.length,
+  })
+  await bot.handlePrompt({ messageId: 'om_1', openId: 'ou_x', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', text: 'hello from the phone' }, 'hello from the phone')
+  assert.deepEqual(queued, ['hello from the phone'])
+  assert.ok(replies[0].includes('已排队（第 1 条）'), `queue notice got: ${replies[0]}`)
+  assert.deepEqual(reactions[0], ['om_1', 'EYES'])
+})
+
 // ------------------------------------------------- /resume list auto degrade --
 
 function resumeHeader(id, createdAt = 1000) {
