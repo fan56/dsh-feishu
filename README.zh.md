@@ -280,4 +280,4 @@ npm test         # 构建 + node --test（230+ 个纯逻辑单测）
 
 ---
 
-*License: MIT. 作者 fan56.*
+*License: Apache-2.0. 作者 fan56.*

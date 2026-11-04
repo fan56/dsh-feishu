@@ -341,4 +341,4 @@ npm test         # build + node --test (230+ pure-logic unit tests)
 
 ---
 
-*License: MIT. Author fan56.*
+*License: Apache-2.0. Author fan56.*

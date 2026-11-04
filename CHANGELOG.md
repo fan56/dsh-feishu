@@ -5,6 +5,9 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Switch license from MIT to Apache-2.0
+
 ## [0.16.2] - 2026-10-30
 
 ### Fixed
