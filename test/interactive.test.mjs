@@ -31,7 +31,7 @@ async function waitFor(condition, ms = 2000) {
 function interactiveBot({
   bound = 's1',
   unbound = false,
-  selectionRef,
+  selectionSurface,
   agent,
   llm,
   presets,
@@ -76,8 +76,23 @@ function interactiveBot({
     allowlist: new Set(['ou_op']),
     now: () => 1000,
   })
-  if (selectionRef !== undefined) bot.selectionRefs.set(boundId, selectionRef)
+  if (selectionSurface !== undefined) bot.selectionRefs.set(boundId, selectionSurface)
   return { bot, sends, patches, state, agentRef }
+}
+
+/**
+ * Fake of the host's agent-owned model selection surface (`Model`, the
+ * dsh ≥ 0.2.2-rc.1 shape): `current()` reads, `select()` writes (recorded on
+ * `.written`, last write becomes the current read).
+ */
+function fakeModelSurface(initial = undefined) {
+  const written = []
+  let current = initial
+  return {
+    current: () => current,
+    select(selection) { written.push(selection); current = selection },
+    written,
+  }
 }
 
 /** The selector flow id of a just-sent selector card (buttons or select). */
@@ -134,10 +149,10 @@ test('/think lists the model adapter efforts with the default row first (buttons
   await run
 })
 
-test('/think picked effort applies to the live selection ref', async () => {
-  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
+test('/think picked effort applies to the live selection surface', async () => {
+  const surface = fakeModelSurface({ provider: 'zhipu', model: 'glm-4.6' })
   const { bot, sends, patches } = interactiveBot({
-    selectionRef: ref,
+    selectionSurface: surface,
     llm: { async resolveModelInfo() { return { reasoning: { efforts: EFFORTS } } } },
   })
 
@@ -147,16 +162,16 @@ test('/think picked effort applies to the live selection ref', async () => {
   await run
   await tick()
 
-  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.6', reasoningEffort: 'high' })
+  assert.deepEqual(surface.current(), { provider: 'zhipu', model: 'glm-4.6', reasoningEffort: 'high' })
   assert.equal(patches.at(-1).card.header.template, 'green')
   assert.match(JSON.stringify(sends.at(-1)), /思考档位：High/)
   assert.match(JSON.stringify(sends.at(-1)), /zhipu \/ glm-4\.6/)
 })
 
-test('/think picked default clears the effort override on the live ref', async () => {
-  const ref = { current: { provider: 'zhipu', model: 'glm-4.6', reasoningEffort: 'high' }, assembled: undefined }
+test('/think picked default clears the effort override on the live surface', async () => {
+  const surface = fakeModelSurface({ provider: 'zhipu', model: 'glm-4.6', reasoningEffort: 'high' })
   const { bot, sends } = interactiveBot({
-    selectionRef: ref,
+    selectionSurface: surface,
     llm: { async resolveModelInfo() { return { reasoning: { efforts: EFFORTS } } } },
   })
 
@@ -165,8 +180,8 @@ test('/think picked default clears the effort override on the live ref', async (
   pick(bot, flowIdOf(sends[0]), 'default')
   await run
 
-  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.6' })
-  assert.equal('reasoningEffort' in ref.current, false)
+  assert.deepEqual(surface.current(), { provider: 'zhipu', model: 'glm-4.6' })
+  assert.equal('reasoningEffort' in surface.current(), false)
 })
 
 test('/think on a desktop-driven session stores the phone default (effort kept)', async () => {
@@ -378,9 +393,9 @@ const PROFILES_DOC = {
   ],
 }
 
-test('/profile-switch lists routable profiles with their route summary; pick applies to the live ref', async () => {
-  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
-  const { bot, sends, patches } = interactiveBot({ selectionRef: ref })
+test('/profile-switch lists routable profiles with their route summary; pick applies to the live surface', async () => {
+  const surface = fakeModelSurface({ provider: 'zhipu', model: 'glm-4.6' })
+  const { bot, sends, patches } = interactiveBot({ selectionSurface: surface })
   const { dir, path } = await withProfilesDoc(PROFILES_DOC)
   try {
     const run = runProfileSwitchCommand(bot.host, path)
@@ -397,7 +412,7 @@ test('/profile-switch lists routable profiles with their route summary; pick app
     await run
     await tick()
 
-    assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
+    assert.deepEqual(surface.current(), { provider: 'zhipu', model: 'glm-4.7', reasoningEffort: 'high' })
     assert.equal(patches.at(-1).card.header.template, 'green')
     assert.match(JSON.stringify(sends.at(-1)), /已应用 profile「work」/)
   } finally {
@@ -405,7 +420,7 @@ test('/profile-switch lists routable profiles with their route summary; pick app
   }
 })
 
-test('/profile-switch pick lands in the phone default when no live ref exists', async () => {
+test('/profile-switch pick lands in the phone default when no live surface exists', async () => {
   const { bot, sends, state } = interactiveBot({})
   const { dir, path } = await withProfilesDoc(PROFILES_DOC)
   try {

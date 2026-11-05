@@ -23,7 +23,7 @@
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type Model, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { headerOf as headerOfEntry, sessionLogRoot } from './resume-table.ts'
@@ -48,13 +48,31 @@ interface PersistenceSeam {
   list(signal?: AbortSignal): Promise<Array<HeaderLike | { header: HeaderLike }>>
 }
 
+/**
+ * The agent-owned model-selection surface (`Model`: `current()` / `select()`).
+ * Every agent created through the registry's factory is the loop's concrete
+ * agent and always carries it as `.model`, but the public `Agent` face is
+ * just `{ id }` — so read the property structurally instead of importing the
+ * loop's concrete class. Returns undefined when the surface is absent (e.g. a
+ * future host that moves it again) — callers degrade to the phone-default
+ * branch instead of crashing.
+ */
+function modelSurfaceOf(agent: Agent): Model | undefined {
+  const candidate = (agent as { model?: unknown }).model
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const surface = candidate as { current?: unknown; select?: unknown }
+  return typeof surface.current === 'function' && typeof surface.select === 'function' ? (candidate as Model) : undefined
+}
+
 /** Result of a successful bind. */
 export interface BindResult {
   readonly sessionId: string
   readonly mode: BindMode
   readonly agent: Agent
-  /** Created sessions only: the bot-owned selection ref (/model live-switch). */
-  readonly selectionRef?: ModelSelectionRef
+  /** Created sessions only: the agent-owned selection surface (/model live-switch
+   * reads `current()` and writes `select()`). dsh ≥ 0.2.2-rc.1 moved the mutable
+   * ref inside the host — the loop's concrete agent always exposes `.model`. */
+  readonly model?: Model
   /** The bound session was the one under an active read-only remote watch —
    * an explicit takeover; the caller drains the queued follow-ups into the
    * freshly bound agent. */
@@ -433,11 +451,13 @@ export class SessionBinder {
    */
   /**
    * Create a fresh agent bound to the given model selection. The selection
-   * goes in twice: agentOptions covers the pre-setup surface, and a setup
-   * hook couples it into the agent's request waterfall via
-   * installModelSelection — agentOptions alone cannot carry a reasoning
-   * effort, and effort-less requests die on endpoints that mandate
-   * reasoning (400 "Reasoning is mandatory", ox-alpha in live use).
+   * rides in twice: agentOptions carries the route INCLUDING the reasoning
+   * effort (dsh ≥ 0.2.2-rc.1 AgentOptions gained `reasoningEffort`; before
+   * that a setup hook had to couple a mutable ref in because agentOptions
+   * alone could not carry an effort, and effort-less requests die on
+   * endpoints that mandate reasoning — 400 "Reasoning is mandatory"), and
+   * installModelSelection(agentCtx) arms the model-switch notice so a later
+   * /model live-switch is announced on the next admitted request.
    */
   async createNew(cwd: string, selection?: ModelSelection, presetId?: string): Promise<BindResult> {
     if (this.binding !== undefined) await this.binding.catch(() => undefined)
@@ -462,7 +482,6 @@ export class SessionBinder {
       logger?.warn('dsh-feishu: /new dropped %d queued follow-up(s) from the watched session', stranded.length)
     }
     await this.releaseOwned()
-    const selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
     // A fresh UUID cannot collide: no other process knows this id, and the
     // host's own write lease covers it from the first materializing write.
     const sessionId = crypto.randomUUID()
@@ -483,17 +502,30 @@ export class SessionBinder {
       // A bare create has NO route — the first request dies with "agent has
       // no provider/model" (the TUI composes its default selection before
       // creating; the bot inherits the previous session's route instead).
-      ...(selection !== undefined ? { agentOptions: { provider: selection.provider, model: selection.model } } : {}),
+      ...(selection !== undefined
+        ? {
+            agentOptions: {
+              provider: selection.provider,
+              model: selection.model,
+              ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+            },
+          }
+        : {}),
       setup: async agentCtx => {
-        installModelSelection(agentCtx, selectionRef)
+        installModelSelection(agentCtx)
         if (preset !== undefined) await this.mountPreset(agentCtx, preset.id)
       },
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)
-    // The created session's model selection is bot-owned — handing the ref
-    // back lets the bot live-switch the route later (/model).
-    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, selectionRef }
+    // The created session's model selection is host-owned — handing the
+    // agent's selection surface back lets the bot live-switch the route
+    // later (/model). The loop's concrete agent (dsh-agent-loop
+    // ReactLoopAgent, lib/index.js:545 `this.model = new AgentModel(...)`)
+    // always carries `.model`; the public `Agent` face (`{ id }`) does not
+    // declare it, so read it structurally.
+    const model = modelSurfaceOf(handle.agent)
+    return { sessionId: this.sessionId, mode: 'created', agent: handle.agent, model }
   }
 
   /** Bind one session id (attach when live, else resume). */

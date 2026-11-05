@@ -51,7 +51,7 @@ import {
   type ModelInfo,
   type ModelProviderInfo,
 } from './model-card.ts'
-import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Model } from '@deepseek-ai/dsh-agent'
 import { SelectorManager, type SelectorOutcome } from './selector.ts'
 import { parseSelectorAction, type SelectorSpec } from './selector-card.ts'
 import {
@@ -242,8 +242,8 @@ export class FeishuBot {
   private readonly askRequestIds = new WeakMap<object, string>()
   /** The interactive /resume picker card awaiting a form submit. */
   private resumeCardMessageId: string | undefined
-  /** Bot-created sessions' model selection refs (/model live-switch). */
-  private readonly selectionRefs = new Map<string, ModelSelectionRef>()
+  /** Bot-created sessions' agent-owned model selection surfaces (/model live-switch). */
+  private readonly selectionRefs = new Map<string, Model>()
   /** Session id → agent-preset id learned at bind/create time (footer display). */
   private readonly presetBySession = new Map<string, string>()
   /** /btw side-question manager (phone surface; per-surface by design). */
@@ -342,10 +342,10 @@ export class FeishuBot {
       notify: text => { void this.reply(text).catch(() => undefined) },
       resolveSelection: () => {
         // Sync projection only: a running main line always has a live route
-        // (selectionRef / runState) — the persistence fallback is irrelevant
+        // (selection surface / runState) — the persistence fallback is irrelevant
         // for a btw, which requires the main line to be running.
         const bound = this.binder.getSessionId()
-        const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)?.current
+        const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)?.current()
         if (ref !== undefined && ref.provider !== undefined && ref.model !== undefined) {
           return {
             provider: ref.provider,
@@ -1334,8 +1334,8 @@ export class FeishuBot {
     this.resetRunView()
     try {
       const created = await this.binder.createNew(cwd, selection, picks.preset)
-      if (created.selectionRef !== undefined) {
-        this.selectionRefs.set(created.sessionId, created.selectionRef)
+      if (created.model !== undefined) {
+        this.selectionRefs.set(created.sessionId, created.model)
       }
       void this.learnPreset(created.sessionId, picks.preset)
       await this.store.update({ boundSessionId: created.sessionId, picker: undefined })
@@ -2212,22 +2212,23 @@ export class FeishuBot {
    * Shared model-selection apply core — /model submits AND the interactive
    * adapters (/think, /profile-switch) land here so the live-switch and
    * phone-default branches cannot drift apart. Live-switches bot-created
-   * sessions through their selection ref (an absent effort CLEARS any
-   * inherited one — installModelSelection's contract); otherwise remembers
-   * the pick as the phone default (used by /new, honored on the next live
-   * bind).
+   * sessions through their agent-owned selection surface (an absent effort
+   * follows adapter defaults without inheriting a previous one —
+   * Model.select's contract, same clear semantics the old mutable ref had);
+   * otherwise remembers the pick as the phone default (used by /new,
+   * honored on the next live bind).
    */
   private async applyModelSelection(selection: ModelSelectionUpdate): Promise<'live' | 'phone-default'> {
     const bound = this.binder.getSessionId()
-    const ref = bound === undefined ? undefined : this.selectionRefs.get(bound)
-    if (ref !== undefined) {
-      ref.current = {
+    const surface = bound === undefined ? undefined : this.selectionRefs.get(bound)
+    if (surface !== undefined) {
+      surface.select({
         provider: selection.provider,
         model: selection.model,
         ...(selection.reasoningEffort === undefined
           ? {}
           : { reasoningEffort: selection.reasoningEffort as ModelSelection['reasoningEffort'] }),
-      }
+      })
       return 'live'
     }
     await this.store.update({
@@ -2248,7 +2249,7 @@ export class FeishuBot {
   private async currentModelSelection(): Promise<CurrentSelection | undefined> {
     const bound = this.binder.getSessionId() ?? this.store.get().boundSessionId
     if (bound !== undefined) {
-      const refSelection = this.selectionRefs.get(bound)?.current
+      const refSelection = this.selectionRefs.get(bound)?.current()
       if (refSelection?.provider !== undefined && refSelection.model !== undefined) {
         return {
           provider: refSelection.provider,

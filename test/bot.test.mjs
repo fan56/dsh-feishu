@@ -1075,7 +1075,22 @@ test('interactive /resume submit inherits the picked session log route too', asy
 
 // ------------------------------------------------------------- /model --
 
-function modelBot(llm, selectionRef, bound = 'fresh-1') {
+/**
+ * Fake of the host's agent-owned model selection surface (`Model`, the
+ * dsh ≥ 0.2.2-rc.1 shape): `current()` reads, `select()` writes (recorded on
+ * `.written`, last write becomes the current read).
+ */
+function fakeModelSurface(initial = undefined) {
+  const written = []
+  let current = initial
+  return {
+    current: () => current,
+    select(selection) { written.push(selection); current = selection },
+    written,
+  }
+}
+
+function modelBot(llm, selectionSurface, bound = 'fresh-1') {
   const patches = []
   const sends = []
   const state = { lastChatId: 'oc_test', displayThink: true, boundSessionId: bound, picker: undefined, phoneModel: undefined }
@@ -1099,7 +1114,7 @@ function modelBot(llm, selectionRef, bound = 'fresh-1') {
     allowlist: new Set(['ou_op']),
     now: () => 1000,
   })
-  bot.selectionRefs.set(bound, selectionRef)
+  bot.selectionRefs.set(bound, selectionSurface)
   return { bot, sends, patches, state }
 }
 
@@ -1120,7 +1135,7 @@ test('/model step 1 lists providers; step 2 lists the chosen provider models', a
       return [{ id: 'glm-4.7', name: 'GLM-4.7' }, { id: 'glm-4.6', name: 'GLM-4.6' }]
     },
   }
-  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  const { bot, sends } = modelBot(llm, fakeModelSurface())
   await bot.handleModel()
   assert.equal(sends.length, 1)
   assert.match(sends[0].header.title.content, /1\/2 Provider/)
@@ -1137,10 +1152,10 @@ test('/model step 1 lists providers; step 2 lists the chosen provider models', a
   assert.equal(bot.modelFlow.providerCardMessageId, undefined)
 })
 
-test('/model submit live-switches bot-created sessions through the selection ref', async () => {
-  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
+test('/model submit live-switches bot-created sessions through the selection surface', async () => {
+  const surface = fakeModelSurface({ provider: 'zhipu', model: 'glm-4.6' })
   const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
-  const { bot, patches, state } = modelBot(llm, ref)
+  const { bot, patches, state } = modelBot(llm, surface)
   await bot.handleModel()
   await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
   bot.onCardAction({
@@ -1148,8 +1163,8 @@ test('/model submit live-switches bot-created sessions through the selection ref
     action: { tag: 'button', name: 'dsh_feishu_model_submit_f1', value: { action: 'dsh_feishu_model_submit', flow_id: bot.modelFlow.id, provider: 'zhipu' }, form_value: { model: 'glm-4.7' } },
   })
   await new Promise(r => setTimeout(r, 5))
-  // The selection ref was live-switched…
-  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.7' })
+  // The selection surface was live-switched…
+  assert.deepEqual(surface.current(), { provider: 'zhipu', model: 'glm-4.7' })
   // …the flow card settled green…
   assert.equal(patches.at(-1).card.header.template, 'green')
   // …and the phone default was NOT stored (live switch, not a default).
@@ -1157,9 +1172,9 @@ test('/model submit live-switches bot-created sessions through the selection ref
 })
 
 test('/model submit on a desktop-driven session stores the phone default instead', async () => {
-  const ref = undefined // no bot-owned selection ref — the session is desktop-driven
+  const surface = undefined // no bot-owned selection surface — the session is desktop-driven
   const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
-  const { bot, patches, state } = modelBot(llm, ref, 'desktop-1')
+  const { bot, patches, state } = modelBot(llm, surface, 'desktop-1')
   await bot.handleModel()
   await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
   bot.onCardAction({
@@ -1180,9 +1195,9 @@ test('/model without an llm service replies with a pointer', async () => {
 })
 
 test('model card callbacks from non-operators are silent no-ops', async () => {
-  const ref = { current: { provider: 'zhipu', model: 'glm-4.6' }, assembled: undefined }
+  const surface = fakeModelSurface({ provider: 'zhipu', model: 'glm-4.6' })
   const llm = { listProviders: () => modelProviders, async listModels() { return [{ id: 'glm-4.7', name: 'GLM-4.7' }] } }
-  const { bot, sends, patches, state } = modelBot(llm, ref)
+  const { bot, sends, patches, state } = modelBot(llm, surface)
   await bot.handleModel() // step 1 out: provider list (1 send)
   const flowId = bot.modelFlow.id
 
@@ -1206,7 +1221,7 @@ test('model card callbacks from non-operators are silent no-ops', async () => {
   })
   await new Promise(r => setTimeout(r, 5))
   assert.notEqual(bot.modelFlow, undefined) // handleModelSubmitted would have cleared it
-  assert.deepEqual(ref.current, { provider: 'zhipu', model: 'glm-4.6' })
+  assert.deepEqual(surface.current(), { provider: 'zhipu', model: 'glm-4.6' })
   assert.equal(state.phoneModel, undefined)
   assert.equal(patches.length, patchesBefore)
   assert.equal(sends.length, sendsAfterPick)
@@ -1357,7 +1372,7 @@ test('/model step 2 appends the context window when resolveModelInfo knows it', 
         : { context: { contextWindow: 32768 } }
     },
   }
-  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  const { bot, sends } = modelBot(llm, fakeModelSurface())
   await bot.handleModel()
   await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
   assert.equal(sends.length, 2)
@@ -1376,7 +1391,7 @@ test('/model step 2 degrades to the plain catalog when context resolution fails'
       throw new Error('adapter down')
     },
   }
-  const { bot, sends } = modelBot(llm, { current: undefined, assembled: undefined })
+  const { bot, sends } = modelBot(llm, fakeModelSurface())
   await bot.handleModel()
   await bot.handleModelProviderPicked({ provider: 'zhipu', flowId: bot.modelFlow.id })
   assert.equal(sends.length, 2)
