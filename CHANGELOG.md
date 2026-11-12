@@ -5,6 +5,9 @@ All notable changes to dsh-feishu are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **0.2.2-rc.2 wave: zero code changes.** devDependency `@deepseek-ai/dsh-skill` re-pinned `0.2.2-rc.1` → `0.2.2-rc.2`, lockfile re-resolved from registry.npmjs.org; the peer floor `>=0.2.2-rc.1` is unchanged (it already admits 0.2.2-rc.2 — same-tuple prerelease above the floor). ci.yml/release.yml host-closure installs already resolve newest-of(latest,next) live with a prerelease-aware compare — no workflow change. Verified against a real 0.2.2-rc.2 host closure (scratch `dsh@0.2.2-rc.2` install, DSH_CLOSURE_DIR relink): typecheck clean, 516/0 tests, boot smoke pass.
+
 ### Fixed
 - **Adapted to the dsh 0.2.2-rc.1 host wave.** The host dissolved the bot-owned mutable `ModelSelectionRef` (`{ current, assembled }`): `installModelSelection` is now single-argument (dsh-agent `model-selection.d.ts:56`, was `(agentCtx, selection: ModelSelectionRef)` at `:49`), and live model switching moved onto the agent-owned `Model` surface (`current()` / `select()`, dsh-agent `runtime-types.d.ts:47-64`) that the loop's concrete agent always exposes as `.model`. `/new` passes the full selection — including the reasoning effort, which `AgentOptions` now carries natively — through `agentOptions`, arms the switch notice via `installModelSelection(agentCtx)`, and hands the bot the captured `Model` surface; `/model`, `/think`, and `/profile-switch` live-switch through `surface.select()` with the same absent-effort-clears semantics as before, and every read goes through `surface.current()`. A structural accessor (`modelSurfaceOf`) degrades to `undefined` when a future host moves the surface again, falling back to the phone-default branch instead of crashing.
 
