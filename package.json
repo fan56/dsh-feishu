@@ -1,6 +1,6 @@
 {
   "name": "@aiwayds/dsh-feishu",
-  "version": "0.5.0",
+  "version": "0.17.1",
   "description": "dsh plugin: drive an existing dsh session from Feishu/Lark — round cards, interactive resume, ask-user cards, steer (outbound-only WebSocket bot)",
   "type": "module",
   "main": "lib/index.js",
@@ -43,7 +43,7 @@
     "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke-boot.mjs",
     "e2e": "bash e2e/web-profile-compat.sh",
-    "postinstall": "node scripts/link-dsh-closure.mjs"
+    "prepare": "node scripts/link-dsh-closure.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",

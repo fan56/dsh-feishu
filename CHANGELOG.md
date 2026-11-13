@@ -3,7 +3,11 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.17.1] - 2026-11-13
+
+### Fixed
+- **The published package no longer ships an install lifecycle hook — `postinstall` became `prepare` — so pnpm 11 updates stop failing with `ERR_PNPM_IGNORED_BUILDS` (see dsh-subagent-registry#10).** pnpm 11 defaults to `strictDepBuilds`: installing a dependency that declares an unapproved `preinstall`/`install`/`postinstall` exits non-zero, and the dsh host plugin manager rolls the update back. npm and pnpm never run `prepare` for registry dependencies, and pnpm's gate set is exactly those three install hooks, so the published manifest is now hook-free — the dev closure linking keeps running from the root `prepare` hook (`npm run link-closure` stays the manual entry, and the CI/release steps that call the linker explicitly are unaffected).
+- **The closure linker also stands down when `INIT_CWD` is set and is not the repo root** — npm runs `prepare` inside a throwaway clone when installing a git dependency, and a root install invoked from a subdirectory resolves here with `INIT_CWD` elsewhere. `INIT_CWD` equal to the repo root (a normal root install) and an unset `INIT_CWD` (a direct `node scripts/link-dsh-closure.mjs` call) still link; a `realpathSync` failure exits 0.
 
 ### Changed
 - **0.2.2-rc.2 wave: zero code changes.** devDependency `@deepseek-ai/dsh-skill` re-pinned `0.2.2-rc.1` → `0.2.2-rc.2`, lockfile re-resolved from registry.npmjs.org; the peer floor `>=0.2.2-rc.1` is unchanged (it already admits 0.2.2-rc.2 — same-tuple prerelease above the floor). ci.yml/release.yml host-closure installs already resolve newest-of(latest,next) live with a prerelease-aware compare — no workflow change. Verified against a real 0.2.2-rc.2 host closure (scratch `dsh@0.2.2-rc.2` install, DSH_CLOSURE_DIR relink): typecheck clean, 516/0 tests, boot smoke pass.
