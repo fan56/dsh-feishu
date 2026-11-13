@@ -3,6 +3,12 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **npm packaged upgrade regression test** (`test/packaged-upgrade.test.mjs`) — installs the published baseline release and upgrades it to the locally packed tarball, asserting the published manifest carries no `preinstall`/`install`/`postinstall` hook, that the upgrade emits no pnpm 11 unapproved-build report, and that the bundle patch and plugin entry still ship — the npm upgrade path regression for pnpm 11 `strictDepBuilds` (see dsh-subagent-registry#10).
+
 ## [0.17.1] - 2026-11-13
 
 ### Fixed
