@@ -77,6 +77,22 @@ export interface Config {
    * Override: DSH_FEISHU_TOOL_DETAIL.
    */
   toolDetail?: 'off' | 'brief' | 'full'
+  /**
+   * Ask/approval prepend + race against the host's client bridge (default
+   * `on`): register the phone answerer at the waterfall head and let the
+   * GUI/phone surfaces race for bound sessions. `off` keeps the legacy
+   * tail-registered, claim-and-consume behaviour byte-for-byte.
+   * Override: DSH_FEISHU_ASK_RACE.
+   */
+  askRace?: boolean
+  /**
+   * Escape hatch for an unpatched dsh-ask-router (default `off`): when an
+   * `askSurfaces` service is present AND askRace is on, `on` skips
+   * `router.register` and races on the standalone waterfall instead. `off`
+   * keeps today's router path. Never both — a takeover must not stack a
+   * second card. Override: DSH_FEISHU_ASK_ROUTER_TAKEOVER.
+   */
+  askRouterTakeover?: boolean
 }
 
 /** Runtime schema for {@link Config} (cordis validates the patch config with it). */
@@ -95,6 +111,8 @@ export const Config = z.object({
   backgroundPush: z.union([z.const('off'), z.const('cron'), z.const('all')]).default('off'),
   roundButtons: z.union([z.const('on'), z.const('off')]).default('off'),
   toolDetail: z.union([z.const('off'), z.const('brief'), z.const('full')]).default('off'),
+  askRace: z.boolean().default(true),
+  askRouterTakeover: z.boolean().default(false),
 }) as unknown as z<Config>
 
 /** Fully resolved, immutable runtime configuration. */
@@ -113,17 +131,27 @@ export interface ResolvedConfig {
   readonly backgroundPush: 'off' | 'cron' | 'all'
   readonly roundButtons: 'on' | 'off'
   readonly toolDetail: 'off' | 'brief' | 'full'
+  readonly askRace: boolean
+  readonly askRouterTakeover: boolean
 }
 
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'mode', 'domain', 'operators', 'appId', 'appSecret', 'appIdRef', 'appSecretRef',
   'statusIntervalMs', 'bodySegmentChars', 'resumeListStyle', 'btwContextMessages',
-  'backgroundPush', 'roundButtons', 'toolDetail',
+  'backgroundPush', 'roundButtons', 'toolDetail', 'askRace', 'askRouterTakeover',
 ])
 
 function envString(env: NodeJS.ProcessEnv, key: string): string | undefined {
   const value = env[key]?.trim()
   return value === undefined || value === '' ? undefined : value
+}
+
+/** Boolean env override — accepts on/off, true/false, 1/0 (case-insensitive); junk = unset. */
+function envBoolean(env: NodeJS.ProcessEnv, key: string): boolean | undefined {
+  const value = envString(env, key)?.toLowerCase()
+  if (value === 'on' || value === 'true' || value === '1') return true
+  if (value === 'off' || value === 'false' || value === '0') return false
+  return undefined
 }
 
 /**
@@ -168,6 +196,8 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     throw new Error('dsh-feishu: toolDetail must be one of "off", "brief", "full"')
   }
   const toolDetail = toolDetailValue ?? 'off'
+  const askRace = config?.askRace ?? envBoolean(env, 'DSH_FEISHU_ASK_RACE') ?? true
+  const askRouterTakeover = config?.askRouterTakeover ?? envBoolean(env, 'DSH_FEISHU_ASK_ROUTER_TAKEOVER') ?? false
   const configAppId = config?.appId?.trim()
   const configAppSecret = config?.appSecret?.trim()
   // DSH_FEISHU_OPERATORS (comma-separated open_ids) EXTENDS the config list —
@@ -206,5 +236,7 @@ export function resolveConfig(config: Config | undefined, env: NodeJS.ProcessEnv
     backgroundPush,
     roundButtons,
     toolDetail,
+    askRace,
+    askRouterTakeover,
   })
 }

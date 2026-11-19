@@ -72,6 +72,7 @@ import { NewSessionFlowManager, type NewSessionOutcome } from './new-flow.ts'
 import { buildBtwSnapshot, type BtwStreamChunk } from './btw.ts'
 import { BtwManager } from './btw-bot.ts'
 import type { ResolvedConfig } from './config.ts'
+import { raceSurfaces } from './race.ts'
 import { parseReceiveEvent, type InboundMessage } from './inbound.ts'
 import { EMOJI_DONE, EMOJI_SEEN, type LarkGateway } from './lark-client.ts'
 import {
@@ -176,10 +177,15 @@ interface AskSurfacesLike {
 
 /** One live question whose card is out on the operator's phone. */
 interface PendingAsk {
+  readonly questionId: string
   readonly questions: AskUserQuestionItem[]
   messageId: string | undefined
   readonly resolve: (answer: AskUserQuestionAnswer) => void
   readonly reject: (error: Error) => void
+  /** Race transient: once settled, dismisses/submits are ignored (R-B gate). */
+  settled: boolean
+  /** Race transient: the forked downstream chain (design doc §3.5). */
+  downstream?: Promise<unknown>
 }
 
 /** The operator open_id a card.action payload carries, when well-formed. */
@@ -522,10 +528,13 @@ export class FeishuBot {
     }
     if (this.ticker !== undefined) clearInterval(this.ticker)
     this.btw.dispose()
-    // Settle every phone-side interactive flow before the WS dies: the
-    // host-side callers fail fast (rejected, never left hanging) and the
-    // cards on the phone get a terminal patch instead of surviving as
-    // submittable zombies aimed at a disposed bot.
+    // Clear every phone-side interactive flow before the WS dies: the cards
+    // get a terminal patch instead of surviving as submittable zombies aimed
+    // at a disposed bot. In race mode this only kills the CARD path — the
+    // downstream/GUI route belongs to the host and stays alive, so the
+    // arbiter must NOT fail the whole ask with ASK_ABORTED here (R-E, B2):
+    // a dispose with an un-aborted request.signal is a card-path death, and
+    // the race promise is allowed to settle later from downstream.
     for (const [questionId, entry] of [...this.pendingAsks]) {
       this.pendingAsks.delete(questionId)
       this.patchAskCard(entry, buildAskDismissedCard(entry.questions, 'cancelled', ''))
@@ -2335,7 +2344,12 @@ export class FeishuBot {
   private registerAskSurface(): void {
     const ask = (request: AskRequestLike): Promise<AskUserQuestionAnswer> => this.askViaCard(request)
     const router = this.ctx.get('askSurfaces') as AskSurfacesLike | undefined
-    if (router !== undefined && typeof router.register === 'function') {
+    const race = this.config.askRace === true
+    // askRouterTakeover is an escape hatch for an UNPATCHED router: only with
+    // race on, skip router.register and race ourselves. Never both — the
+    // router would send a second card (design doc §4).
+    if (router !== undefined && typeof router.register === 'function'
+      && !(race && this.config.askRouterTakeover === true)) {
       const dispose = router.register({
         name: 'feishu',
         claim: request => this.claimsAskSession(request),
@@ -2348,14 +2362,53 @@ export class FeishuBot {
     // Standalone path: answerers compose on the Agent-scoped
     // 'user-questions/request' cordis waterfall. The event is not part of the
     // dsh-user-questions type surface this plugin imports, hence the
-    // structural cast.
+    // structural cast. `prepend` puts us ahead of the host client bridge
+    // answerer that otherwise claims-and-consumes GUI-opened sessions (F2/F5);
+    // with askRace off we register exactly as before (no options argument).
     const registerWaterfall = (this.ctx.on as unknown as (
       event: 'user-questions/request',
       listener: (request: AskRequestLike, next: () => Promise<AskUserQuestionAnswer>) => Promise<AskUserQuestionAnswer>,
+      options?: { prepend?: boolean },
     ) => () => boolean)
+    if (race) {
+      this.cleanupFns.push(registerWaterfall('user-questions/request', (request, next) => (
+        this.raceAsk(request, next)
+      ), { prepend: true }))
+      return
+    }
     this.cleanupFns.push(registerWaterfall('user-questions/request', (request, next) => (
       this.claimsAskSession(request) ? ask(request) : next()
     )))
+  }
+
+  /**
+   * Bound-session race (design doc §3.2). Unclaimed requests still delegate
+   * verbatim via next() (C4). For claimed ones we fork next() and the card in
+   * the same tick and let the arbiter pick the first settle.
+   */
+  private raceAsk(request: AskRequestLike, next: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer> {
+    if (!this.claimsAskSession(request)) return next()
+    // next() starts the downstream chain synchronously; a synchronous throw
+    // becomes a rejection via the Promise executor (§3.4.3).
+    const downstream = new Promise<AskUserQuestionAnswer>(resolve => resolve(next()))
+    let entry: PendingAsk | undefined
+    let downstreamWon = false
+    const onDownstreamWin = (): void => {
+      downstreamWon = true
+      if (entry !== undefined) this.dismissAskEntry(entry, 'GUI')
+    }
+    const card = Promise.resolve().then(() => this.askViaCard(request, created => {
+      entry = created
+      created.downstream = downstream
+      // Guard the narrow window where downstream won before the card was
+      // created (the arbiter settle gate also covers the normal ordering).
+      if (downstreamWon) this.dismissAskEntry(created, 'GUI')
+    }))
+    return raceSurfaces(card, downstream, {
+      signal: request.signal,
+      onDownstreamWin,
+      cardDeathCodes: ['NO_CHAT', 'CARD_SEND_FAILED'],
+    })
   }
 
   /** Whether the bound session is the one asking (claim routing). The read
@@ -2374,7 +2427,10 @@ export class FeishuBot {
    * until answered or aborted — no TTL: expiring would fail the agent's
    * tool call just because the phone sat in a pocket.
    */
-  private askViaCard(request: AskRequestLike): Promise<AskUserQuestionAnswer> {
+  private askViaCard(
+    request: AskRequestLike,
+    onEntry?: (entry: PendingAsk) => void,
+  ): Promise<AskUserQuestionAnswer> {
     return new Promise<AskUserQuestionAnswer>((resolve, reject) => {
       const chatId = this.store.get().lastChatId
       if (chatId === undefined) {
@@ -2382,8 +2438,18 @@ export class FeishuBot {
         return
       }
       const questionId = randomUUID()
-      const entry: PendingAsk = { questions: [...request.questions], messageId: undefined, resolve, reject }
+      const entry: PendingAsk = {
+        questionId,
+        questions: [...request.questions],
+        messageId: undefined,
+        resolve,
+        reject,
+        settled: false,
+      }
       this.pendingAsks.set(questionId, entry)
+      // Race mode uses the entry handle to dismiss the card when downstream
+      // wins (R-B); legacy callers omit it.
+      onEntry?.(entry)
       this.askRequestIds.set(request, questionId)
       request.signal?.addEventListener('abort', () => {
         if (!this.pendingAsks.delete(questionId)) return
@@ -2412,8 +2478,13 @@ export class FeishuBot {
     const questionId = this.askRequestIds.get(request)
     if (questionId === undefined) return
     const entry = this.pendingAsks.get(questionId)
-    if (entry === undefined) return
-    this.pendingAsks.delete(questionId)
+    if (entry !== undefined) this.dismissAskEntry(entry, by)
+  }
+
+  /** Entry-handle form — shared by router settled() and the race's R-B. */
+  private dismissAskEntry(entry: PendingAsk, by: string): void {
+    if (entry.settled || !this.pendingAsks.delete(entry.questionId)) return
+    entry.settled = true
     this.patchAskCard(entry, buildAskDismissedCard(entry.questions, 'elsewhere', by))
     entry.reject(new UserQuestionError(`answered on ${by} before the phone submitted`, 'ANSWERED_ELSEWHERE'))
   }
@@ -2439,12 +2510,86 @@ export class FeishuBot {
     const registerWaterfall = (this.ctx.on as unknown as (
       event: 'approval/request',
       listener: (request: ApprovalRequestLike, next: () => Promise<ApprovalOutcomeLike>) => Promise<ApprovalOutcomeLike>,
+      options?: { prepend?: boolean },
     ) => () => boolean)
+    if (this.config.askRace === true) {
+      // Same fix as ask: head registration beats the bridge's claim-and-consume
+      // answerer on GUI-opened sessions (design doc §12).
+      this.cleanupFns.push(registerWaterfall('approval/request', (request, next) => (
+        this.raceApproval(request, next)
+      ), { prepend: true }))
+      return
+    }
     this.cleanupFns.push(registerWaterfall('approval/request', async (request, next) => {
       const chatId = this.store.get().lastChatId
       if (chatId === undefined || !this.claimsAskSession(request)) return next()
       return this.approvalViaCard(chatId, request)
     }))
+  }
+
+  /**
+   * Approval race (design doc §3.2, mapped onto the selector-FW card path).
+   * Unclaimed requests delegate via next() verbatim (C4). Claimed ones fork
+   * next() and the phone card in the same tick.
+   *
+   * Approval has no typed error vocabulary: the card settles with an outcome
+   * ('allowed-once' / 'rejected' / 'cancelled' / 'unavailable') rather than a
+   * UserQuestionError. Mapping to R-A..R-F:
+   * - R-A card outcome wins; R-B downstream wins → dismiss the selector flow;
+   * - R-D/R-E a dead card (send failure / cancelAll via dispose or rebind),
+   *   with signal NOT aborted, is swallowed while downstream is pending;
+   * - R-C a request signal abort settles as 'cancelled' (approval's terminal
+   *   abort answer, the analogue of ask's ASK_ABORTED);
+   * - R-F a dead card followed by a downstream outcome returns downstream.
+   * The listener never rejects (fail-closed 'unavailable'), as in legacy.
+   */
+  private raceApproval(
+    request: ApprovalRequestLike,
+    next: () => Promise<ApprovalOutcomeLike>,
+  ): Promise<ApprovalOutcomeLike> {
+    const chatId = this.store.get().lastChatId
+    if (chatId === undefined || !this.claimsAskSession(request)) return next()
+    const downstream = new Promise<ApprovalOutcomeLike>(resolve => resolve(next()))
+    let dismiss: (() => void) | undefined
+    let downstreamWon = false
+    const onDownstreamWin = (): void => {
+      downstreamWon = true
+      dismiss?.()
+    }
+    const card = Promise.resolve().then(async () => {
+      const result = await this.approvalViaCardTracked(chatId, request, handle => {
+        dismiss = handle
+        if (downstreamWon) handle()
+      })
+      if (result.cardDead) {
+        throw new UserQuestionError('the approval card could not be delivered', 'CARD_SEND_FAILED')
+      }
+      return result.outcome
+    })
+    return raceSurfaces(card, downstream, {
+      signal: request.signal,
+      onDownstreamWin,
+      cardDeathCodes: ['CARD_SEND_FAILED'],
+    }).catch(() => (request.signal?.aborted === true ? 'cancelled' : 'unavailable'))
+  }
+
+  /** Shared card spec so legacy and race paths render byte-identical cards. */
+  private buildApprovalSpec(request: ApprovalRequestLike): SelectorSpec {
+    const detail = request.reason === undefined || request.reason === ''
+      ? ''
+      : `：${clipLine(request.reason, 200)}`
+    return {
+      title: '🔐 权限审批',
+      description: `工具 \`${request.toolName}\`${detail}`,
+      mode: 'buttons',
+      // 拒绝 = 拒绝一次工具执行，误触成本高 — 取消（拒绝）按钮要求二次确认。
+      confirmCancel: true,
+      ...(request.signal !== undefined ? { signal: request.signal } : {}),
+      options: [
+        { value: 'allow', label: '✅ 允许一次' },
+        { value: 'deny', label: '❌ 拒绝' },
+      ],
+    }
   }
 
   /**
@@ -2455,22 +2600,8 @@ export class FeishuBot {
    * allow.
    */
   private async approvalViaCard(chatId: string, request: ApprovalRequestLike): Promise<ApprovalOutcomeLike> {
-    const detail = request.reason === undefined || request.reason === ''
-      ? ''
-      : `：${clipLine(request.reason, 200)}`
     try {
-      const outcome = await this.presentSelection(chatId, {
-        title: '🔐 权限审批',
-        description: `工具 \`${request.toolName}\`${detail}`,
-        mode: 'buttons',
-        // 拒绝 = 拒绝一次工具执行，误触成本高 — 取消（拒绝）按钮要求二次确认。
-        confirmCancel: true,
-        ...(request.signal !== undefined ? { signal: request.signal } : {}),
-        options: [
-          { value: 'allow', label: '✅ 允许一次' },
-          { value: 'deny', label: '❌ 拒绝' },
-        ],
-      })
+      const outcome = await this.presentSelection(chatId, this.buildApprovalSpec(request))
       if (outcome.status === 'picked' && outcome.value === 'allow') return 'allowed-once'
       if (outcome.status === 'picked') return 'rejected'
       if (outcome.status === 'cancelled') return 'cancelled'
@@ -2479,6 +2610,28 @@ export class FeishuBot {
       // The card never went out (send rejected) — a hung turn would be worse
       // than a denied escalation; the host's own audit logs record it.
       return 'unavailable'
+    }
+  }
+
+  /** Race-mode card path: same card, plus a dismiss handle and card-death flag. */
+  private async approvalViaCardTracked(
+    chatId: string,
+    request: ApprovalRequestLike,
+    onPending: (dismiss: () => void) => void,
+  ): Promise<{ outcome: ApprovalOutcomeLike; cardDead: boolean }> {
+    try {
+      const tracked = this.selectors.presentWithDismiss(chatId, this.buildApprovalSpec(request))
+      onPending(tracked.dismiss)
+      const outcome = await tracked.outcome
+      // dispose()/rebind cancelAll() ends our card without an abort of the
+      // request — R-E: treat as card death, let downstream decide.
+      const cardDead = tracked.cancelledByManager() && request.signal?.aborted !== true
+      if (outcome.status === 'picked' && outcome.value === 'allow') return { outcome: 'allowed-once', cardDead }
+      if (outcome.status === 'picked') return { outcome: 'rejected', cardDead }
+      if (outcome.status === 'cancelled') return { outcome: 'cancelled', cardDead }
+      return { outcome: 'unavailable', cardDead }
+    } catch {
+      return { outcome: 'unavailable', cardDead: true }
     }
   }
 

@@ -108,6 +108,32 @@ test('roundButtons is a known config key (typo guard stays intact)', () => {
   assert.throws(() => resolveConfig({ roundButton: 'on' }, {}), /unknown config key "roundButton"/)
 })
 
+test('askRace defaults to true; askRouterTakeover defaults to false', () => {
+  const resolved = resolveConfig({}, {})
+  assert.equal(resolved.askRace, true)
+  assert.equal(resolved.askRouterTakeover, false)
+})
+
+test('askRace / askRouterTakeover accept explicit config values', () => {
+  const resolved = resolveConfig({ askRace: false, askRouterTakeover: true }, {})
+  assert.equal(resolved.askRace, false)
+  assert.equal(resolved.askRouterTakeover, true)
+})
+
+test('DSH_FEISHU_ASK_RACE / DSH_FEISHU_ASK_ROUTER_TAKEOVER env overrides are read', () => {
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ASK_RACE: 'off' }).askRace, false)
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ASK_RACE: 'false' }).askRace, false)
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ASK_ROUTER_TAKEOVER: 'on' }).askRouterTakeover, true)
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ASK_RACE: 'loud', DSH_FEISHU_ASK_ROUTER_TAKEOVER: 'junk' }).askRace, true)
+  assert.equal(resolveConfig({}, { DSH_FEISHU_ASK_ROUTER_TAKEOVER: 'junk' }).askRouterTakeover, false)
+  assert.equal(resolveConfig({ askRace: false }, { DSH_FEISHU_ASK_RACE: 'on' }).askRace, false, 'config wins over env')
+})
+
+test('askRace / askRouterTakeover are known config keys (typo guard stays intact)', () => {
+  assert.throws(() => resolveConfig({ askRce: true }, {}), /unknown config key "askRce"/)
+  assert.throws(() => resolveConfig({ askRouterTakeoverX: true }, {}), /unknown config key/)
+})
+
 test('DSH_FEISHU_OPERATORS is appended to config.operators (the documented env override actually reads)', () => {
   assert.deepEqual(resolveConfig({ operators: ['ou_a'] }, { DSH_FEISHU_OPERATORS: 'ou_b,ou_c' }).operators, ['ou_a', 'ou_b', 'ou_c'])
   assert.deepEqual(resolveConfig({}, { DSH_FEISHU_OPERATORS: 'ou_b' }).operators, ['ou_b'])

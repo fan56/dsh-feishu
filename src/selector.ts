@@ -72,6 +72,8 @@ interface SelectionFlow {
 export class SelectorManager {
   private readonly deps: SelectorDeps
   private readonly flows = new Map<string, SelectionFlow>()
+  /** Race-only audit: flows ended by cancelAll(); consumed once by the caller. */
+  private readonly cancelAllFlows = new Set<string>()
 
   constructor(deps: SelectorDeps) {
     this.deps = deps
@@ -97,8 +99,43 @@ export class SelectorManager {
    * dead-locks.
    */
   present(chatId: string, spec: SelectorSpec): Promise<SelectorOutcome> {
-    return new Promise<SelectorOutcome>((resolve, reject) => {
-      const id = randomUUID()
+    return this.start(chatId, spec).outcome
+  }
+
+  /**
+   * Race-only variant: the caller also gets a per-flow dismiss handle (R-B).
+   * Dismissing settles the flow exactly like a cancel — grey card, timer
+   * cleared, flow removed so a late card submit is ignored — and resolves the
+   * awaiting outcome, which the race arbiter discards after downstream won.
+   */
+  presentWithDismiss(chatId: string, spec: SelectorSpec): {
+    outcome: Promise<SelectorOutcome>
+    dismiss: () => void
+    /** True when cancelAll() (dispose/rebind) ended this flow — R-E card death. */
+    cancelledByManager: () => boolean
+  } {
+    const { id, outcome } = this.start(chatId, spec)
+    return {
+      outcome,
+      dismiss: () => this.dismiss(id),
+      cancelledByManager: () => {
+        const cancelled = this.cancelAllFlows.has(id)
+        this.cancelAllFlows.delete(id)
+        return cancelled
+      },
+    }
+  }
+
+  /** Settle a still-live flow as dismissed (idempotent, like handleAction). */
+  dismiss(id: string): void {
+    const flow = this.flows.get(id)
+    if (flow === undefined) return
+    this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
+  }
+
+  private start(chatId: string, spec: SelectorSpec): { id: string; outcome: Promise<SelectorOutcome> } {
+    const id = randomUUID()
+    const outcome = new Promise<SelectorOutcome>((resolve, reject) => {
       const ttlMs = this.deps.ttlMs ?? DEFAULT_TTL_MS
       const flow: SelectionFlow = {
         id,
@@ -124,6 +161,7 @@ export class SelectorManager {
       }
       void this.sendFor(flow)
     })
+    return { id, outcome }
   }
 
   /**
@@ -178,6 +216,7 @@ export class SelectorManager {
     for (const flow of [...this.flows.values()]) {
       if (flow.state === 'picked' || flow.state === 'cancelled' || flow.state === 'expired' || flow.state === 'failed') continue
       if (reason !== undefined) this.deps.logger.info?.('dsh-feishu: selector flow %s cancelled: %s', flow.id, reason)
+      this.cancelAllFlows.add(flow.id)
       this.settle(flow, { status: 'cancelled' }, buildSelectorCancelledCard(flow))
     }
   }

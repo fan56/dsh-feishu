@@ -3,11 +3,17 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.18.0] - 2026-11-19
 
 ### Added
-
+- **`askRace` and `askRouterTakeover` config keys with env overrides.** `askRace` (boolean, default `true`; `DSH_FEISHU_ASK_RACE`) enables the head registration + race described below; `false` keeps the legacy tail-registered claim-and-consume behaviour byte-for-byte. `askRouterTakeover` (boolean, default `false`; `DSH_FEISHU_ASK_ROUTER_TAKEOVER`) is an escape hatch for an unpatched `dsh-ask-router`: when an `askSurfaces` service exists and racing is on, `true` skips `router.register` and races on the standalone waterfall instead, so the two never stack a second card. Boolean env values accept `on/off`, `true/false` and `1/0` (case-insensitive); junk is ignored. Both keys are registered in `CONFIG_KEYS` and covered by `test/config.test.mjs`.
 - **npm packaged upgrade regression test** (`test/packaged-upgrade.test.mjs`) — installs the published baseline release and upgrades it to the locally packed tarball, asserting the published manifest carries no `preinstall`/`install`/`postinstall` hook, that the upgrade emits no pnpm 11 unapproved-build report, and that the bundle patch and plugin entry still ship — the npm upgrade path regression for pnpm 11 `strictDepBuilds` (see dsh-subagent-registry#10).
+
+### Changed
+- **Two ask/approval prompts now race; the first answer wins.** The card and the downstream (GUI/bridge) surface are forked in the same tick; whoever settles first returns its answer. A GUI win withdraws the pending Feishu card (cancelled grey patch), and late card submissions are ignored; a card win swallows the downstream result (which may leave a stale GUI popup — the signal is deliberately not aborted, it belongs to the dispatcher). Failure paths fail closed: card send errors fall back to the downstream answer, unbound sessions pass straight through, and plugin disposal never hangs the arbiter.
+
+### Fixed
+- **Ask/approval cards now reach sessions the GUI has opened (fan56/dsh-feishu#7).** On dsh 0.2.2-rc.x the host's JSON-RPC client bridge claims `user-questions/request` and `approval/request` for sessions it owns (session-handle identity) and never calls `next()`, so the plugin answerer registered at the waterfall tail never saw the request — no ask/approval card was delivered for any session the desktop had opened, while bot-created sessions that the GUI had never touched still worked. The plugin answerer now registers at the waterfall head (`{ prepend: true }`) and, when `askRace` is on, races the Feishu card against the downstream chain with a single-winner arbiter (`src/race.ts`). `src/selector.ts` gains dismiss/cancel-all helpers so a card can be withdrawn in place when the other surface answers first. Unbound sessions still pass through untouched. Verified: typecheck, 537/537 unit tests (incl. new `test/ask-race.test.mjs`), and an SDK-level reproduction against the real rc.4 `SdkUserQuestionBridge`.
 
 ## [0.17.1] - 2026-11-13
 
