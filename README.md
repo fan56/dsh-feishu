@@ -277,6 +277,8 @@ Session running on your desktop → open Feishu on the train → /resume and pic
 | `backgroundPush` | `"off"` | Completion push for sessions the phone is not bound to, into the last active chat: `off` / `cron` (turns carrying a cron delivery or a subagent-settled notice) / `all` (every finished turn). Env override: `DSH_FEISHU_BACKGROUND_PUSH` |
 | `roundButtons` | `"off"` | Quick-action buttons on round cards: `on` renders ⛔ 停止 under the live card and ▶️ 继续 under the ended card; `off` keeps both out — the `/stop` command (with its own confirmation) is the stop path either way. Env override: `DSH_FEISHU_ROUND_BUTTONS` |
 | `toolDetail` | `"off"` | Tool-argument digest under each activity bullet on the round card: `off` keeps the name-only rows byte-for-byte; `brief` folds the raw arguments JSON to one clipped line (80 chars); `full` keeps the multi-line shape, clipped at 600 chars. Env override: `DSH_FEISHU_TOOL_DETAIL` |
+| `askRace` | `true` | Race the Feishu ask/approval card against the downstream (GUI) surface for bound sessions: the first answer wins and the loser's card is withdrawn; `false` restores the legacy tail-registered, claim-and-consume behaviour byte-for-byte. Env override: `DSH_FEISHU_ASK_RACE` |
+| `askRouterTakeover` | `false` | Escape hatch for an unpatched `dsh-ask-router`: when an `askSurfaces` service is present and `askRace` is on, `true` skips `router.register` and races on the standalone waterfall instead, so the two never stack a second card; `false` keeps today's router path. Env override: `DSH_FEISHU_ASK_ROUTER_TAKEOVER` |
 | `appIdRef` / `appSecretRef` | `DSH_FEISHU_APP_ID/SECRET` | credentials ref names |
 
 Credential resolution order: plaintext in patch > `DSH_FEISHU_APP_ID/SECRET` env
