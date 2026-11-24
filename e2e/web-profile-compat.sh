@@ -18,6 +18,10 @@
 #           still detect as unjoined (the detector works). Exercises the
 #           web-profile tool story: tool plugins are NOT loaded globally
 #           there, so a preset-less session publishes with only `skill`.
+#           It also registers a scratch workspace in the REAL host (issue #8),
+#           drives createNew into it, and asserts the fresh session lands in
+#           that workspace's `sessionIds`; a control create from an
+#           unregistered cwd must leave every workspace's `sessionIds` alone.
 #
 # Everything runs against a scratch $DSH_HOME under mktemp; the real
 # ~/.dsh is untouched. The dsh binary is the local one (PATH), and the
@@ -177,7 +181,9 @@ cat > "$PROBE_PROFILE/probe/index.js" <<'EOF'
 // e2e probe — see e2e/web-profile-compat.sh leg C. Writes one JSON result
 // file (FEISHU_PROBE_RESULT) and never throws past its own catch.
 import { randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 export const name = 'dsh-feishu-e2e-probe'
 export const inject = ['agents']
@@ -207,6 +213,40 @@ async function waitService(ctx, key, timeoutMs) {
   }
 }
 
+// dsh-workspace rebuilds its entities at the end of Service.init
+// (src/index.ts:225-241); list() throws before that. Wait for a READABLE
+// registry, not merely an injected one.
+async function waitWorkspaceRegistry(ctx, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry !== undefined) {
+      try {
+        registry.list()
+        return registry
+      } catch { /* not rebuilt yet */ }
+    }
+    if (Date.now() > deadline) throw new Error('workspaceRegistry never became readable')
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+}
+
+async function waitSessionInWorkspace(registry, workspacePath, sessionId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const entity = registry.list().find(w => w.path === workspacePath)
+    if (entity !== undefined && entity.sessionIds.some(id => String(id) === sessionId)) return true
+    if (Date.now() > deadline) return false
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
+
+function snapshotSessionIds(registry) {
+  return registry.list()
+    .map(w => ({ path: w.path, ids: [...w.sessionIds].map(String).sort() }))
+    .sort((a, b) => String(a.path).localeCompare(String(b.path)))
+}
+
 export async function apply(ctx) {
   try {
     const presets = await waitService(ctx, 'agentPresets', 20_000)
@@ -231,8 +271,38 @@ export async function apply(ctx) {
       return
     }
 
+    const workspaceRegistry = await waitWorkspaceRegistry(ctx, 20_000)
+    // A real directory owned by a REAL workspace. create() canonicalizes its
+    // path; resolveByPath() (the binder's only lookup) canonicalizes it too.
+    const workspaceCwd = mkdtempSync(join(tmpdir(), 'dsh-feishu-ws-'))
+    const workspace = await workspaceRegistry.create(workspaceCwd)
+    const workspacePath = workspace.path
+
+    // Diagnostics only: wrap the REAL entity's attachSession so a failing
+    // assertion can distinguish "binder never called it" from "attach failed".
+    const attachEntity = workspaceRegistry.list().find(w => w.path === workspacePath)
+    const attachCalls = []
+    const attachErrors = []
+    if (attachEntity !== undefined && typeof attachEntity.attachSession === 'function') {
+      const origAttach = attachEntity.attachSession
+      attachEntity.attachSession = async function (id) {
+        attachCalls.push(String(id))
+        try {
+          return await origAttach.call(this, id)
+        } catch (error) {
+          attachErrors.push(String(error))
+          throw error
+        }
+      }
+    }
+
     const binder = new SessionBinder(ctx)
-    const created = await binder.createNew(process.cwd())
+    const created = await binder.createNew(workspaceCwd)
+    // Issue #8 acceptance: the sidebar keys off workspace.sessionIds, NOT the
+    // session's cwd — the REAL host must list the freshly created id here.
+    const workspaceAttached = await waitSessionInWorkspace(
+      workspaceRegistry, workspacePath, created.sessionId, 5_000)
+
     // The durable record: the presets service appends `agent-preset/selected`
     // on mount; the host projects it back. This is what a LATER cold resume
     // (next boot) reads — assert it here so the resume leg's premise holds.
@@ -246,6 +316,16 @@ export async function apply(ctx) {
       sessionId: randomUUID(),
       meta: { cwd: process.cwd() },
     })
+
+    // Negative: a cwd that is NOT owned by any workspace. createNew must not
+    // throw and must not add an id to ANY workspace's sessionIds.
+    const outsideCwd = mkdtempSync(join(tmpdir(), 'dsh-feishu-outside-'))
+    const before = snapshotSessionIds(workspaceRegistry)
+    const outside = await binder.createNew(outsideCwd)
+    const after = snapshotSessionIds(workspaceRegistry)
+    const negativeUnchanged = outside.mode === 'created'
+      && JSON.stringify(before) === JSON.stringify(after)
+
     writeFileSync(process.env.FEISHU_PROBE_SESSION, created.sessionId)
     write({
       leg: 'create', ok: true, sessionId: created.sessionId, createMode: created.mode,
@@ -254,6 +334,16 @@ export async function apply(ctx) {
       headerPreset: header?.agentPreset ?? null,
       composedPreset: safeComposed(presets, created.agent),
       bareComposedPreset: safeComposed(presets, bareHandle?.agent ?? bareHandle),
+      workspaceCwd,
+      workspacePath,
+      workspaceAttached,
+      attachCalls,
+      attachErrors,
+      resolveFound: (await workspaceRegistry.resolveByPath(workspaceCwd)) !== undefined,
+      outsideCwd,
+      negativeUnchanged,
+      sessionIdsBefore: before,
+      sessionIdsAfter: after,
     })
   } catch (error) {
     write({ ok: false, error: String((error && error.stack) || error) })
@@ -301,6 +391,9 @@ if [ "$(json_get "$WORK/probe-create.json" ok)" = "True" ]; then
   PROJECTED="$(json_get "$WORK/probe-create.json" projectedPreset)"
   COMPOSED="$(json_get "$WORK/probe-create.json" composedPreset)"
   BARE="$(json_get "$WORK/probe-create.json" bareComposedPreset)"
+  WS_ATTACHED="$(json_get "$WORK/probe-create.json" workspaceAttached)"
+  NEG_UNCHANGED="$(json_get "$WORK/probe-create.json" negativeUnchanged)"
+  WS_PATH="$(json_get "$WORK/probe-create.json" workspacePath)"
   if [ "$CREATE_MODE" = "created" ]; then
     ok 'probe: binder /new created the session'
   else
@@ -320,6 +413,24 @@ if [ "$(json_get "$WORK/probe-create.json" ok)" = "True" ]; then
     ok 'probe: bare control create detects as unjoined (detector works)'
   else
     bad "probe: bare control unexpectedly composed ($BARE) — detector cannot see the bug"
+  fi
+  # Issue #8 — the ONLY acceptance test for this fix: the real host must put
+  # the freshly created session on its workspace's sessionIds.
+  if [ "$WS_ATTACHED" = "True" ]; then
+    ok "probe: /new session is in its workspace's sessionIds ($WS_PATH)"
+  else
+    bad "probe: /new session is MISSING from its workspace's sessionIds (real host)"
+    printf '    | diag calls=%s errors=%s resolveFound=%s ids=%s\n' \
+      "$(json_get "$WORK/probe-create.json" attachCalls)" \
+      "$(json_get "$WORK/probe-create.json" attachErrors)" \
+      "$(json_get "$WORK/probe-create.json" resolveFound)" \
+      "$(json_get "$WORK/probe-create.json" sessionIdsAfter)"
+    grep -a "dsh-feishu:" "$WORK/probe-create.log" | head -3 | sed 's/^/    | /' || true
+  fi
+  if [ "$NEG_UNCHANGED" = "True" ]; then
+    ok 'probe: /new from an unregistered cwd is a no-op (no workspace sessionIds added)'
+  else
+    bad "probe: unregistered cwd changed workspace sessionIds"
   fi
 else
   bad 'probe: create leg produced no/failed result'

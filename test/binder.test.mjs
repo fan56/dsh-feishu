@@ -260,27 +260,34 @@ test('a failed workspace attach only warns — the session stays bound and is ne
   assert.deepEqual(ws.calls.attachSession, [created.sessionId])
   assert.equal(binder.getSessionId(), created.sessionId, 'attach failure must not detach')
   assert.notEqual(binder.getAgent(), undefined, 'the caller can still drive the session')
-  assert.equal(reg.handles[0].agent.disposed, false)
+  // The old `disposed === false` assertion was vacuous: releaseOwned never
+  // disposes. The binding-id assertion above is the one with detection power.
   assert.ok(ctx.logger.warnings.some(w => w.includes('attach')), 'the attach failure is logged')
 })
 
-test('createNew survives a workspace entity without attachSession (opentui-inproc shim)', async () => {
+test('createNew survives a workspace entity without attachSession, and warns once about the drift', async () => {
   const reg = makeRegistry()
   const ws = makeWorkspaceRegistry()
   delete ws.entity.attachSession
-  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: ws }))
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: ws })
+  const binder = new SessionBinder(ctx)
   const created = await binder.createNew(ws.cwd)
   assert.equal(created.mode, 'created')
   assert.deepEqual(ws.calls.resolveByPath, [ws.cwd])
   assert.equal(binder.getSessionId(), created.sessionId)
+  assert.ok(ctx.logger.warnings.some(w => w.includes('no attachSession')), 'the drift is observable')
 })
 
 test('createNew survives an absent workspaceRegistry service (legacy profile)', async () => {
   const reg = makeRegistry()
-  const binder = new SessionBinder({ agents: reg.agents })
+  // A real ctx.get simply yields undefined for an uninjected service — that
+  // is the branch under test, not a ctx with no `get` at all (a TypeError).
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: undefined })
+  const binder = new SessionBinder(ctx)
   const created = await binder.createNew('/tmp/work')
   assert.equal(created.mode, 'created')
   assert.equal(binder.getSessionId(), created.sessionId)
+  assert.equal(ctx.logger.warnings.length, 0, 'an absent service is not drift')
 })
 
 test('createNew survives resolveByPath rejecting (missing cwd)', async () => {
@@ -297,22 +304,74 @@ test('createNew survives resolveByPath rejecting (missing cwd)', async () => {
   assert.equal(binder.getSessionId(), created.sessionId)
 })
 
-test('createNew falls back to list() when resolveByPath is absent, and skips an unmatched list', async () => {
+test('createNew survives drifted registries (no callable resolveByPath) — warns once, never uses list()', async () => {
+  // Both methods absent: the drift warn fires (once per process).
   const reg = makeRegistry()
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: {} })
+  const binder = new SessionBinder(ctx)
+  const created = await binder.createNew('/tmp/work')
+  assert.equal(created.mode, 'created')
+  assert.equal(binder.getSessionId(), created.sessionId)
+  assert.ok(ctx.logger.warnings.some(w => w.includes('registry API drift')), 'the drift is observable')
+
+  // A list-only shim: still no attach — the real list() yields canonical
+  // paths, so a raw-cwd match would silently miss (and is not a fallback).
+  const reg2 = makeRegistry()
   const ws = makeWorkspaceRegistry()
   const shim = { list: () => [ws.entity] }
-  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: shim }))
-  const created = await binder.createNew(ws.cwd)
-  assert.deepEqual(ws.calls.attachSession, [created.sessionId], 'list fallback attaches a matching path')
-
-  const empty = makeRegistry()
-  const none = makeWorkspaceRegistry()
-  const noMatch = { list: () => [{ path: '/somewhere/else' }] }
-  const binder2 = new SessionBinder(makeAttachContext({ registry: empty, workspaceRegistry: noMatch }))
-  const created2 = await binder2.createNew(none.cwd)
+  const binder2 = new SessionBinder(makeAttachContext({ registry: reg2, workspaceRegistry: shim }))
+  const created2 = await binder2.createNew(ws.cwd)
   assert.equal(created2.mode, 'created')
-  assert.deepEqual(none.calls.attachSession, [], 'no match — nothing attached, no throw')
+  assert.deepEqual(ws.calls.attachSession, [], 'no resolveByPath — no attach, no throw')
   assert.equal(binder2.getSessionId(), created2.sessionId)
+})
+
+test('createNew attaches the fresh id after a previous bind, not the stale bound id', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: ws }))
+  await binder.bind('old-session')
+  assert.equal(binder.getSessionId(), 'old-session')
+  const created = await binder.createNew(ws.cwd)
+  assert.equal(created.mode, 'created')
+  assert.notEqual(created.sessionId, 'old-session')
+  assert.deepEqual(ws.calls.attachSession, [created.sessionId], 'attach received the NEW id, not the old one')
+  assert.equal(binder.getSessionId(), created.sessionId)
+})
+
+test('createNew treats an unowned cwd as a silent no-op (no warn)', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  ws.resolveByPath = async () => undefined
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: ws })
+  const binder = new SessionBinder(ctx)
+  const created = await binder.createNew('/tmp/unowned')
+  assert.equal(created.mode, 'created')
+  assert.equal(ctx.logger.warnings.length, 0, 'a path not owned by any workspace is legal')
+})
+
+test('createNew returns even when attach hangs; the background attach still completes', async () => {
+  const reg = makeRegistry()
+  const calls = { attached: 0 }
+  const registry = {
+    async resolveByPath() {
+      return {
+        async attachSession() {
+          await new Promise(resolve => setTimeout(resolve, 30))
+          calls.attached++
+        },
+      }
+    },
+  }
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: registry })
+  const binder = new SessionBinder(ctx, { attachTimeoutMs: 5 })
+  const created = await binder.createNew('/tmp/work')
+  assert.equal(created.mode, 'created')
+  assert.equal(binder.getSessionId(), created.sessionId)
+  assert.equal(calls.attached, 0, 'createNew did not wait for the slow attach')
+  assert.ok(ctx.logger.warnings.some(w => w.includes('timed out')), 'the timeout is warned')
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(calls.attached, 1, 'the background attach still runs to completion')
 })
 
 // ---------------------------------------------------------------------------

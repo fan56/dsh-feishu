@@ -123,7 +123,7 @@ interface LlmModelSurface {
   listModels(provider: string): Promise<readonly ModelInfo[]>
   resolveModelInfo(provider: string, model: string): Promise<{ context?: { contextWindow?: number } }>
 }
-import type { BindResult, SessionBinder } from './binder.ts'
+import type { BindResult, SessionBinder, WorkspaceRegistryLike } from './binder.ts'
 import type { StateStore } from './state-store.ts'
 import { clipLine, segmentText } from './text.ts'
 import { imageExtensionOf, sniffImageMediaType } from './image.ts'
@@ -1225,9 +1225,7 @@ export class FeishuBot {
     // operator picks — never an invented path. An empty registry means /new
     // is impossible (NA) and no card goes out at all.
     try {
-      const registry = this.ctx.get('workspaceRegistry') as
-        | { list?: () => Array<{ id: unknown; path?: unknown; title?: unknown }> }
-        | undefined
+      const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
       if (registry?.list !== undefined) {
         const entities = registry.list()
         const choices = entities
