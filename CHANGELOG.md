@@ -3,6 +3,15 @@
 All notable changes to dsh-feishu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.1] - 2026-11-24
+
+### Fixed
+- **`/new` now registers the created session with its selected workspace, so the desktop sidebar groups it instead of showing 「未分组」 (fan56/dsh-feishu#8).** `SessionBinder.createNew` resolves the workspace from the new session's `cwd` and calls the host's `attachSession` after creation. Attachment failures are isolated from session creation (the session stays bound), have a bounded 2.5s wait, and host/shim capability drift is warned once per process. Existing ungrouped sessions are unchanged.
+- **Workspace attachment is covered by a real-host e2e assertion.** The web-profile compat probe registers a scratch workspace, creates a session through the real `SessionBinder`, and asserts the new id appears in that workspace's `sessionIds`; an unregistered-cwd negative case verifies no workspace is mutated. This assertion fails on the pre-fix code and passes with the fix.
+
+### Tests
+- 546 unit tests and 15 web-profile compat checks pass; clean clone + `npm ci`, typecheck, build, and e2e verified.
+
 ## [0.18.0] - 2026-11-19
 
 ### Added
