@@ -122,6 +122,48 @@ interface AgentsRegistry {
 }
 
 /**
+ * Workspace surfaces /new needs (structural), shared with bot.ts's /new card
+ * (bot.ts imports these from here — the dependency direction is bot → binder,
+ * never the reverse).
+ *
+ * The REAL host always provides all three methods:
+ *   - entity `attachSession` — dsh-workspace `src/types.ts:120`
+ *   - registry `list`        — dsh-workspace `src/index.ts:308`
+ *   - registry `resolveByPath` — dsh-workspace `src/index.ts:524`
+ * Every member is `optional` ONLY to tolerate the opentui-inproc session-shim
+ * (empty list, entities without `attachSession`) and degraded compositions
+ * where the service or a method is missing. Such drift is warned once per
+ * process by SessionBinder; it never fails /new.
+ */
+export interface WorkspaceEntityLike {
+  /** Real host uses it for dropdown labels; the shim may omit it. */
+  id?: unknown
+  /** Canonicalized in the real host; optional only for shim/degraded paths. */
+  path?: string
+  title?: unknown
+  attachSession?: (sessionId: SessionId) => Promise<void>
+}
+
+/** The host's workspace registry service (structural, optional). */
+export interface WorkspaceRegistryLike {
+  /** Async in the real host. Rejects when the path does not resolve; resolves
+   * undefined when the directory is not owned by any workspace (legal no-op). */
+  resolveByPath?: (path: string) => Promise<WorkspaceEntityLike | undefined>
+  /** Synchronous in the real host. Kept for bot.ts's /new dropdown; NOT used
+   * for attach — real `list()` yields canonical paths, so comparing a raw cwd
+   * would silently miss every time. */
+  list?: () => Array<WorkspaceEntityLike>
+}
+
+/** Drift kinds reported at most once per process — repeated /new must not flood the log. */
+type WorkspaceDrift = 'registry-api' | 'entity-attach'
+const warnedWorkspaceDrifts = new Set<WorkspaceDrift>()
+
+/** Ceiling for the best-effort attach: it is awaited on the /new critical path
+ * and holds the global binding lock, so a wedged host service must not wedge /new. */
+const WORKSPACE_ATTACH_TIMEOUT_MS = 2500
+
+/**
  * One-bound-session-at-a-time binder. Concurrent binds serialize on the
  * in-flight task so `/resume 3` racing `/resume 5` cannot leak handles.
  */
@@ -152,10 +194,16 @@ export class SessionBinder {
   private readonly outbox: string[] = []
   private promotingRemote = false
   private promoteTimer: ReturnType<typeof setInterval> | undefined
+  /** Injectable in tests; production uses WORKSPACE_ATTACH_TIMEOUT_MS. */
+  private readonly attachTimeoutMs: number
 
-  constructor(ctx: Context, options: { viewerOptions?: { intervalMs?: number; decode?(file: string): Promise<string> } } = {}) {
+  constructor(ctx: Context, options: {
+    viewerOptions?: { intervalMs?: number; decode?(file: string): Promise<string> }
+    attachTimeoutMs?: number
+  } = {}) {
     this.ctx = ctx
     this.viewerOptions = { promoteIntervalMs: 1000, ...(options.viewerOptions ?? {}) }
+    this.attachTimeoutMs = options.attachTimeoutMs ?? WORKSPACE_ATTACH_TIMEOUT_MS
     this.hook = (options as { onPromotable?: (id: string) => Promise<void> }).onPromotable
     // ctx.agents is injected (plugin `inject`); the structural cast keeps
     // this module free of the full registry type.
@@ -409,6 +457,99 @@ export class SessionBinder {
   }
 
   /**
+   * Register a freshly created session on its workspace so the desktop
+   * sidebar groups it (the sidebar keys off `workspace.sessionIds`, not the
+   * session's cwd). Strictly best-effort: the session is already created and
+   * bound here, so a missing registry, an unmatched cwd, a failed/slow attach
+   * — or ANY anomaly of a drifting host surface — must never fail /new. The
+   * caller's error path (which detaches and reports "creation failed") must
+   * not see it. Waits at most `attachTimeoutMs`; a timed-out attach keeps
+   * running in the background (idempotent) with its own catch.
+   */
+  private async attachNewSessionToWorkspace(cwd: string, sessionId: string): Promise<void> {
+    // Structural isolation: the ENTIRE body lives inside this try — including
+    // the `typeof` probes and every error-string interpolation (String(error)
+    // can itself throw on a hostile object). Nothing escapes to the caller.
+    try {
+      const work = (async () => {
+        let registry: WorkspaceRegistryLike | undefined
+        try {
+          registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+        } catch {
+          return // No registry service in this composition — nothing to attach to.
+        }
+        if (registry === undefined || registry === null) return
+
+        const resolve = registry.resolveByPath
+        const hasResolve = typeof resolve === 'function'
+        const hasList = typeof registry.list === 'function'
+        // The real host always has resolveByPath/list/attachSession (see the
+        // WorkspaceEntityLike docs). Missing ones are drift, warned once per
+        // process rather than silently swallowed — but still never thrown.
+        if (!hasResolve) {
+          this.warnWorkspaceDriftOnce('registry-api',
+            `workspace registry API drift — no callable resolveByPath (list callable: ${hasList}); session stays ungrouped`)
+          return
+        }
+        // P2-5: deliberately NO list() fallback. The real `list()` returns
+        // CANONICAL paths, so `entity.path === cwd` (raw spelling) always
+        // misses in the real host; resolveByPath is the only correct route.
+
+        let workspace: WorkspaceEntityLike | undefined
+        try {
+          // Keep the RECEIVER: the real host's resolveByPath is a class method
+          // that reads `this.entities`; calling a detached ref throws and would
+          // silently degrade every /new into an ungrouped session.
+          workspace = await resolve.call(registry, cwd)
+        } catch (error) {
+          this.warn(`workspace lookup for "${cwd}" failed — session stays ungrouped: ${String(error)}`)
+          return
+        }
+        // Path not owned by a workspace is a LEGAL no-op (no warn, no throw).
+        if (workspace === undefined || workspace === null) return
+        if (typeof workspace.attachSession !== 'function') {
+          this.warnWorkspaceDriftOnce('entity-attach',
+            `workspace entity for "${cwd}" has no attachSession — session stays ungrouped`)
+          return
+        }
+
+        try {
+          await workspace.attachSession(SessionId(sessionId))
+        } catch (error) {
+          this.warn(`could not attach session ${sessionId} to its workspace — session stays ungrouped: ${String(error)}`)
+        }
+      })()
+
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let timedOut = false
+      try {
+        await Promise.race([
+          work,
+          new Promise<void>(resolve => {
+            timer = setTimeout(() => { timedOut = true; resolve() }, this.attachTimeoutMs)
+          }),
+        ])
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+      if (timedOut) {
+        // The background `work` still finishes (attachSession is idempotent);
+        // /new is already bound and returns successfully either way.
+        this.warn(`workspace attach for session ${sessionId} timed out after ${this.attachTimeoutMs}ms — session stays ungrouped`)
+      }
+    } catch {
+      // Structural isolation: never fail /new because of a best-effort attach.
+    }
+  }
+
+  /** Warn once per process per drift kind — repeated /new must not flood the log. */
+  private warnWorkspaceDriftOnce(kind: WorkspaceDrift, message: string): void {
+    if (warnedWorkspaceDrifts.has(kind)) return
+    warnedWorkspaceDrifts.add(kind)
+    this.warn(message)
+  }
+
+  /**
    * Resolve the directory the jsonl backend owns for a session id — the same
    * derivation the lock guard and the remote view use (`<sessionRoot>/
    * <projectKey(cwd)>/<id>`); undefined when the session's cwd is unknown
@@ -518,6 +659,11 @@ export class SessionBinder {
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)
+    // Issue #8: register the fresh session on its workspace so the desktop
+    // sidebar groups it. Own try/catch + timeout inside the helper — neither
+    // a failed nor a wedged attach reaches the caller's catch (which would
+    // detach an already-bound session and report a false "creation failed").
+    await this.attachNewSessionToWorkspace(cwd, this.sessionId)
     // The created session's model selection is host-owned — handing the
     // agent's selection surface back lets the bot live-switch the route
     // later (/model). The loop's concrete agent (dsh-agent-loop
