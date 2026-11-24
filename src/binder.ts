@@ -122,6 +122,23 @@ interface AgentsRegistry {
 }
 
 /**
+ * The workspace entity surface /new needs (structural). `attachSession` is
+ * only present on a real registry entity — the opentui-inproc session-shim
+ * returns an empty list and entities without it.
+ */
+interface WorkspaceAttachSeam {
+  attachSession?: (sessionId: SessionId) => Promise<void>
+}
+
+/** The host's workspace registry service (structural, optional). */
+interface WorkspaceRegistrySeam {
+  /** Async in the real host: rejects when the path does not resolve. */
+  resolveByPath?: (path: string) => Promise<WorkspaceAttachSeam | undefined>
+  /** Synchronous in the real host; fallback for older/shim compositions. */
+  list?: () => Array<WorkspaceAttachSeam & { path?: unknown }>
+}
+
+/**
  * One-bound-session-at-a-time binder. Concurrent binds serialize on the
  * in-flight task so `/resume 3` racing `/resume 5` cannot leak handles.
  */
@@ -409,6 +426,41 @@ export class SessionBinder {
   }
 
   /**
+   * Register a freshly created session on its workspace so the desktop
+   * sidebar groups it (the sidebar keys off `workspace.sessionIds`, not the
+   * session's cwd). Strictly best-effort: the session is already created and
+   * bound here, so a missing registry, an unmatched cwd, or a failed attach
+   * must never fail /new — they only leave the session ungrouped. The caller's
+   * error path (which detaches and reports "creation failed") must not see it.
+   */
+  private async attachNewSessionToWorkspace(cwd: string, sessionId: string): Promise<void> {
+    let registry: WorkspaceRegistrySeam | undefined
+    try {
+      registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistrySeam | undefined
+    } catch {
+      return // No registry service in this composition — nothing to attach to.
+    }
+    if (registry === undefined) return
+    let workspace: WorkspaceAttachSeam | undefined
+    try {
+      if (typeof registry.resolveByPath === 'function') {
+        workspace = await registry.resolveByPath(cwd)
+      } else if (typeof registry.list === 'function') {
+        workspace = registry.list().find(entity => entity.path === cwd)
+      }
+    } catch (error) {
+      this.warn(`workspace lookup for "${cwd}" failed — session stays ungrouped: ${String(error)}`)
+      return
+    }
+    if (typeof workspace?.attachSession !== 'function') return
+    try {
+      await workspace.attachSession(SessionId(sessionId))
+    } catch (error) {
+      this.warn(`could not attach session ${sessionId} to its workspace — session stays ungrouped: ${String(error)}`)
+    }
+  }
+
+  /**
    * Resolve the directory the jsonl backend owns for a session id — the same
    * derivation the lock guard and the remote view use (`<sessionRoot>/
    * <projectKey(cwd)>/<id>`); undefined when the session's cwd is unknown
@@ -518,6 +570,11 @@ export class SessionBinder {
     })
     this.owned = handle
     this.sessionId = String(handle.agent.session.id)
+    // Issue #8: register the fresh session on its workspace so the desktop
+    // sidebar groups it. Own try/catch inside the helper — a failed attach
+    // must not reach the caller's catch (which would detach an already-bound
+    // session and report a false "creation failed").
+    await this.attachNewSessionToWorkspace(cwd, this.sessionId)
     // The created session's model selection is host-owned — handing the
     // agent's selection surface back lets the bot live-switch the route
     // later (/model). The loop's concrete agent (dsh-agent-loop

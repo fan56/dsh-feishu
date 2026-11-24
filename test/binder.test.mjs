@@ -199,6 +199,122 @@ test('createNew inherits cwd into meta and keeps the previous handle alive', asy
   assert.equal(reg.handles.filter(h => h.agent.disposed).length, 0)
 })
 
+// -------------------------------------------------- workspace attach (#8) --
+// The sidebar groups sessions by workspace.sessionIds, NOT by session cwd.
+// A /new session must be registered on its workspace entity after creation;
+// every lookup/attach failure degrades to an ungrouped-but-working session.
+
+function makeWorkspaceRegistry({ cwd = '/tmp/work', failAttach = false } = {}) {
+  const calls = { resolveByPath: [], attachSession: [], list: 0 }
+  const entity = {
+    path: cwd,
+    async attachSession(sessionId) {
+      calls.attachSession.push(sessionId)
+      if (failAttach) throw new Error('workspace attach exploded')
+    },
+  }
+  return {
+    cwd,
+    calls,
+    entity,
+    async resolveByPath(path) {
+      calls.resolveByPath.push(path)
+      return path === cwd ? entity : undefined
+    },
+    list() {
+      calls.list++
+      return [entity]
+    },
+  }
+}
+
+function makeAttachContext({ registry, workspaceRegistry, logger } = {}) {
+  return {
+    agents: registry.agents,
+    logger: logger ?? { warnings: [], warn(...args) { this.warnings.push(args.join(' ')) } },
+    get(key) {
+      if (key === 'workspaceRegistry') return workspaceRegistry
+      return undefined
+    },
+  }
+}
+
+test('createNew attaches the fresh session to its workspace by the new session id', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: ws }))
+  const created = await binder.createNew(ws.cwd)
+  assert.equal(created.mode, 'created')
+  assert.deepEqual(ws.calls.resolveByPath, [ws.cwd])
+  assert.deepEqual(ws.calls.attachSession, [created.sessionId], 'attach got the freshly created id')
+  assert.equal(binder.getSessionId(), created.sessionId)
+})
+
+test('a failed workspace attach only warns — the session stays bound and is never detached', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry({ failAttach: true })
+  const ctx = makeAttachContext({ registry: reg, workspaceRegistry: ws })
+  const binder = new SessionBinder(ctx)
+  const created = await binder.createNew(ws.cwd)
+  assert.equal(created.mode, 'created')
+  assert.deepEqual(ws.calls.attachSession, [created.sessionId])
+  assert.equal(binder.getSessionId(), created.sessionId, 'attach failure must not detach')
+  assert.notEqual(binder.getAgent(), undefined, 'the caller can still drive the session')
+  assert.equal(reg.handles[0].agent.disposed, false)
+  assert.ok(ctx.logger.warnings.some(w => w.includes('attach')), 'the attach failure is logged')
+})
+
+test('createNew survives a workspace entity without attachSession (opentui-inproc shim)', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  delete ws.entity.attachSession
+  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: ws }))
+  const created = await binder.createNew(ws.cwd)
+  assert.equal(created.mode, 'created')
+  assert.deepEqual(ws.calls.resolveByPath, [ws.cwd])
+  assert.equal(binder.getSessionId(), created.sessionId)
+})
+
+test('createNew survives an absent workspaceRegistry service (legacy profile)', async () => {
+  const reg = makeRegistry()
+  const binder = new SessionBinder({ agents: reg.agents })
+  const created = await binder.createNew('/tmp/work')
+  assert.equal(created.mode, 'created')
+  assert.equal(binder.getSessionId(), created.sessionId)
+})
+
+test('createNew survives resolveByPath rejecting (missing cwd)', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  ws.resolveByPath = async path => {
+    ws.calls.resolveByPath.push(path)
+    throw new Error('cwd does not resolve')
+  }
+  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: ws }))
+  const created = await binder.createNew(ws.cwd)
+  assert.equal(created.mode, 'created')
+  assert.deepEqual(ws.calls.attachSession, [])
+  assert.equal(binder.getSessionId(), created.sessionId)
+})
+
+test('createNew falls back to list() when resolveByPath is absent, and skips an unmatched list', async () => {
+  const reg = makeRegistry()
+  const ws = makeWorkspaceRegistry()
+  const shim = { list: () => [ws.entity] }
+  const binder = new SessionBinder(makeAttachContext({ registry: reg, workspaceRegistry: shim }))
+  const created = await binder.createNew(ws.cwd)
+  assert.deepEqual(ws.calls.attachSession, [created.sessionId], 'list fallback attaches a matching path')
+
+  const empty = makeRegistry()
+  const none = makeWorkspaceRegistry()
+  const noMatch = { list: () => [{ path: '/somewhere/else' }] }
+  const binder2 = new SessionBinder(makeAttachContext({ registry: empty, workspaceRegistry: noMatch }))
+  const created2 = await binder2.createNew(none.cwd)
+  assert.equal(created2.mode, 'created')
+  assert.deepEqual(none.calls.attachSession, [], 'no match — nothing attached, no throw')
+  assert.equal(binder2.getSessionId(), created2.sessionId)
+})
+
 // ---------------------------------------------------------------------------
 // Cold-arm ownership refusal: the HOST's kernel write lease (0.1.5) refuses a
 // cold resume of a session another process drives — the binder surfaces the
