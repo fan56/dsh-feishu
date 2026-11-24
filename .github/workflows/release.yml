@@ -226,8 +226,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Full fetch so the annotated tag object is available for the
-          # tag-message extraction step below.
+          # tag-message extraction step below. fetch-depth alone does NOT
+          # fetch tags — without fetch-tags, `git tag -l` only sees the
+          # lightweight ref and falls back to the commit subject.
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Read tag message
         id: tag_message
